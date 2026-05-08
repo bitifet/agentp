@@ -1,6 +1,6 @@
 {
   "name": "agentp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pipe prompts into a running OpenCode TUI session and stream the final answer",
   "bin": {
     "agentp": "bin/agentp"
@@ -13,6 +13,11 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bitifet/agentp.git"
+  },
+  "homepage": "https://github.com/bitifet/agentp#readme",
   "engines": {
     "node": ">=18"
   },
