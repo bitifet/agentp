@@ -1,0 +1,23 @@
+{
+  "name": "agentp",
+  "version": "0.1.0",
+  "description": "Pipe prompts into a running OpenCode TUI session and stream the final answer",
+  "bin": {
+    "agentp": "bin/agentp"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "prompt",
+    "opencode"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "type": "commonjs"
+}
