@@ -1,5 +1,10 @@
 # agentp
 
+[![npm version](https://img.shields.io/npm/v/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![npm license](https://img.shields.io/npm/l/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![npm downloads](https://img.shields.io/npm/dm/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![node version](https://img.shields.io/node/v/agentp.svg)](https://www.npmjs.com/package/agentp)
+
 `agentp` is a tiny CLI that pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout.
 
 It is designed for prompt-driven workflows where you want to do things like:
