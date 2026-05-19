@@ -37,7 +37,7 @@ Notes:
 ## Usage
 
 ```bash
-agentp [options] [port]
+agentp [options] [url]
 ```
 
 Options:
@@ -47,7 +47,7 @@ Options:
 
 Arguments:
 
-- `port`: OpenCode TUI port (defaults to `4096`)
+- `url`: OpenCode TUI server URL or port number (defaults to `4096`). Examples: `4096`, `http://localhost:4096`, `http://192.168.1.50:4096`
 
 ## Examples
 
@@ -80,6 +80,12 @@ Capture answer to a file:
 
 ```bash
 cat prompt.txt | agentp > answer.txt
+```
+
+Connect to a remote OpenCode server:
+
+```bash
+cat prompt.txt | agentp http://192.168.1.50:4096
 ```
 
 From Vim/Neovim, send the current visual selection and replace it in place with the assistant answer:
