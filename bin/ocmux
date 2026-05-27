@@ -112,6 +112,35 @@ function paneCount(windowIndex) {
   return r.stdout.trim().split('\n').filter(Boolean).length;
 }
 
+function findWindowsByBasename(name) {
+  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_name}']);
+  if (r.status !== 0) return [];
+  return r.stdout.trim().split('\n').filter(Boolean).filter(w => path.basename(w) === name);
+}
+
+function resolveDir(arg) {
+  const resolved = path.resolve(arg);
+  try {
+    if (fs.statSync(resolved).isDirectory()) return resolved;
+  } catch {
+    // not a valid path or inaccessible
+  }
+
+  if (!arg.includes('/')) {
+    const matches = findWindowsByBasename(arg);
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      console.error(`Error: more than one match for '${arg}':`);
+      for (const m of matches) console.error(`  ${m}`);
+      process.exit(1);
+    }
+  }
+
+  console.error(`Error: invalid directory '${arg}'`);
+  console.error(`Run '${SCRIPT} -h' for help.`);
+  process.exit(1);
+}
+
 function ensureTuiZoomed(windowIndex) {
   const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}|#{window_zoomed_flag}']);
   if (r.status !== 0) return;
@@ -153,6 +182,9 @@ function printHelp() {
   console.error('');
   console.error('Without arguments, searches upward from <directory> (default: $PWD)');
   console.error("for .ocmux.json and switches to that server's tmux window.");
+  console.error('If <directory> is not a valid path, ocmux will match it against the');
+  console.error("basenames of existing sessions' directories. If exactly one matches,");
+  console.error('that session is used.');
   console.error('');
   console.error('Subcommands:');
   console.error('  new     Create a new server in <directory> (default: $PWD).');
@@ -161,6 +193,9 @@ function printHelp() {
   console.error('  kill    Kill the server found upward from <directory>.');
   console.error('          Removes its tmux window and state file.');
   console.error('  list    List all running servers with their directories and URLs.');
+  console.error('');
+  console.error('  --         Treat the next argument as a directory even if it matches');
+  console.error('            a subcommand name (e.g. "ocmux -- kill").');
   console.error('');
   console.error('Options:');
   console.error('  -l       Long output: append " → <dir>" after the URL.');
@@ -405,6 +440,7 @@ function cmdKill(statefile) {
 function main() {
   let longMode = false;
   const positional = [];
+  let dirIsForced = false;
 
   for (const arg of process.argv.slice(2)) {
     if (arg === '-l') {
@@ -414,6 +450,8 @@ function main() {
       process.exit(0);
     } else if (arg === '-h' || arg === '--help') {
       printHelp();
+    } else if (arg === '--') {
+      dirIsForced = true;
     } else if (arg.startsWith('-')) {
       if (arg === '--new' || arg === '--kill') {
         console.error(`Error: '${arg}' is no longer a flag. Use 'ocmux ${arg.slice(2)}' instead.`);
@@ -431,7 +469,14 @@ function main() {
   let targetDir = null;
 
   for (const arg of positional) {
-    if (arg === 'new' || arg === 'kill' || arg === 'list') {
+    if (dirIsForced) {
+      dirIsForced = false;
+      if (targetDir) {
+        console.error(`Error: unexpected argument '${arg}'`);
+        process.exit(1);
+      }
+      targetDir = resolveDir(arg);
+    } else if (arg === 'new' || arg === 'kill' || arg === 'list') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
@@ -442,17 +487,7 @@ function main() {
         console.error(`Error: unexpected argument '${arg}'`);
         process.exit(1);
       }
-      const resolved = path.resolve(arg);
-      try {
-        if (!fs.statSync(resolved).isDirectory()) {
-          console.error(`Error: invalid directory '${arg}'`);
-          process.exit(1);
-        }
-      } catch {
-        console.error(`Error: invalid directory '${arg}'`);
-        process.exit(1);
-      }
-      targetDir = resolved;
+      targetDir = resolveDir(arg);
     }
   }
 
