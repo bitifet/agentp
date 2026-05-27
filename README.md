@@ -1,6 +1,9 @@
 # agentp
 
-`agentp` is a tiny CLI that pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout.
+This package provides two CLI tools:
+
+- **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
+- **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
 
 It is designed for prompt-driven workflows where you want to do things like:
 
@@ -94,7 +97,33 @@ From Vim/Neovim, send the current visual selection and keep QA separators in the
 :'<,'>!agentp --qa
 ```
 
-## How It Works
+## ocmux
+
+Manage OpenCode server + TUI in tmux for project directories.
+
+```bash
+ocmux [-l] [<subcommand>] [<directory>]
+```
+
+Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.ocmux.json` and switches to that server's tmux window.
+
+Subcommands:
+
+- **`new [dir]`** — Create a new server in `dir` (default: `$PWD`). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
+- **`list [-l]`** — List all running servers with their directories, URLs, and status.
+
+### Requirements
+
+- Node.js 18+
+- [tmux](https://github.com/tmux/tmux) — session multiplexer
+- `opencode` binary in PATH (the OpenCode CLI)
+
+### State file
+
+`ocmux` stores per-project state in `.ocmux.json` (contains URL, log path, window index). It searches upward from the target directory, similar to git.
+
+## How agentp Works
 
 1. Clears the current TUI prompt input.
 2. Appends each line from stdin to the TUI prompt.

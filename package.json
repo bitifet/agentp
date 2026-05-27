@@ -3,7 +3,8 @@
   "version": "0.1.1",
   "description": "Pipe prompts into a running OpenCode TUI session and stream the final answer",
   "bin": {
-    "agentp": "bin/agentp"
+    "agentp": "bin/agentp",
+    "ocmux": "bin/ocmux"
   },
   "keywords": [
     "ai",

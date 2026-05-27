@@ -1,0 +1,491 @@
+#!/usr/bin/env node
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const readline = require('readline');
+const { spawnSync, execSync } = require('child_process');
+const os = require('os');
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const { version } = require('../package.json');
+
+const SESSION = 'Opencode';
+const SCRIPT = path.basename(process.argv[1] || 'ocmux');
+const HOME = os.homedir();
+const URL_RE = /opencode server listening on (http:\/\/[^\s]*)/;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function tmux(args) {
+  const result = spawnSync('tmux', args, { encoding: 'utf8', maxBuffer: 1024 * 1024 });
+  if (result.error && result.error.code === 'ENOENT') {
+    console.error('Error: tmux is not installed or not in PATH');
+    process.exit(1);
+  }
+  return result;
+}
+
+function sleep(seconds) {
+  execSync(`sleep ${seconds}`, { stdio: 'ignore' });
+}
+
+function hashDir(dir) {
+  return crypto.createHash('md5').update(dir).digest('hex').slice(0, 12);
+}
+
+function logfileFor(dir) {
+  return `/tmp/opencode-serve-${hashDir(dir)}.log`;
+}
+
+function statefileFor(dir) {
+  return path.join(dir, '.ocmux.json');
+}
+
+function readState(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function findParentStatefile(startDir) {
+  let dir = path.resolve(startDir);
+  while (true) {
+    if (fs.existsSync(path.join(dir, '.ocmux.json'))) {
+      return path.join(dir, '.ocmux.json');
+    }
+    if (dir === HOME || dir === path.dirname(dir)) return null;
+    dir = path.dirname(dir);
+  }
+}
+
+function windowByDir(dir) {
+  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
+  if (r.status !== 0) return null;
+  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
+    const [idx, name] = line.split('\t');
+    if (name === dir) return parseInt(idx, 10);
+  }
+  return null;
+}
+
+function windowNameByIndex(idx) {
+  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
+  if (r.status !== 0) return null;
+  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
+    const [wi, name] = line.split('\t');
+    if (parseInt(wi, 10) === idx) return name;
+  }
+  return null;
+}
+
+function activeWindowIndex() {
+  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index} #{window_active}']);
+  if (r.status !== 0) return null;
+  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
+    const [idx, active] = line.split(' ');
+    if (active === '1') return parseInt(idx, 10);
+  }
+  return null;
+}
+
+function tuiPaneId(windowIndex) {
+  const r = tmux(['list-panes', '-t', `${SESSION}:${windowIndex}`, '-F', '#{pane_id}\t#{pane_current_command}']);
+  if (r.status !== 0) return null;
+  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
+    const [paneId, cmd] = line.split('\t');
+    if (cmd === 'node') return paneId;
+  }
+  return null;
+}
+
+function paneCount(windowIndex) {
+  const r = tmux(['list-panes', '-t', `${SESSION}:${windowIndex}`, '-F', '#{pane_id}']);
+  if (r.status !== 0) return 0;
+  return r.stdout.trim().split('\n').filter(Boolean).length;
+}
+
+function ensureTuiZoomed(windowIndex) {
+  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}|#{window_zoomed_flag}']);
+  if (r.status !== 0) return;
+  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
+    const [wi, zoomed] = line.split('|');
+    if (parseInt(wi, 10) === windowIndex && zoomed === '1') return;
+  }
+  const paneId = tuiPaneId(windowIndex);
+  if (paneId) tmux(['resize-pane', '-Z', '-t', paneId]);
+}
+
+function pinWindowName(windowIndex) {
+  tmux(['set-window-option', '-t', `${SESSION}:${windowIndex}`, 'automatic-rename', 'off']);
+}
+
+function ensureSession() {
+  const r = tmux(['has-session', '-t', SESSION]);
+  if (r.status !== 0) {
+    const rc = tmux(['new-session', '-d', '-s', SESSION]);
+    if (rc.status !== 0) {
+      console.error('Error: failed to create tmux session');
+      process.exit(1);
+    }
+  }
+}
+
+function outputUrl(url, dir, longMode) {
+  if (longMode) {
+    console.log(`${url} → ${dir}`);
+  } else {
+    console.log(url);
+  }
+}
+
+function printHelp() {
+  console.error(`Usage: ${SCRIPT} [-l] [<subcommand>] [<directory>]`);
+  console.error('');
+  console.error('Manage opencode server + TUI in tmux for project directories.');
+  console.error('');
+  console.error('Without arguments, searches upward from <directory> (default: $PWD)');
+  console.error("for .ocmux.json and switches to that server's tmux window.");
+  console.error('');
+  console.error('Subcommands:');
+  console.error('  new     Create a new server in <directory> (default: $PWD).');
+  console.error('          Errors if one already exists there.');
+  console.error('          Warns if a parent directory already has a server.');
+  console.error('  kill    Kill the server found upward from <directory>.');
+  console.error('          Removes its tmux window and state file.');
+  console.error('  list    List all running servers with their directories and URLs.');
+  console.error('');
+  console.error('Options:');
+  console.error('  -l       Long output: append " → <dir>" after the URL.');
+  console.error('  --version  Show version');
+  console.error('  -h       Show this help');
+  console.error('');
+  console.error('See also: agentp -- pipe prompts into OpenCode from stdin');
+  process.exit(0);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: default — switch to an existing server
+// ---------------------------------------------------------------------------
+
+function cmdSwitch(statefile, longMode) {
+  const serverDir = path.dirname(statefile);
+  const state = readState(statefile);
+
+  if (!state || !state.url || state.window_index == null) {
+    console.error(`Error: invalid state file ${statefile}`);
+    process.exit(1);
+  }
+
+  let { url, window_index: winIdx } = state;
+
+  const actualName = windowNameByIndex(winIdx);
+  if (actualName !== serverDir) {
+    const found = windowByDir(serverDir);
+    if (found == null) {
+      console.error(`Error: tmux window for ${serverDir} not found`);
+      console.error("Run 'ocmux new' to create a new server.");
+      process.exit(1);
+    }
+    winIdx = found;
+  }
+
+  pinWindowName(winIdx);
+
+  const tuiPane = tuiPaneId(winIdx);
+  if (!tuiPane) {
+    console.error('TUI pane is dead, restarting...');
+    const count = paneCount(winIdx);
+    if (count >= 2) {
+      const panesR = tmux(['list-panes', '-t', `${SESSION}:${winIdx}`, '-F', '#{pane_id}']);
+      const panes = panesR.stdout.trim().split('\n').filter(Boolean);
+      const lastPane = panes[panes.length - 1];
+      const respawnR = tmux(['respawn-pane', '-k', '-t', lastPane, `opencode attach --continue '${url}'`]);
+      if (respawnR.status !== 0) {
+        tmux(['send-keys', '-t', lastPane, `opencode attach --continue '${url}'`, 'Enter']);
+      }
+    } else {
+      tmux(['split-window', '-v', '-t', `${SESSION}:${winIdx}`, '-c', serverDir,
+        `opencode attach --continue '${url}'`]);
+    }
+  }
+
+  const activeWin = activeWindowIndex();
+  if (activeWin !== winIdx) {
+    tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
+  }
+
+  ensureTuiZoomed(winIdx);
+  outputUrl(url, serverDir, longMode);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: list
+// ---------------------------------------------------------------------------
+
+function cmdList() {
+  const sessionR = tmux(['has-session', '-t', SESSION]);
+  if (sessionR.status !== 0) {
+    console.log('No opencode servers running.');
+    return;
+  }
+
+  const listR = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
+  if (listR.status !== 0 || !listR.stdout.trim()) {
+    console.log('No opencode servers running.');
+    return;
+  }
+
+  const rows = [];
+  for (const line of listR.stdout.trim().split('\n').filter(Boolean)) {
+    const [idx, dir] = line.split('\t');
+    const sf = path.join(dir, '.ocmux.json');
+    if (!fs.existsSync(sf)) continue;
+    const state = readState(sf);
+    if (!state || !state.url) continue;
+    const tui = tuiPaneId(parseInt(idx, 10));
+    rows.push({ url: state.url, dir, status: tui ? 'alive' : 'dead' });
+  }
+
+  if (rows.length === 0) {
+    console.log('No opencode servers running.');
+    return;
+  }
+
+  const urlW = Math.max(...rows.map(r => r.url.length), 3);
+  const dirW = Math.max(...rows.map(r => r.dir.length), 9);
+  const stsW = Math.max(...rows.map(r => r.status.length), 6);
+
+  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+
+  console.log(`${pad('URL', urlW)}  ${pad('Directory', dirW)}  ${pad('Status', stsW)}`);
+  for (const row of rows) {
+    console.log(`${pad(row.url, urlW)}  ${pad(row.dir, dirW)}  ${pad(row.status, stsW)}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: new
+// ---------------------------------------------------------------------------
+
+function cmdNew(targetDir, longMode) {
+  const sf = path.join(targetDir, '.ocmux.json');
+  if (fs.existsSync(sf)) {
+    console.error(`Error: a server already exists in ${targetDir}.`);
+    console.error("Run 'ocmux' without arguments to switch to it, or 'ocmux kill' to stop it first.");
+    process.exit(1);
+  }
+
+  const parent = findParentStatefile(path.dirname(targetDir));
+  if (parent) {
+    const parentDir = path.dirname(parent);
+    console.error(`Warning: there is already an opencode server in ${parentDir}.`);
+    console.error("Running 'ocmux' without arguments would switch to that server.");
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question('Are you sure you want to create a new server here? [y/N] ', (answer) => {
+      rl.close();
+      if (!/^[yY]([eE][sS])?$/.test(answer.trim())) {
+        console.error('Cancelled.');
+        process.exit(0);
+      }
+      doNew(targetDir, longMode);
+    });
+  } else {
+    doNew(targetDir, longMode);
+  }
+}
+
+function doNew(targetDir, longMode) {
+  ensureSession();
+  const lf = logfileFor(targetDir);
+
+  console.error(`Starting opencode server for ${targetDir}...`);
+
+  const rc = tmux(['new-window', '-d', '-t', SESSION, '-n', targetDir, '-c', targetDir,
+    `opencode serve --port 0 2>&1 | tee '${lf}'`]);
+  if (rc.status !== 0) {
+    console.error(`Error: failed to create tmux window: ${rc.stderr}`);
+    process.exit(1);
+  }
+
+  // Wait up to 10s for the URL in the logfile
+  let url = null;
+  for (let i = 0; i < 50; i++) {
+    sleep(0.2);
+    const log = (() => { try { return fs.readFileSync(lf, 'utf8'); } catch { return ''; } })();
+    const m = log.match(URL_RE);
+    if (m) { url = m[1]; break; }
+  }
+
+  if (!url) {
+    console.error('Error: opencode server did not start within 10 seconds');
+    const wi = windowByDir(targetDir);
+    if (wi != null) tmux(['kill-window', '-t', `${SESSION}:${wi}`]);
+    process.exit(1);
+  }
+
+  const winIdx = windowByDir(targetDir);
+  if (winIdx == null) {
+    console.error('Error: window was not created properly');
+    process.exit(1);
+  }
+
+  pinWindowName(winIdx);
+
+  const state = { url, logfile: lf, window_index: winIdx };
+  fs.writeFileSync(path.join(targetDir, '.ocmux.json'), JSON.stringify(state) + '\n');
+
+  tmux(['split-window', '-v', '-t', `${SESSION}:${winIdx}`, '-c', targetDir,
+    `opencode attach --continue '${url}'`]);
+  sleep(0.5);
+  ensureTuiZoomed(winIdx);
+
+  const activeWin = activeWindowIndex();
+  if (activeWin !== winIdx) {
+    tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
+  }
+
+  outputUrl(url, targetDir, longMode);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: kill
+// ---------------------------------------------------------------------------
+
+function cmdKill(statefile) {
+  const serverDir = path.dirname(statefile);
+  const state = readState(statefile);
+
+  if (!state || !state.url || state.window_index == null) {
+    console.error(`Error: invalid state file ${statefile}`);
+    process.exit(1);
+  }
+
+  let { window_index: winIdx } = state;
+
+  console.error(`Stopping server and removing window for ${serverDir}...`);
+
+  const sessionR = tmux(['has-session', '-t', SESSION]);
+  if (sessionR.status === 0) {
+    const actualName = windowNameByIndex(winIdx);
+    if (actualName !== serverDir) {
+      const found = windowByDir(serverDir);
+      if (found != null) winIdx = found;
+    }
+
+    if (winIdx != null) {
+      tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
+      tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`, 'C-c']);
+      sleep(0.3);
+      tmux(['kill-window', '-t', `${SESSION}:${winIdx}`]);
+      console.error('Window removed.');
+    } else {
+      console.error(`Tmux window not found for ${serverDir} (cleaning up state file).`);
+    }
+  } else {
+    console.error("No tmux session '" + SESSION + "' found (cleaning up state file).");
+  }
+
+  fs.unlinkSync(statefile);
+  console.error('Done.');
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
+
+function main() {
+  let longMode = false;
+  const positional = [];
+
+  for (const arg of process.argv.slice(2)) {
+    if (arg === '-l') {
+      longMode = true;
+    } else if (arg === '--version') {
+      console.log(version);
+      process.exit(0);
+    } else if (arg === '-h' || arg === '--help') {
+      printHelp();
+    } else if (arg.startsWith('-')) {
+      if (arg === '--new' || arg === '--kill') {
+        console.error(`Error: '${arg}' is no longer a flag. Use 'ocmux ${arg.slice(2)}' instead.`);
+      } else {
+        console.error(`Error: unknown option '${arg}'`);
+        console.error(`Run '${SCRIPT} -h' for help.`);
+      }
+      process.exit(1);
+    } else {
+      positional.push(arg);
+    }
+  }
+
+  let subcommand = null;
+  let targetDir = null;
+
+  for (const arg of positional) {
+    if (arg === 'new' || arg === 'kill' || arg === 'list') {
+      if (subcommand) {
+        console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
+        process.exit(1);
+      }
+      subcommand = arg;
+    } else {
+      if (targetDir) {
+        console.error(`Error: unexpected argument '${arg}'`);
+        process.exit(1);
+      }
+      const resolved = path.resolve(arg);
+      try {
+        if (!fs.statSync(resolved).isDirectory()) {
+          console.error(`Error: invalid directory '${arg}'`);
+          process.exit(1);
+        }
+      } catch {
+        console.error(`Error: invalid directory '${arg}'`);
+        process.exit(1);
+      }
+      targetDir = resolved;
+    }
+  }
+
+  if (!targetDir) targetDir = process.cwd();
+
+  // Dispatch
+  if (subcommand === 'list') {
+    if (targetDir !== process.cwd()) {
+      console.error("Error: 'list' does not accept a directory path.");
+      process.exit(1);
+    }
+    cmdList();
+  } else if (subcommand === 'kill') {
+    const sf = findParentStatefile(targetDir);
+    if (!sf) {
+      console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
+      console.error("Run 'ocmux new' to create a new server.");
+      process.exit(1);
+    }
+    cmdKill(sf);
+  } else if (subcommand === 'new') {
+    cmdNew(targetDir, longMode);
+  } else {
+    // Default mode
+    const sf = findParentStatefile(targetDir);
+    if (!sf) {
+      console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
+      console.error("Run 'ocmux new' to create a new server.");
+      process.exit(1);
+    }
+    ensureSession();
+    cmdSwitch(sf, longMode);
+  }
+}
+
+main();

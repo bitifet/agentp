@@ -3,4 +3,5 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+**/.ocmux.json
 .DS_Store
