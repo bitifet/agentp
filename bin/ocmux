@@ -66,6 +66,52 @@ function findParentStatefile(startDir) {
   }
 }
 
+function findParentGitDir(startDir, requireDir) {
+  let dir = path.resolve(startDir);
+  let stateDir = null;
+  while (true) {
+    if (!stateDir && fs.existsSync(path.join(dir, '.ocmux.json'))) {
+      stateDir = dir;
+    }
+
+    const gitPath = path.join(dir, '.git');
+    if (fs.existsSync(gitPath)) {
+      if (!requireDir) {
+        return { dir, stateDir, gitPath };
+      }
+      try {
+        if (fs.statSync(gitPath).isDirectory()) {
+          return { dir, stateDir, gitPath };
+        }
+      } catch {
+        // ignore stat errors
+      }
+    }
+
+    if (dir === HOME || dir === path.dirname(dir)) return { dir: null, stateDir, gitPath: null };
+    dir = path.dirname(dir);
+  }
+}
+
+function resolveGitDir(startDir, requireDir, flagLabel) {
+  const result = findParentGitDir(startDir, requireDir);
+  if (!result.dir) {
+    const label = requireDir ? '.git directory' : '.git entry';
+    console.error(`Error: no ${label} found in ${startDir} or any of its parents.`);
+    console.error(`Run '${SCRIPT} new' without ${flagLabel} to create a server in the current directory.`);
+    process.exit(1);
+  }
+
+  if (result.stateDir && result.stateDir !== result.dir) {
+    console.error(`Error: found an existing ocmux server in ${result.stateDir}.`);
+    console.error(`Refusing to create a new server at ${result.dir} because it is above that session.`);
+    console.error(`Move outside ${result.stateDir} or pass an explicit directory.`);
+    process.exit(1);
+  }
+
+  return result.dir;
+}
+
 function windowByDir(dir) {
   const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
   if (r.status !== 0) return null;
@@ -190,6 +236,9 @@ function printHelp() {
   console.error('  new     Create a new server in <directory> (default: $PWD).');
   console.error('          Errors if one already exists there.');
   console.error('          Warns if a parent directory already has a server.');
+  console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
+  console.error('          --GIT  Use the nearest parent with a .git directory only.');
+  console.error('          Refuses to create above an existing .ocmux.json found while searching.');
   console.error('  kill    Kill the server found upward from <directory>.');
   console.error('          Removes its tmux window and state file.');
   console.error('  list    List all running servers with their directories and URLs.');
@@ -198,7 +247,7 @@ function printHelp() {
   console.error('            a subcommand name (e.g. "ocmux -- kill").');
   console.error('');
   console.error('Options:');
-  console.error('  -l       Long output: append " → <dir>" after the URL.');
+  console.error('  -l       Long output: append " → <dir>" after the URL (new/default).');
   console.error('  --version  Show version');
   console.error('  -h       Show this help');
   console.error('');
@@ -439,12 +488,25 @@ function cmdKill(statefile) {
 
 function main() {
   let longMode = false;
+  let gitMode = null;
   const positional = [];
   let dirIsForced = false;
 
   for (const arg of process.argv.slice(2)) {
     if (arg === '-l') {
       longMode = true;
+    } else if (arg === '--git') {
+      if (gitMode && gitMode !== 'nearest') {
+        console.error("Error: cannot combine '--git' with '--GIT'.");
+        process.exit(1);
+      }
+      gitMode = 'nearest';
+    } else if (arg === '--GIT') {
+      if (gitMode && gitMode !== 'root') {
+        console.error("Error: cannot combine '--git' with '--GIT'.");
+        process.exit(1);
+      }
+      gitMode = 'root';
     } else if (arg === '--version') {
       console.log(version);
       process.exit(0);
@@ -495,12 +557,20 @@ function main() {
 
   // Dispatch
   if (subcommand === 'list') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      process.exit(1);
+    }
     if (targetDir !== process.cwd()) {
       console.error("Error: 'list' does not accept a directory path.");
       process.exit(1);
     }
     cmdList();
   } else if (subcommand === 'kill') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      process.exit(1);
+    }
     const sf = findParentStatefile(targetDir);
     if (!sf) {
       console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
@@ -509,8 +579,16 @@ function main() {
     }
     cmdKill(sf);
   } else if (subcommand === 'new') {
+    if (gitMode) {
+      const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
+      targetDir = resolveGitDir(targetDir, gitMode === 'root', flagLabel);
+    }
     cmdNew(targetDir, longMode);
   } else {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      process.exit(1);
+    }
     // Default mode
     const sf = findParentStatefile(targetDir);
     if (!sf) {

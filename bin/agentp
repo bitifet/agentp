@@ -169,7 +169,7 @@ async function main() {
       console.error('');
       console.error('Options:');
       console.error('  --version  Show version');
-      console.error('  --qa       Print question/answer separators before streaming output');
+      console.error('  --qa       Print the original prompt and answer with labels (useful as a filter)');
       console.error('  --help     Show this help message');
       console.error('');
       console.error('Arguments:');
@@ -180,8 +180,9 @@ async function main() {
       console.error('');
       console.error('Examples:');
       console.error('  printf "Summarize this file" | agentp');
-      console.error('  cat prompt.txt | agentp --qa 4096');
-      console.error('  cat prompt.txt | agentp http://192.168.1.50:4096');
+      console.error('  cat prompt.txt | agentp 4096');
+      console.error('  # Vim/Neovim filter, preserving prompt + answer:');
+      console.error("  :'<,'>!agentp --qa");
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;

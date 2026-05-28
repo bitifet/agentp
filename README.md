@@ -39,8 +39,8 @@ npm link
 Notes:
 
 - `agentp` connects to the OpenCode event endpoint over HTTP.
-- In practice this means running `opencode --serve` (or equivalent serve mode) so the port is open.
-- `opencode --attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
+- In practice this means running `opencode serve` (or equivalent serve mode) so the port is open.
+- `opencode attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
 
 ## Usage
 
@@ -50,7 +50,8 @@ agentp [options] [url]
 
 Options:
 
-- `--qa`: print question/answer separators around the streamed answer
+- `--qa`: print the original prompt and answer with labels (useful when used as a filter)
+- `--version`: show version
 - `--help`: show help message
 
 Arguments:
@@ -78,10 +79,10 @@ Send a multi-line prompt from a file:
 cat prompt.txt | agentp
 ```
 
-Use QA separators and explicit port:
+Use an explicit port:
 
 ```bash
-cat prompt.txt | agentp --qa 4096
+cat prompt.txt | agentp 4096
 ```
 
 Capture answer to a file:
@@ -102,7 +103,7 @@ From Vim/Neovim, send the current visual selection and replace it in place with 
 :'<,'>!agentp
 ```
 
-From Vim/Neovim, send the current visual selection and keep QA separators in the same file:
+From Vim/Neovim, send the current visual selection and keep the prompt with the answer:
 
 ```vim
 :'<,'>!agentp --qa
@@ -120,9 +121,23 @@ Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.oc
 
 Subcommands:
 
-- **`new [dir]`** — Create a new server in `dir` (default: `$PWD`). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`new [--git|--GIT] [dir]`** — Create a new server in `dir` (default: `$PWD`). Errors if one already exists there. Warns if a parent directory already has a server.
+  - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
+  - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
-- **`list [-l]`** — List all running servers with their directories, URLs, and status.
+- **`list`** — List all running servers with their directories, URLs, and status.
+
+Options:
+
+- `-l`: long output for default/new commands (append `→ <dir>` after the URL)
+- `--version`: show version
+- `-h`: show help message
+- `--`: treat the next argument as a directory even if it matches a subcommand name
+
+Notes:
+
+- If `<directory>` is not a valid path, `ocmux` tries to match it against the basenames of existing sessions (exact unique match).
+- When using `--git`/`--GIT`, `ocmux` refuses to create a new server above an existing `.ocmux.json` found while searching for the git root.
 
 ### Requirements
 
@@ -144,7 +159,7 @@ Subcommands:
 
 Operational hint:
 
-- You can keep a separate `opencode --attach` view open to see the full run context while `agentp` is used from shell scripts or editor buffers.
+- You can keep a separate `opencode attach` view open to see the full run context while `agentp` is used from shell scripts or editor buffers.
 
 ## License
 
