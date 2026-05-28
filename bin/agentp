@@ -47,8 +47,7 @@ async function submitPrompt(server) {
   await makeRequest(buildJsonRequest(url, 'POST', '{}'), '{}');
 }
 
-async function sendPrompt(port) {
-  const server = `http://localhost:${port}`;
+async function sendPrompt(server) {
   let promptText = '';
 
   await clearPrompt(server);
@@ -71,9 +70,9 @@ const HUMAN_ROW = '👤: ￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣�
 const AGENT_ROW = '🤖: ￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n'
 const FINAL_ROW = '￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n';
 
-function listenForFinalAnswer(port, showFinalRow) {
+function listenForFinalAnswer(server, showFinalRow) {
   return new Promise((resolve, reject) => {
-    const url = `http://localhost:${port}/event`;
+    const url = `${server}/event`;
     const parsed = new URL(url);
 
     const req = http.request({
@@ -155,7 +154,7 @@ function listenForFinalAnswer(port, showFinalRow) {
 }
 
 async function main() {
-  let port = 4096;
+  let serverBase = 'http://localhost:4096';
   let qaMode = false;
 
   const args = process.argv.slice(2);
@@ -164,10 +163,9 @@ async function main() {
       console.log(version);
       process.exit(0);
     } else if (args[i] === '--help') {
-      console.error('Usage: agentp [options] [port]');
+      console.error('Usage: agentp [options] [url]');
       console.error('');
-      console.error('Pipe prompt text to an OpenCode TUI session running on localhost.');
-      console.error('The assistant response is streamed to stdout.');
+      console.error('Pipe prompt text to an OpenCode TUI session and stream the assistant response to stdout.');
       console.error('');
       console.error('Options:');
       console.error('  --version  Show version');
@@ -175,22 +173,26 @@ async function main() {
       console.error('  --help     Show this help message');
       console.error('');
       console.error('Arguments:');
-      console.error('  port       OpenCode TUI port (default: 4096)');
+      console.error('  url        OpenCode TUI server URL or port number (default: 4096)');
+      console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
       console.error('');
       console.error('See also: ocmux -- manage OpenCode tmux sessions (ocmux --help)');
       console.error('');
       console.error('Examples:');
       console.error('  printf "Summarize this file" | agentp');
       console.error('  cat prompt.txt | agentp --qa 4096');
+      console.error('  cat prompt.txt | agentp http://192.168.1.50:4096');
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;
-    } else if (!isNaN(args[i]) && /^\d+$/.test(args[i])) {
-      port = parseInt(args[i], 10);
+    } else if (args[i].includes('://')) {
+      serverBase = args[i].replace(/\/+$/, '');
+    } else if (/^\d+$/.test(args[i])) {
+      serverBase = 'http://localhost:' + args[i];
     }
   }
 
-  const promptText = await sendPrompt(port);
+  const promptText = await sendPrompt(serverBase);
 
   if (qaMode) {
     process.stdout.write(HUMAN_ROW);
@@ -198,7 +200,7 @@ async function main() {
     process.stdout.write(AGENT_ROW);
   }
 
-  await listenForFinalAnswer(port, qaMode);
+  await listenForFinalAnswer(serverBase, qaMode);
 }
 
 main().catch((err) => {

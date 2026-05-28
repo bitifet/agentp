@@ -1,5 +1,10 @@
 # agentp
 
+[![npm version](https://img.shields.io/npm/v/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![npm license](https://img.shields.io/npm/l/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![npm downloads](https://img.shields.io/npm/dm/agentp.svg)](https://www.npmjs.com/package/agentp)
+[![node version](https://img.shields.io/node/v/agentp.svg)](https://www.npmjs.com/package/agentp)
+
 This package provides two CLI tools:
 
 - **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
@@ -40,7 +45,7 @@ Notes:
 ## Usage
 
 ```bash
-agentp [options] [port]
+agentp [options] [url]
 ```
 
 Options:
@@ -50,7 +55,7 @@ Options:
 
 Arguments:
 
-- `port`: OpenCode TUI port (defaults to `4096`)
+- `url`: OpenCode TUI server URL or port number (defaults to `4096`). Examples: `4096`, `http://localhost:4096`, `http://192.168.1.50:4096`
 
 ## Examples
 
@@ -83,6 +88,12 @@ Capture answer to a file:
 
 ```bash
 cat prompt.txt | agentp > answer.txt
+```
+
+Connect to a remote OpenCode server:
+
+```bash
+cat prompt.txt | agentp http://192.168.1.50:4096
 ```
 
 From Vim/Neovim, send the current visual selection and replace it in place with the assistant answer:
