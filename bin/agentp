@@ -222,6 +222,11 @@ async function main() {
   }
 
   await listenForFinalAnswer(serverBase, qaMode);
+
+  if (!process.env.OPENCODE_SERVER_PASSWORD) {
+    process.stderr.write('\n');
+    process.stderr.write('🔓 ⚠️  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.\n');
+  }
 }
 
 main().catch((err) => {
