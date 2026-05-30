@@ -393,12 +393,24 @@ function doNew(targetDir, longMode) {
 
   console.error(`Starting opencode server for ${targetDir}...`);
 
-  const rc = tmux(['new-window', '-d', '-t', SESSION, '-n', targetDir, '-c', targetDir,
-    `opencode serve --port 0 2>&1 | tee '${lf}'`]);
+  // Create window with interactive shell so .bashrc/.zshrc is sourced
+  const rc = tmux(['new-window', '-d', '-t', SESSION, '-n', targetDir, '-c', targetDir]);
   if (rc.status !== 0) {
     console.error(`Error: failed to create tmux window: ${rc.stderr}`);
     process.exit(1);
   }
+
+  const winIdx = windowByDir(targetDir);
+  if (winIdx == null) {
+    console.error('Error: window was not created properly');
+    process.exit(1);
+  }
+
+  pinWindowName(winIdx);
+
+  // Send the command to the interactive shell (like typing it manually)
+  tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
+    `opencode serve --port 0 2>&1 | tee '${lf}'`, 'Enter']);
 
   // Wait up to 10s for the URL in the logfile
   let url = null;
@@ -416,21 +428,16 @@ function doNew(targetDir, longMode) {
     process.exit(1);
   }
 
-  const winIdx = windowByDir(targetDir);
-  if (winIdx == null) {
-    console.error('Error: window was not created properly');
-    process.exit(1);
-  }
-
-  pinWindowName(winIdx);
-
   const state = { url, logfile: lf, window_index: winIdx };
   fs.writeFileSync(path.join(targetDir, '.ocmux.json'), JSON.stringify(state) + '\n');
 
-  tmux(['split-window', '-v', '-t', `${SESSION}:${winIdx}`, '-c', targetDir,
-    `opencode attach --continue '${url}'`]);
+  const splitResult = tmux(['split-window', '-v', '-P', '-F', '#{pane_id}', '-t', `${SESSION}:${winIdx}`, '-c', targetDir]);
+  const tuiPane = splitResult.stdout.trim();
+  sleep(0.2);
+  tmux(['send-keys', '-t', tuiPane,
+    `opencode attach --continue '${url}'`, 'Enter']);
   sleep(0.5);
-  ensureTuiZoomed(winIdx);
+  if (tuiPane) tmux(['resize-pane', '-Z', '-t', tuiPane]);
 
   const activeWin = activeWindowIndex();
   if (activeWin !== winIdx) {
