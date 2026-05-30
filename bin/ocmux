@@ -98,7 +98,7 @@ function resolveGitDir(startDir, requireDir, flagLabel) {
   if (!result.dir) {
     const label = requireDir ? '.git directory' : '.git entry';
     console.error(`Error: no ${label} found in ${startDir} or any of its parents.`);
-    console.error(`Run '${SCRIPT} new' without ${flagLabel} to create a server in the current directory.`);
+    console.error(`Run '${SCRIPT} serve' without ${flagLabel} to create a server in the current directory.`);
     process.exit(1);
   }
 
@@ -233,7 +233,8 @@ function printHelp() {
   console.error('that session is used.');
   console.error('');
   console.error('Subcommands:');
-  console.error('  new     Create a new server in <directory> (default: $PWD).');
+  console.error('  serve   Create a server in <directory> (default: $PWD) and attach a TUI.');
+  console.error('          Aliased as "new" for backwards compatibility.');
   console.error('          Errors if one already exists there.');
   console.error('          Warns if a parent directory already has a server.');
   console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
@@ -247,7 +248,7 @@ function printHelp() {
   console.error('            a subcommand name (e.g. "ocmux -- kill").');
   console.error('');
   console.error('Options:');
-  console.error('  -l       Long output: append " → <dir>" after the URL (new/default).');
+  console.error('  -l       Long output: append " → <dir>" after the URL (serve/default).');
   console.error('  --version  Show version');
   console.error('  -h       Show this help');
   console.error('');
@@ -275,7 +276,7 @@ function cmdSwitch(statefile, longMode) {
     const found = windowByDir(serverDir);
     if (found == null) {
       console.error(`Error: tmux window for ${serverDir} not found`);
-      console.error("Run 'ocmux new' to create a new server.");
+      console.error("Run 'ocmux serve' to create a new server.");
       process.exit(1);
     }
     winIdx = found;
@@ -522,8 +523,10 @@ function main() {
     } else if (arg === '--') {
       dirIsForced = true;
     } else if (arg.startsWith('-')) {
-      if (arg === '--new' || arg === '--kill') {
-        console.error(`Error: '${arg}' is no longer a flag. Use 'ocmux ${arg.slice(2)}' instead.`);
+      if (arg === '--new') {
+        console.error("Error: '--new' is no longer a flag. Use 'ocmux serve' instead.");
+      } else if (arg === '--kill') {
+        console.error("Error: '--kill' is no longer a flag. Use 'ocmux kill' instead.");
       } else {
         console.error(`Error: unknown option '${arg}'`);
         console.error(`Run '${SCRIPT} -h' for help.`);
@@ -545,7 +548,7 @@ function main() {
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'new' || arg === 'kill' || arg === 'list') {
+    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
@@ -565,7 +568,7 @@ function main() {
   // Dispatch
   if (subcommand === 'list') {
     if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
     if (targetDir !== process.cwd()) {
@@ -575,17 +578,17 @@ function main() {
     cmdList();
   } else if (subcommand === 'kill') {
     if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
     const sf = findParentStatefile(targetDir);
     if (!sf) {
       console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
-      console.error("Run 'ocmux new' to create a new server.");
+      console.error("Run 'ocmux serve' to create a new server.");
       process.exit(1);
     }
     cmdKill(sf);
-  } else if (subcommand === 'new') {
+  } else if (subcommand === 'serve' || subcommand === 'new') {
     if (gitMode) {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
       targetDir = resolveGitDir(targetDir, gitMode === 'root', flagLabel);
@@ -593,14 +596,14 @@ function main() {
     cmdNew(targetDir, longMode);
   } else {
     if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'new'.");
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
     // Default mode
     const sf = findParentStatefile(targetDir);
     if (!sf) {
       console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
-      console.error("Run 'ocmux new' to create a new server.");
+      console.error("Run 'ocmux serve' to create a new server.");
       process.exit(1);
     }
     ensureSession();
