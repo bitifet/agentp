@@ -41,6 +41,7 @@ Notes:
 - `agentp` connects to the OpenCode event endpoint over HTTP.
 - In practice this means running `opencode serve` (or equivalent serve mode) so the port is open.
 - `opencode attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
+- If the OpenCode server is password-protected (`OPENCODE_SERVER_PASSWORD`), both `agentp` and `ocmux` automatically send the required HTTP Basic Auth credentials.
 
 ## Usage
 
@@ -121,7 +122,7 @@ Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.oc
 
 Subcommands:
 
-- **`new [--git|--GIT] [dir]`** — Create a new server in `dir` (default: `$PWD`). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility. Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
@@ -129,7 +130,7 @@ Subcommands:
 
 Options:
 
-- `-l`: long output for default/new commands (append `→ <dir>` after the URL)
+- `-l`: long output for default/serve commands (append `→ <dir>` after the URL)
 - `--version`: show version
 - `-h`: show help message
 - `--`: treat the next argument as a directory even if it matches a subcommand name
