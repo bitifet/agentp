@@ -70,10 +70,18 @@ function convertMarkdownToHtml(text) {
 
     // Text segment
     let html = part;
-    // Inline code (before entity escape so backticks inside entities are not matched)
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    // Escape HTML entities
+    // Escape HTML entities first, then apply markdown transformations
     html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+    // Headings: ### text → <b>text</b>
+    html = html.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
+    // Horizontal rules: --- on its own line
+    html = html.replace(/^\s*-{3,}\s*$/gm, '────────────────────');
+    // Tables: strip leading/trailing pipes
+    html = html.replace(/^\|(.+)\|$/gm, '$1');
+    // Tables: remove separator rows (|---|---| etc)
+    html = html.replace(/^\s*[|:\- ]+\s*$/gm, '');
     // Bold (before italic to avoid ** being partially consumed as *)
     html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
     // Italic
