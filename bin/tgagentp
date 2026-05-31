@@ -90,6 +90,14 @@ function convertMarkdownToHtml(text) {
   }).join('');
 }
 
+// Parse TGAGENTP_ALLOWED_CHAT_IDS env var (comma-separated chat IDs).
+// Returns null when unset (all chats allowed), or an array of IDs to filter.
+function parseAllowlist(raw) {
+  if (!raw || !raw.trim()) return null;
+  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return ids.length > 0 ? ids : null;
+}
+
 // Split text into chunks of at most maxLength characters,
 // breaking at newlines when possible.
 function splitMessage(text, maxLength = 4096) {
@@ -153,6 +161,8 @@ async function main() {
       console.error('  TELEGRAM_BOT_TOKEN         Telegram bot token (required)');
       console.error('  OPENCODE_SERVER_PASSWORD    OpenCode server password (optional)');
       console.error('  OPENCODE_SERVER_USERNAME    OpenCode server username (optional, default: opencode)');
+      console.error('  TGAGENTP_ALLOWED_CHAT_IDS   Comma-separated Telegram chat IDs (optional)');
+      console.error('                               Example: "123456,-789012"');
       console.error('');
       console.error('See also: agentp, ocmux');
       console.error('');
@@ -177,6 +187,18 @@ async function main() {
   }
 
   process.stderr.write(`tgagentp v${version} started. OpenCode server: ${serverBase}\n`);
+
+  if (!process.env.OPENCODE_SERVER_PASSWORD) {
+    process.stderr.write('🔓 ⚠️  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.\n');
+  }
+
+  const allowedChatIds = parseAllowlist(process.env.TGAGENTP_ALLOWED_CHAT_IDS);
+  if (allowedChatIds) {
+    process.stderr.write(`Chat allowlist: ${allowedChatIds.length} chat(s) configured\n`);
+  } else {
+    process.stderr.write('Chat allowlist: not configured (all chats accepted)\n');
+  }
+
   process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
 
   let offset = 0;
@@ -207,11 +229,17 @@ async function main() {
         continue;
       }
 
-      const chatId = msg.chat.id;
+      const chatId = String(msg.chat.id);
       const text = msg.text;
       const from = msg.from?.username
         ? `@${msg.from.username}`
         : [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'unknown';
+
+      // Enforce chat allowlist if configured
+      if (allowedChatIds && !allowedChatIds.includes(chatId)) {
+        process.stderr.write(`[chat ${chatId}] ${from}: blocked (not in allowlist)\n`);
+        continue;
+      }
 
       process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
 
