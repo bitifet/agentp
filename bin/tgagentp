@@ -50,6 +50,35 @@ function sendTelegramMessage(token, chatId, text) {
   return telegramRequest(token, 'sendMessage', { chat_id: chatId, text });
 }
 
+// Split text into chunks of at most maxLength characters,
+// breaking at newlines when possible.
+function splitMessage(text, maxLength = 4096) {
+  if (text.length <= maxLength) return [text];
+  const chunks = [];
+  let start = 0;
+  while (start < text.length) {
+    let end = Math.min(start + maxLength, text.length);
+    if (end < text.length) {
+      const newlinePos = text.lastIndexOf('\n', end);
+      if (newlinePos > start) {
+        end = newlinePos + 1;
+      }
+    }
+    chunks.push(text.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
+// Send a text message to a Telegram chat, splitting into multiple
+// messages if it exceeds the 4096-character limit.
+async function sendLongMessage(token, chatId, text) {
+  const chunks = splitMessage(text);
+  for (const chunk of chunks) {
+    await sendTelegramMessage(token, chatId, chunk);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -143,15 +172,15 @@ async function main() {
       process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
 
       try {
-        await sendText(serverBase, text);
+        await sendText(serverBase, `[Telegram] ${text}`);
         const answer = await listenForFinalAnswer(serverBase);
         if (answer.trim()) {
-          await sendTelegramMessage(token, chatId, answer.trim());
+          await sendLongMessage(token, chatId, answer.trim());
         }
       } catch (err) {
         process.stderr.write(`Error processing message: ${err.message}\n`);
         try {
-          await sendTelegramMessage(token, chatId, `Error: ${err.message}`);
+          await sendLongMessage(token, chatId, `Error: ${err.message}`);
         } catch (_) {}
       }
     }
