@@ -1,0 +1,169 @@
+#!/usr/bin/env node
+
+const https = require('https');
+const { version } = require('../package.json');
+const { sendText, listenForFinalAnswer } = require('../lib/opencode');
+
+// ---------------------------------------------------------------------------
+// Telegram Bot API helpers
+// ---------------------------------------------------------------------------
+
+function telegramRequest(token, method, params) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(params || {});
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${token}/${method}`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (e) {
+          reject(new Error(`Failed to parse Telegram response: ${data}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function getUpdates(token, offset, timeout) {
+  return telegramRequest(token, 'getUpdates', {
+    offset,
+    timeout: timeout != null ? timeout : 30,
+    allowed_updates: ['message'],
+  });
+}
+
+function sendTelegramMessage(token, chatId, text) {
+  return telegramRequest(token, 'sendMessage', { chat_id: chatId, text });
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  let serverBase = 'http://localhost:4096';
+
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--version') {
+      console.log(version);
+      process.exit(0);
+    } else if (args[i] === '--help') {
+      console.error('Usage: tgagentp [options] [url]');
+      console.error('');
+      console.error('Bridge a Telegram bot chat with an OpenCode TUI session.');
+      console.error('Incoming Telegram messages are forwarded to OpenCode; answers are sent back to the chat.');
+      console.error('');
+      console.error('Options:');
+      console.error('  --version  Show version');
+      console.error('  --help     Show this help message');
+      console.error('');
+      console.error('Arguments:');
+      console.error('  url        OpenCode TUI server URL or port number (default: 4096)');
+      console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
+      console.error('');
+      console.error('Environment variables:');
+      console.error('  TELEGRAM_BOT_TOKEN         Telegram bot token (required)');
+      console.error('  OPENCODE_SERVER_PASSWORD    OpenCode server password (optional)');
+      console.error('  OPENCODE_SERVER_USERNAME    OpenCode server username (optional, default: opencode)');
+      console.error('');
+      console.error('See also: agentp, ocmux');
+      console.error('');
+      console.error('Examples:');
+      console.error('  export TELEGRAM_BOT_TOKEN="your-bot-token"');
+      console.error('  tgagentp');
+      console.error('  tgagentp 4096');
+      console.error('  tgagentp http://192.168.1.50:4096');
+      process.exit(0);
+    } else if (args[i].includes('://')) {
+      serverBase = args[i].replace(/\/+$/, '');
+    } else if (/^\d+$/.test(args[i])) {
+      serverBase = 'http://localhost:' + args[i];
+    }
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    console.error('Error: TELEGRAM_BOT_TOKEN environment variable is not set.');
+    console.error('Create a bot with @BotFather on Telegram and export the token before running tgagentp.');
+    process.exit(1);
+  }
+
+  process.stderr.write(`tgagentp v${version} started. OpenCode server: ${serverBase}\n`);
+  process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
+
+  let offset = 0;
+
+  // Poll for updates and forward each text message to OpenCode, sending the answer back.
+  while (true) {
+    let result;
+    try {
+      result = await getUpdates(token, offset, 30);
+    } catch (err) {
+      process.stderr.write(`Polling error: ${err.message}\n`);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+
+    if (!result.ok) {
+      process.stderr.write(`Telegram API error: ${result.description || JSON.stringify(result)}\n`);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+
+    for (const update of result.result) {
+      offset = update.update_id + 1;
+
+      const msg = update.message;
+      if (!msg || typeof msg.text !== 'string') {
+        // Ignore non-text messages (photos, stickers, etc.)
+        continue;
+      }
+
+      const chatId = msg.chat.id;
+      const text = msg.text;
+      const from = msg.from?.username
+        ? `@${msg.from.username}`
+        : [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'unknown';
+
+      process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
+
+      try {
+        await sendText(serverBase, text);
+        const answer = await listenForFinalAnswer(serverBase);
+        if (answer.trim()) {
+          await sendTelegramMessage(token, chatId, answer.trim());
+        }
+      } catch (err) {
+        process.stderr.write(`Error processing message: ${err.message}\n`);
+        try {
+          await sendTelegramMessage(token, chatId, `Error: ${err.message}`);
+        } catch (_) {}
+      }
+    }
+  }
+}
+
+process.on('SIGINT', () => {
+  process.stderr.write('\ntgagentp stopped.\n');
+  process.exit(0);
+});
+
+main().catch((err) => {
+  console.error('Error:', err.message);
+  process.exit(1);
+});

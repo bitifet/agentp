@@ -5,10 +5,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/agentp.svg)](https://www.npmjs.com/package/agentp)
 [![node version](https://img.shields.io/node/v/agentp.svg)](https://www.npmjs.com/package/agentp)
 
-This package provides two CLI tools:
+This package provides three CLI tools:
 
 - **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
 - **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
+- **`tgagentp`** — bridges a Telegram bot chat with an OpenCode TUI session (receives messages from Telegram, forwards them to OpenCode, sends answers back)
 
 It is designed for prompt-driven workflows where you want to do things like:
 
@@ -161,6 +162,56 @@ Notes:
 Operational hint:
 
 - You can keep a separate `opencode attach` view open to see the full run context while `agentp` is used from shell scripts or editor buffers.
+
+## tgagentp
+
+Bridge a Telegram bot chat with an OpenCode TUI session.
+
+```bash
+tgagentp [options] [url]
+```
+
+Keeps running indefinitely. For each text message received from Telegram it:
+
+1. Forwards the message text to the OpenCode server (same protocol as `agentp`).
+2. Waits for the assistant to finish.
+3. Sends the full answer back to the same Telegram chat.
+
+Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
+
+### Setup
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
+2. Export the token as an environment variable before starting `tgagentp`:
+
+```bash
+export TELEGRAM_BOT_TOKEN="your-bot-token-here"
+```
+
+3. Start `tgagentp`:
+
+```bash
+tgagentp
+tgagentp 4096
+tgagentp http://192.168.1.50:4096
+```
+
+### Options
+
+- `--version`: show version
+- `--help`: show help message
+
+### Arguments
+
+- `url`: OpenCode TUI server URL or port number (defaults to `4096`). Same format as `agentp`.
+
+### Environment variables
+
+| Variable | Description |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | **Required.** Telegram bot token from @BotFather. |
+| `OPENCODE_SERVER_PASSWORD` | Optional. OpenCode server HTTP Basic Auth password. |
+| `OPENCODE_SERVER_USERNAME` | Optional. OpenCode server username (default: `opencode`). |
 
 ## License
 
