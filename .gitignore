@@ -5,3 +5,4 @@ yarn-error.log*
 pnpm-debug.log*
 **/.ocmux.json
 .DS_Store
+wt/
