@@ -12,6 +12,8 @@ const {
   tuiPaneId,
   windowByDir,
   windowNameByIndex,
+  activeWindowIndex,
+  paneCount,
   listServers,
 } = require('../lib/ocmux');
 

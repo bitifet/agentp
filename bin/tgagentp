@@ -4,7 +4,7 @@ const https = require('https');
 const path = require('path');
 const { version } = require('../package.json');
 const { sendText, listenForFinalAnswer } = require('../lib/opencode');
-const { listServers } = require('../lib/ocmux');
+const { listServers, activateServer } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -208,10 +208,10 @@ async function cmdServers(token, chatId, args, setServer) {
     }
     let matches = servers.filter(s => s.dir === name);
     if (matches.length === 0) {
-      matches = sessions.filter(s => path.basename(s.dir) === name);
+      matches = servers.filter(s => path.basename(s.dir) === name);
     }
     if (matches.length === 0) {
-      matches = sessions.filter(s => s.dir.includes(name) || path.basename(s.dir).includes(name));
+      matches = servers.filter(s => s.dir.includes(name) || path.basename(s.dir).includes(name));
     }
     if (matches.length === 0) {
       await sendLongMessage(token, chatId, `No server found matching "${name}".`);
@@ -225,6 +225,7 @@ async function cmdServers(token, chatId, args, setServer) {
     }
     const target = matches[0];
     setServer(target.url);
+    activateServer(target.dir, target.index, target.url);
     await sendLongMessage(token, chatId,
       `Switched to server: ${target.url} → ${target.dir}`);
     return;
