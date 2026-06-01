@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 
 const https = require('https');
+const path = require('path');
 const { version } = require('../package.json');
 const { sendText, listenForFinalAnswer } = require('../lib/opencode');
+const { listSessions } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -165,6 +167,85 @@ async function sendLongMessage(token, chatId, text) {
 }
 
 // ---------------------------------------------------------------------------
+// Telegram command handlers
+// ---------------------------------------------------------------------------
+
+async function cmdHelp(token, chatId, args) {
+  if (args.length > 0) {
+    const topic = args[0].toLowerCase();
+    if (topic === 'servers') {
+      await sendLongMessage(token, chatId,
+        '`/servers` — list all opencode servers (ocmux sessions)\n' +
+        '`/servers switch <name>` — switch target server\n\n' +
+        '`<name>` can be a full path or basename of the project directory.');
+      return;
+    }
+    await sendLongMessage(token, chatId,
+      'Unknown topic. Try `/help servers` or just `/help`.');
+    return;
+  }
+  await sendLongMessage(token, chatId,
+    '`/help` — show this message\n' +
+    '`/help <topic>` — detailed help\n' +
+    '`/servers` — list running opencode servers\n' +
+    '`/servers switch <name>` — switch to a different server\n\n' +
+    'Everything else is forwarded to the active server as `[Telegram] <text>`.');
+}
+
+async function cmdServers(token, chatId, args, setServer) {
+  if (args.length > 0 && args[0] === 'switch') {
+    if (args.length < 2) {
+      await sendLongMessage(token, chatId,
+        'Usage: `/servers switch <name>`\n' +
+        '`<name>` can be a full directory path or a basename.');
+      return;
+    }
+    const name = args.slice(1).join(' ');
+    const sessions = listSessions();
+    if (sessions.length === 0) {
+      await sendLongMessage(token, chatId, 'No servers running.');
+      return;
+    }
+    let matches = sessions.filter(s => s.dir === name);
+    if (matches.length === 0) {
+      matches = sessions.filter(s => path.basename(s.dir) === name);
+    }
+    if (matches.length === 0) {
+      matches = sessions.filter(s => s.dir.includes(name) || path.basename(s.dir).includes(name));
+    }
+    if (matches.length === 0) {
+      await sendLongMessage(token, chatId, `No server found matching "${name}".`);
+      return;
+    }
+    if (matches.length > 1) {
+      const list = matches.map(s => `  ${s.url} → ${s.dir}`).join('\n');
+      await sendLongMessage(token, chatId,
+        `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
+      return;
+    }
+    const target = matches[0];
+    setServer(target.url);
+    await sendLongMessage(token, chatId,
+      `Switched to server: ${target.url} → ${target.dir}`);
+    return;
+  }
+
+  // Default: list servers
+  const sessions = listSessions();
+  if (sessions.length === 0) {
+    await sendLongMessage(token, chatId, 'No servers running.');
+    return;
+  }
+  const lines = sessions.map(s => `  ${s.url} → ${s.dir} (${s.status})`);
+  await sendLongMessage(token, chatId, 'Active servers:\n' + lines.join('\n'));
+}
+
+const COMMANDS = {
+  'help': cmdHelp,
+  'servers': cmdServers,
+};
+
+// --------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -234,6 +315,11 @@ async function main() {
 
   process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
 
+  const setServer = (url) => {
+    serverBase = url;
+    process.stderr.write(`Switched to server: ${url}\n`);
+  };
+
   let offset = 0;
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
@@ -275,6 +361,26 @@ async function main() {
       }
 
       process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
+
+      // Intercept /commands
+      if (text.startsWith('/')) {
+        const parts = text.slice(1).split(' ');
+        const cmd = parts[0].toLowerCase();
+        const cmdArgs = parts.slice(1);
+        const handler = COMMANDS[cmd];
+        if (handler) {
+          try {
+            await handler(token, chatId, cmdArgs, setServer);
+          } catch (err) {
+            process.stderr.write(`Error handling /${cmd}: ${err.message}\n`);
+            try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
+          }
+        } else {
+          await sendLongMessage(token, chatId,
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /servers`);
+        }
+        continue;
+      }
 
       try {
         await sendText(serverBase, `[Telegram] ${text}`);

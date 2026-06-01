@@ -6,6 +6,14 @@ const crypto = require('crypto');
 const readline = require('readline');
 const { spawnSync, execSync } = require('child_process');
 const os = require('os');
+const {
+  readState,
+  statefileFor,
+  tuiPaneId,
+  windowByDir,
+  windowNameByIndex,
+  listSessions,
+} = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,18 +49,6 @@ function hashDir(dir) {
 
 function logfileFor(dir) {
   return `/tmp/opencode-serve-${hashDir(dir)}.log`;
-}
-
-function statefileFor(dir) {
-  return path.join(dir, '.ocmux.json');
-}
-
-function readState(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 function findParentStatefile(startDir) {
@@ -110,52 +106,6 @@ function resolveGitDir(startDir, requireDir, flagLabel) {
   }
 
   return result.dir;
-}
-
-function windowByDir(dir) {
-  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
-  if (r.status !== 0) return null;
-  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
-    const [idx, name] = line.split('\t');
-    if (name === dir) return parseInt(idx, 10);
-  }
-  return null;
-}
-
-function windowNameByIndex(idx) {
-  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
-  if (r.status !== 0) return null;
-  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
-    const [wi, name] = line.split('\t');
-    if (parseInt(wi, 10) === idx) return name;
-  }
-  return null;
-}
-
-function activeWindowIndex() {
-  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index} #{window_active}']);
-  if (r.status !== 0) return null;
-  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
-    const [idx, active] = line.split(' ');
-    if (active === '1') return parseInt(idx, 10);
-  }
-  return null;
-}
-
-function tuiPaneId(windowIndex) {
-  const r = tmux(['list-panes', '-t', `${SESSION}:${windowIndex}`, '-F', '#{pane_id}\t#{pane_current_command}']);
-  if (r.status !== 0) return null;
-  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
-    const [paneId, cmd] = line.split('\t');
-    if (cmd === 'node') return paneId;
-  }
-  return null;
-}
-
-function paneCount(windowIndex) {
-  const r = tmux(['list-panes', '-t', `${SESSION}:${windowIndex}`, '-F', '#{pane_id}']);
-  if (r.status !== 0) return 0;
-  return r.stdout.trim().split('\n').filter(Boolean).length;
 }
 
 function findWindowsByBasename(name) {
@@ -316,29 +266,7 @@ function cmdSwitch(statefile, longMode) {
 // ---------------------------------------------------------------------------
 
 function cmdList() {
-  const sessionR = tmux(['has-session', '-t', SESSION]);
-  if (sessionR.status !== 0) {
-    console.log('No opencode servers running.');
-    return;
-  }
-
-  const listR = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}\t#{window_name}']);
-  if (listR.status !== 0 || !listR.stdout.trim()) {
-    console.log('No opencode servers running.');
-    return;
-  }
-
-  const rows = [];
-  for (const line of listR.stdout.trim().split('\n').filter(Boolean)) {
-    const [idx, dir] = line.split('\t');
-    const sf = path.join(dir, '.ocmux.json');
-    if (!fs.existsSync(sf)) continue;
-    const state = readState(sf);
-    if (!state || !state.url) continue;
-    const tui = tuiPaneId(parseInt(idx, 10));
-    rows.push({ url: state.url, dir, status: tui ? 'alive' : 'dead' });
-  }
-
+  const rows = listSessions();
   if (rows.length === 0) {
     console.log('No opencode servers running.');
     return;
