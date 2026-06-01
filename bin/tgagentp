@@ -4,7 +4,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { sendText, listenForFinalAnswer, listSessions, sendToSession, listAgents, listProviders } = require('../lib/opencode.js');
+const { sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, listAgents, listProviders } = require('../lib/opencode.js');
 
 const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
 const { listServers, activateServer } = require('../lib/ocmux.js');
@@ -186,7 +186,9 @@ async function cmdHelp(token, chatId, args) {
     if (topic === 'sessions') {
       await sendLongMessage(token, chatId,
         '`/sessions` — list active sessions (numbered, newest first, max 50)\n' +
-        '`/sessions switch <number-or-name>` — send messages to a specific session\n\n' +
+        '`/sessions switch <number-or-name>` — send messages to a specific session\n' +
+        '`/sessions new [name]` — create a new session\n' +
+        '`/sessions rename <name>` — rename the active session\n\n' +
         'Switch by number (from the list) or by case-insensitive partial name match.\n' +
         'Use `/sessions` to find session numbers.');
       return;
@@ -201,7 +203,18 @@ async function cmdHelp(token, chatId, args) {
     }
     if (topic === 'agents') {
       await sendLongMessage(token, chatId,
-        '`/agents` — list all available agents (name, mode, assigned model, description).');
+        '`/agents` — list all available agents (name, mode, assigned model, description).\n' +
+        '`/agents switch <name>` — switch the active agent. Subsequent messages will use this agent.\n\n' +
+        'Agent switching requires an active session (`/sessions switch` or `/sessions new`).');
+      return;
+    }
+    if (topic === 'session') {
+      await sendLongMessage(token, chatId,
+        '`/session` is an alias for `/sessions`.\n\n' +
+        '`/sessions` — list active sessions\n' +
+        '`/sessions switch <number-or-name>` — switch to a session\n' +
+        '`/sessions new [name]` — create a new session\n' +
+        '`/sessions rename <name>` — rename the active session');
       return;
     }
     if (topic === 'models') {
@@ -212,7 +225,7 @@ async function cmdHelp(token, chatId, args) {
       return;
     }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
@@ -222,16 +235,20 @@ async function cmdHelp(token, chatId, args) {
     '`/cancel` — cancel the running prompt\n' +
     '`/servers` — list running opencode servers\n' +
     '`/servers switch <name>` — switch to a different server\n' +
-    '`/sessions` — list active opencode sessions\n' +
-    '`/sessions switch <number-or-name>` — send messages to a specific session\n' +
+    '`/sessions` — list/create/switch/rename sessions\n' +
+    '`/sessions switch <number-or-name>` — switch to a session\n' +
+    '`/sessions new [name]` — create a new session\n' +
+    '`/sessions rename <name>` — rename the active session\n' +
+    '`/session` — alias for `/sessions`\n' +
     '`/agents` — list available agents\n' +
+    '`/agents switch <name>` — switch active agent\n' +
     '`/models` — list providers and models\n' +
     '`/shutdown` — stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
 async function cmdServers(token, chatId, args, setServer) {
-  if (args.length > 0 && args[0] === 'switch') {
+  if (args.length > 0 && args[0].toLowerCase() === 'switch') {
     if (args.length < 2) {
       await sendLongMessage(token, chatId,
         'Usage: `/servers switch <name>`\n' +
@@ -308,51 +325,106 @@ function sortedSessions(sessions, limit) {
 }
 
 async function cmdSessions(token, chatId, args, setServer, setActiveSession, server) {
-  if (args.length > 0 && args[0] === 'switch') {
-    if (args.length < 2) {
-      await sendLongMessage(token, chatId,
-        'Usage: `/sessions switch <number-or-name>`\n' +
-        'Use `/sessions` to see numbered list. You can switch by number or by name (case-insensitive partial match).');
+  if (args.length > 0) {
+    const sub = args[0].toLowerCase();
+
+    if (sub === 'new') {
+      const title = args.slice(1).join(' ') || undefined;
+      try {
+        const session = await createSession(server, title);
+        const name = session.title || session.slug || session.id;
+        setActiveSession(session.id);
+        selectSession(server, session.id);
+        await sendLongMessage(token, chatId,
+          `Created session: \`${name}\`\nIt is now the active session.`);
+      } catch (err) {
+        await sendLongMessage(token, chatId, `Error creating session: ${err.message}`);
+      }
       return;
     }
-    const query = args.slice(1).join(' ');
-    try {
-      const projectDir = serverDir(server);
-      const sessions = await listSessions(server, projectDir);
-      const filtered = sessions.filter(s => s.agent && (!projectDir || s.directory === projectDir));
-      const sorted = sortedSessions(filtered, 50);
 
-      // Try by position number first
-      const num = parseInt(query, 10);
-      if (/^\d+$/.test(query) && num >= 1 && num <= sorted.length) {
-        const target = sorted[num - 1];
-        setActiveSession(target.id);
-        await sendLongMessage(token, chatId,
-          `Switched to session #${num}: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+    if (sub === 'rename') {
+      if (args.length < 2) {
+        await sendLongMessage(token, chatId, 'Usage: `/sessions rename <name>`');
         return;
       }
-
-      // Try by name (case-insensitive partial match)
-      const q = query.toLowerCase();
-      const matches = sorted.filter(s => sessionName(s).toLowerCase().includes(q));
-      if (matches.length === 0) {
-        await sendLongMessage(token, chatId,
-          `No session matching "${query}". Use /sessions to list active sessions.`);
+      const st = getState(server);
+      if (!st.activeSessionId) {
+        await sendLongMessage(token, chatId, 'No active session. Use `/sessions switch` or `/sessions new` first.');
         return;
       }
-      if (matches.length > 1) {
-        const list = matches.map(s => `  \`${sessionName(s)}\``).join('\n');
+      const newTitle = args.slice(1).join(' ');
+      try {
+        const session = await updateSession(server, st.activeSessionId, newTitle);
+        const name = session.title || session.slug || session.id;
         await sendLongMessage(token, chatId,
-          `Multiple matches for "${query}":\n${list}\n\nPlease be more specific or use a number.`);
-        return;
+          `Renamed session to: \`${name}\``);
+      } catch (err) {
+        await sendLongMessage(token, chatId, `Error renaming session: ${err.message}`);
       }
-      const target = matches[0];
-      setActiveSession(target.id);
-      await sendLongMessage(token, chatId,
-        `Switched to session: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
-    } catch (err) {
-      await sendLongMessage(token, chatId, `Error switching session: ${err.message}`);
+      return;
     }
+
+    if (sub === 'switch') {
+      if (args.length < 2) {
+        await sendLongMessage(token, chatId,
+          'Usage: `/sessions switch <number-or-name>`\n' +
+          'Use `/sessions` to see numbered list. You can switch by number or by name (case-insensitive partial match).');
+        return;
+      }
+      const query = args.slice(1).join(' ');
+      try {
+        const projectDir = serverDir(server);
+        const sessions = await listSessions(server, projectDir);
+        const activeId = getState(server).activeSessionId;
+        const filtered = sessions.filter(s =>
+          (s.agent || s.directory || s.id === activeId) && (!projectDir || s.directory === projectDir));
+        const sorted = sortedSessions(filtered, 50);
+
+        // Try by position number first
+        const num = parseInt(query, 10);
+        if (/^\d+$/.test(query) && num >= 1 && num <= sorted.length) {
+          const target = sorted[num - 1];
+          setActiveSession(target.id);
+          selectSession(server, target.id);
+          await sendLongMessage(token, chatId,
+            `Switched to session #${num}: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+          return;
+        }
+
+        // Try by name (case-insensitive partial match)
+        const q = query.toLowerCase();
+        const matches = sorted.filter(s => sessionName(s).toLowerCase().includes(q));
+        if (matches.length === 0) {
+          await sendLongMessage(token, chatId,
+            `No session matching "${query}". Use /sessions to list active sessions.`);
+          return;
+        }
+        if (matches.length > 1) {
+          const list = matches.map(s => `  \`${sessionName(s)}\``).join('\n');
+          await sendLongMessage(token, chatId,
+            `Multiple matches for "${query}":\n${list}\n\nPlease be more specific or use a number.`);
+          return;
+        }
+        const target = matches[0];
+        setActiveSession(target.id);
+        selectSession(server, target.id);
+        await sendLongMessage(token, chatId,
+          `Switched to session: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+      } catch (err) {
+        await sendLongMessage(token, chatId, `Error switching session: ${err.message}`);
+      }
+      return;
+    }
+
+    // Unknown subcommand
+    await sendLongMessage(token, chatId,
+      `Unknown subcommand: /sessions ${sub}\n\n` +
+      'Usage:\n' +
+      '  `/sessions` — list sessions\n' +
+      '  `/sessions switch <number-or-name>` — switch to a session\n' +
+      '  `/sessions new [name]` — create a new session\n' +
+      '  `/sessions rename <name>` — rename the active session');
     return;
   }
 
@@ -365,8 +437,10 @@ async function cmdSessions(token, chatId, args, setServer, setActiveSession, ser
       return;
     }
 
-    // Client-side filter: matching directory and non-subagent sessions
-    const filtered = sessions.filter(s => s.agent && (!projectDir || s.directory === projectDir));
+    // Show user sessions (have agent or directory) and always include the active session
+    const activeId = getState(server).activeSessionId;
+    const filtered = sessions.filter(s =>
+      (s.agent || s.directory || s.id === activeId) && (!projectDir || s.directory === projectDir));
     const sorted = sortedSessions(filtered, 50);
     if (sorted.length === 0) {
       await sendLongMessage(token, chatId, 'No active sessions.');
@@ -409,7 +483,8 @@ async function cmdSessions(token, chatId, args, setServer, setActiveSession, ser
 
       const name = sessionName(s);
       const pos = idx + 1;
-      lines.push('`' + pos + ' ' + timeLabel + ' – ' + name.replace(/`/g, "'") + '`');
+      const bullet = s.id === activeId ? '▶ ' : ' · ';
+      lines.push('`' + bullet + pos + ' ' + timeLabel + ' – ' + name.replace(/`/g, "'") + '`');
     });
 
     await sendLongMessage(token, chatId, 'Sessions:\n' + lines.join('\n'));
@@ -419,6 +494,46 @@ async function cmdSessions(token, chatId, args, setServer, setActiveSession, ser
 }
 
 async function cmdAgents(token, chatId, args, setServer, setActiveSession, server) {
+  if (args.length > 0 && args[0].toLowerCase() === 'switch') {
+    if (args.length < 2) {
+      await sendLongMessage(token, chatId,
+        'Usage: `/agents switch <name>`\n' +
+        'Use `/agents` to list available agents.');
+      return;
+    }
+    const name = args.slice(1).join(' ');
+    try {
+      const agents = await listAgents(server);
+      if (!agents || agents.length === 0) {
+        await sendLongMessage(token, chatId, 'No agents available.');
+        return;
+      }
+      let matches = agents.filter(a => a.name === name);
+      if (matches.length === 0) {
+        matches = agents.filter(a => a.name.toLowerCase().includes(name.toLowerCase()));
+      }
+      if (matches.length === 0) {
+        await sendLongMessage(token, chatId, `No agent matching "${name}".`);
+        return;
+      }
+      if (matches.length > 1) {
+        const list = matches.map(a => `  \`${a.name}\``).join('\n');
+        await sendLongMessage(token, chatId,
+          `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
+        return;
+      }
+      const target = matches[0];
+      getState(server).activeAgentName = target.name;
+      const mode = target.mode === 'primary' ? '' : ` (${target.mode})`;
+      const model = target.model ? ` — \`${target.model.providerID}/${target.model.modelID}\`` : '';
+      await sendLongMessage(token, chatId,
+        `Switched to agent: **${target.name}**${mode}${model}\nSubsequent messages will use this agent.`);
+    } catch (err) {
+      await sendLongMessage(token, chatId, `Error switching agent: ${err.message}`);
+    }
+    return;
+  }
+
   try {
     const agents = await listAgents(server);
     if (!agents || agents.length === 0) {
@@ -479,9 +594,19 @@ const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
   'sessions': cmdSessions,
+  'session': cmdSessions,
   'agents': cmdAgents,
   'models': cmdModels,
 };
+
+// --------------------------------------------------------------------------
+// Module-level state
+// ---------------------------------------------------------------------------
+
+const serverState = {};
+function getState(url) {
+  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeAgentName: null, taskId: 0 };
+}
 
 // --------------------------------------------------------------------------
 // Main
@@ -556,12 +681,10 @@ async function main() {
     process.stderr.write('Chat allowlist: not configured (all chats accepted)\n');
   }
 
+  let lockedChatId = null;
+
   process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
 
-  const serverState = {};
-  function getState(url) {
-    return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, taskId: 0 };
-  }
   getState(serverBase);
 
   const setServer = (url) => {
@@ -589,7 +712,7 @@ async function main() {
     try {
       let answer;
       if (useSession) {
-        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`);
+        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName);
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
@@ -649,6 +772,7 @@ async function main() {
     lines.push('  • **URL:** `' + serverBase + '`');
     lines.push('  • **Status:** ' + busyInfo);
     lines.push('**Session:** ' + (st.activeSessionId ? '`' + st.activeSessionId + '`' : '*none (TUI+SSE)*'));
+    lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
     await sendLongMessage(token, chatId, lines.join('\n'));
   };
 
@@ -676,7 +800,7 @@ async function main() {
     lines.push('  • **URL:** `' + serverBase + '`');
     lines.push('  • **Status:** ✅ idle');
     lines.push('**Session:** *none (TUI+SSE)*');
-    try { await sendTelegramMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
+    try { await sendLongMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
     try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
   }
 
@@ -715,6 +839,15 @@ async function main() {
       // Enforce chat allowlist if configured
       if (allowedChatIds && !allowedChatIds.includes(chatId)) {
         process.stderr.write(`[chat ${chatId}] ${from}: blocked (not in allowlist)\n`);
+        continue;
+      }
+
+      // Lock to the first chat that connects (single-user guard)
+      if (lockedChatId === null) {
+        lockedChatId = chatId;
+        process.stderr.write(`[chat ${chatId}] ${from}: locked to this chat\n`);
+      } else if (lockedChatId !== chatId) {
+        process.stderr.write(`[chat ${chatId}] ${from}: blocked (locked to ${lockedChatId})\n`);
         continue;
       }
 
