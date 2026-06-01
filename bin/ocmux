@@ -12,7 +12,7 @@ const {
   tuiPaneId,
   windowByDir,
   windowNameByIndex,
-  listSessions,
+  listServers,
 } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
@@ -266,7 +266,7 @@ function cmdSwitch(statefile, longMode) {
 // ---------------------------------------------------------------------------
 
 function cmdList() {
-  const rows = listSessions();
+  const rows = listServers();
   if (rows.length === 0) {
     console.log('No opencode servers running.');
     return;

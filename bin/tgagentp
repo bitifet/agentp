@@ -4,7 +4,7 @@ const https = require('https');
 const path = require('path');
 const { version } = require('../package.json');
 const { sendText, listenForFinalAnswer } = require('../lib/opencode');
-const { listSessions } = require('../lib/ocmux');
+const { listServers } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -201,12 +201,12 @@ async function cmdServers(token, chatId, args, setServer) {
       return;
     }
     const name = args.slice(1).join(' ');
-    const sessions = listSessions();
-    if (sessions.length === 0) {
+    const servers = listServers();
+    if (servers.length === 0) {
       await sendLongMessage(token, chatId, 'No servers running.');
       return;
     }
-    let matches = sessions.filter(s => s.dir === name);
+    let matches = servers.filter(s => s.dir === name);
     if (matches.length === 0) {
       matches = sessions.filter(s => path.basename(s.dir) === name);
     }
@@ -231,12 +231,12 @@ async function cmdServers(token, chatId, args, setServer) {
   }
 
   // Default: list servers
-  const sessions = listSessions();
-  if (sessions.length === 0) {
+  const servers = listServers();
+  if (servers.length === 0) {
     await sendLongMessage(token, chatId, 'No servers running.');
     return;
   }
-  const lines = sessions.map(s => `  ${s.url} → ${s.dir} (${s.status})`);
+  const lines = servers.map(s => `  ${s.url} → ${s.dir} (${s.status})`);
   await sendLongMessage(token, chatId, 'Active servers:\n' + lines.join('\n'));
 }
 
