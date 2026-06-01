@@ -28,6 +28,8 @@ Extracted from `bin/agentp`; used by both `agentp` and `tgagentp`:
 - `clearPrompt(server)`, `appendPrompt(server, text)`, `submitPrompt(server)` — TUI prompt endpoints
 - `sendText(server, text)` — convenience: clear + append + submit in one call
 - `listenForFinalAnswer(server, onText?)` — SSE event stream listener; resolves with full collected text
+- `listSessions(server)` — `GET /session`; returns parsed JSON array of session objects
+- `sendToSession(server, sessionId, text)` — `POST /session/:id/message`; returns concatenated text parts from response
 
 ## OpenCode HTTP protocol (agentp)
 
@@ -37,6 +39,8 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - `POST /tui/append-prompt`
 - `POST /tui/submit-prompt`
 - `GET /event` (SSE stream)
+- `GET /session` — list sessions
+- `POST /session/:id/message` — send message to session (returns parts synchronously)
 
 ## OpenCode tmux session model (ocmux)
 

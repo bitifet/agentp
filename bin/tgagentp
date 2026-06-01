@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 
 const https = require('https');
+const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { sendText, listenForFinalAnswer } = require('../lib/opencode');
-const { listServers, activateServer } = require('../lib/ocmux');
+const { sendText, listenForFinalAnswer, listSessions, sendToSession, listAgents, listProviders } = require('../lib/opencode.js');
+
+const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
+const { listServers, activateServer } = require('../lib/ocmux.js');
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -180,15 +183,50 @@ async function cmdHelp(token, chatId, args) {
         '`<name>` can be a full path or basename of the project directory.');
       return;
     }
+    if (topic === 'sessions') {
+      await sendLongMessage(token, chatId,
+        '`/sessions` — list active sessions (numbered, newest first, max 50)\n' +
+        '`/sessions switch <number-or-name>` — send messages to a specific session\n\n' +
+        'Switch by number (from the list) or by case-insensitive partial name match.\n' +
+        'Use `/sessions` to find session numbers.');
+      return;
+    }
+    if (topic === 'shutdown') {
+      await sendLongMessage(token, chatId,
+        '`/shutdown` — stop tgagentp process\n\n' +
+        'Only available when tgagentp is started with `--dev` flag.\n' +
+        'Useful when running tgagentp in a restart loop:\n' +
+        '`while true; do tgagentp --dev; done`');
+      return;
+    }
+    if (topic === 'agents') {
+      await sendLongMessage(token, chatId,
+        '`/agents` — list all available agents (name, mode, assigned model, description).');
+      return;
+    }
+    if (topic === 'models') {
+      await sendLongMessage(token, chatId,
+        '`/models` — list all providers and their models.\n' +
+        'Shows provider name, connection status, default model, and up to 5 models per provider\n' +
+        'with status, context limit, and input/output costs.');
+      return;
+    }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers` or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
     '`/help` — show this message\n' +
     '`/help <topic>` — detailed help\n' +
+    '`/status` — show current server and session\n' +
+    '`/cancel` — cancel the running prompt\n' +
     '`/servers` — list running opencode servers\n' +
-    '`/servers switch <name>` — switch to a different server\n\n' +
+    '`/servers switch <name>` — switch to a different server\n' +
+    '`/sessions` — list active opencode sessions\n' +
+    '`/sessions switch <number-or-name>` — send messages to a specific session\n' +
+    '`/agents` — list available agents\n' +
+    '`/models` — list providers and models\n' +
+    '`/shutdown` — stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
@@ -224,10 +262,15 @@ async function cmdServers(token, chatId, args, setServer) {
       return;
     }
     const target = matches[0];
-    setServer(target.url);
+    const pending = setServer(target.url);
     activateServer(target.dir, target.index, target.url);
-    await sendLongMessage(token, chatId,
-      `Switched to server: ${target.url} → ${target.dir}`);
+    let msg = `Switched to server: ${target.url} → ${target.dir}`;
+    if (pending && pending.trim()) {
+      await sendLongMessage(token, chatId, msg);
+      await sendLongMessage(token, chatId, pending.trim());
+    } else {
+      await sendLongMessage(token, chatId, msg);
+    }
     return;
   }
 
@@ -241,9 +284,203 @@ async function cmdServers(token, chatId, args, setServer) {
   await sendLongMessage(token, chatId, 'Active servers:\n' + lines.join('\n'));
 }
 
+function sessionName(s) {
+  return s.title || s.slug || s.id;
+}
+
+function normalizeUrl(url) {
+  return url.replace(/\/+$/, '').replace(/^http:\/\/127\.0\.0\.1:/, 'http://localhost:');
+}
+
+function serverDir(serverUrl) {
+  const servers = listServers();
+  const normalized = normalizeUrl(serverUrl);
+  const found = servers.find(s => normalizeUrl(s.url) === normalized);
+  return found ? found.dir : null;
+}
+
+// Sort by time.updated descending, limit to N.
+function sortedSessions(sessions, limit) {
+  return sessions
+    .filter(s => s.time && s.time.updated)
+    .sort((a, b) => b.time.updated - a.time.updated)
+    .slice(0, limit || 50);
+}
+
+async function cmdSessions(token, chatId, args, setServer, setActiveSession, server) {
+  if (args.length > 0 && args[0] === 'switch') {
+    if (args.length < 2) {
+      await sendLongMessage(token, chatId,
+        'Usage: `/sessions switch <number-or-name>`\n' +
+        'Use `/sessions` to see numbered list. You can switch by number or by name (case-insensitive partial match).');
+      return;
+    }
+    const query = args.slice(1).join(' ');
+    try {
+      const projectDir = serverDir(server);
+      const sessions = await listSessions(server, projectDir);
+      const filtered = sessions.filter(s => s.agent && (!projectDir || s.directory === projectDir));
+      const sorted = sortedSessions(filtered, 50);
+
+      // Try by position number first
+      const num = parseInt(query, 10);
+      if (/^\d+$/.test(query) && num >= 1 && num <= sorted.length) {
+        const target = sorted[num - 1];
+        setActiveSession(target.id);
+        await sendLongMessage(token, chatId,
+          `Switched to session #${num}: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+        return;
+      }
+
+      // Try by name (case-insensitive partial match)
+      const q = query.toLowerCase();
+      const matches = sorted.filter(s => sessionName(s).toLowerCase().includes(q));
+      if (matches.length === 0) {
+        await sendLongMessage(token, chatId,
+          `No session matching "${query}". Use /sessions to list active sessions.`);
+        return;
+      }
+      if (matches.length > 1) {
+        const list = matches.map(s => `  \`${sessionName(s)}\``).join('\n');
+        await sendLongMessage(token, chatId,
+          `Multiple matches for "${query}":\n${list}\n\nPlease be more specific or use a number.`);
+        return;
+      }
+      const target = matches[0];
+      setActiveSession(target.id);
+      await sendLongMessage(token, chatId,
+        `Switched to session: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+    } catch (err) {
+      await sendLongMessage(token, chatId, `Error switching session: ${err.message}`);
+    }
+    return;
+  }
+
+  // Default: list sessions
+  try {
+    const projectDir = serverDir(server);
+    const sessions = await listSessions(server, projectDir);
+    if (!sessions || sessions.length === 0) {
+      await sendLongMessage(token, chatId, 'No active sessions.');
+      return;
+    }
+
+    // Client-side filter: matching directory and non-subagent sessions
+    const filtered = sessions.filter(s => s.agent && (!projectDir || s.directory === projectDir));
+    const sorted = sortedSessions(filtered, 50);
+    if (sorted.length === 0) {
+      await sendLongMessage(token, chatId, 'No active sessions.');
+      return;
+    }
+
+    // Build lines with date headings and time labels
+    const now = new Date();
+    const todayStr = now.toLocaleDateString();
+    const oneWeekAgo = new Date(now);
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+    const lines = [];
+    let currentHeading = null;
+
+    sorted.forEach((s, idx) => {
+      const created = new Date(s.time.updated);
+      const isToday = created.toLocaleDateString() === todayStr;
+      const isRecent = created >= oneWeekAgo;
+
+      let heading;
+      if (isToday) {
+        heading = '**Today**';
+      } else if (isRecent) {
+        heading = '**' + created.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + '**';
+      } else {
+        heading = '**' + created.getFullYear() + '-' + String(created.getMonth() + 1).padStart(2, '0') + '**';
+      }
+      if (heading !== currentHeading) {
+        lines.push('');
+        lines.push(heading);
+        currentHeading = heading;
+      }
+
+      const hh = String(created.getHours()).padStart(2, '0');
+      const mm = String(created.getMinutes()).padStart(2, '0');
+      const timeLabel = isRecent
+        ? `[${hh}:${mm}]`
+        : `[${String(created.getDate()).padStart(2, '0')}/${String(created.getMonth() + 1).padStart(2, '0')} - ${hh}:${mm}]`;
+
+      const name = sessionName(s);
+      const pos = idx + 1;
+      lines.push('`' + pos + ' ' + timeLabel + ' – ' + name.replace(/`/g, "'") + '`');
+    });
+
+    await sendLongMessage(token, chatId, 'Sessions:\n' + lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error listing sessions: ${err.message}`);
+  }
+}
+
+async function cmdAgents(token, chatId, args, setServer, setActiveSession, server) {
+  try {
+    const agents = await listAgents(server);
+    if (!agents || agents.length === 0) {
+      await sendLongMessage(token, chatId, 'No agents available.');
+      return;
+    }
+    const lines = agents.map(a => {
+      const mode = a.mode === 'primary' ? '' : ` (${a.mode})`;
+      const model = a.model ? ` — \`${a.model.providerID}/${a.model.modelID}\`` : '';
+      const desc = a.description ? `. ${a.description}` : '';
+      return '**' + a.name + '**' + mode + model + desc;
+    });
+    await sendLongMessage(token, chatId, 'Agents:\n' + lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error listing agents: ${err.message}`);
+  }
+}
+
+async function cmdModels(token, chatId, args, setServer, setActiveSession, server) {
+  try {
+    const result = await listProviders(server);
+    const all = result.all || [];
+    const connectedIds = result.connected || [];
+
+    const filtered = all.filter(p => connectedIds.includes(p.id));
+    if (filtered.length === 0) {
+      await sendLongMessage(token, chatId, 'No connected providers.');
+      return;
+    }
+
+    const lines = [];
+
+    for (const provider of filtered) {
+      lines.push('');
+      lines.push('**' + provider.name + '** ✅');
+
+      const modelEntries = Object.entries(provider.models || {});
+      if (modelEntries.length === 0) continue;
+
+      const shown = modelEntries.slice(0, 5);
+      for (const [id, model] of shown) {
+        const ctx = model.limit ? Math.round(model.limit.context / 1000) + 'K' : '';
+        const cost = model.cost ? ` $${model.cost.input}/${model.cost.output}` : '';
+        lines.push('  `' + id + '`' + (ctx ? ' ' + ctx : '') + cost);
+      }
+      if (modelEntries.length > 5) {
+        lines.push('  *…and ' + (modelEntries.length - 5) + ' more*');
+      }
+    }
+
+    await sendLongMessage(token, chatId, 'Connected providers:\n' + lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error listing models: ${err.message}`);
+  }
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
+  'sessions': cmdSessions,
+  'agents': cmdAgents,
+  'models': cmdModels,
 };
 
 // --------------------------------------------------------------------------
@@ -253,11 +490,15 @@ const COMMANDS = {
 async function main() {
   let serverBase = 'http://localhost:4096';
 
+  let DEV_MODE = false;
+
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--version') {
       console.log(version);
       process.exit(0);
+    } else if (args[i] === '--dev') {
+      DEV_MODE = true;
     } else if (args[i] === '--help') {
       console.error('Usage: tgagentp [options] [url]');
       console.error('');
@@ -265,6 +506,7 @@ async function main() {
       console.error('Incoming Telegram messages are forwarded to OpenCode; answers are sent back to the chat.');
       console.error('');
       console.error('Options:');
+      console.error('  --dev      Enable development mode (adds /shutdown command)');
       console.error('  --version  Show version');
       console.error('  --help     Show this help message');
       console.error('');
@@ -316,12 +558,127 @@ async function main() {
 
   process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
 
+  const serverState = {};
+  function getState(url) {
+    return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, taskId: 0 };
+  }
+  getState(serverBase);
+
   const setServer = (url) => {
     serverBase = url;
+    getState(url);
     process.stderr.write(`Switched to server: ${url}\n`);
+    const p = getState(url).pendingResponse;
+    if (p) {
+      getState(url).pendingResponse = null;
+      return p;
+    }
+    return null;
   };
 
+  const setActiveSession = (id) => {
+    getState(serverBase).activeSessionId = id;
+    process.stderr.write(`Switched to session: ${id}\n`);
+  };
+
+  async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId) {
+    const st = getState(url);
+    const isCancelled = () => getState(url).taskId !== myTaskId;
+    const cancelRef = { current: null };
+    st._cancelRef = cancelRef;
+    try {
+      let answer;
+      if (useSession) {
+        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`);
+      } else {
+        await sendText(url, `[Telegram] ${text}`);
+        answer = await listenForFinalAnswer(url, null, cancelRef);
+      }
+      if (isCancelled()) {
+        process.stderr.write(`  → cancelled, discarding response from ${url}\n`);
+        return;
+      }
+      if (url === serverBase) {
+        if (answer && answer.trim()) {
+          await sendLongMessage(token, chatId, answer.trim());
+        }
+      } else {
+        getState(url).pendingResponse = answer;
+        await sendLongMessage(token, chatId, `✅ Server \`${url}\` finished processing. Switch back to see the response.`);
+      }
+    } catch (err) {
+      if (isCancelled()) {
+        process.stderr.write(`  → cancelled, ignoring error from ${url}: ${err.message}\n`);
+        return;
+      }
+      process.stderr.write(`Error processing message (${url}): ${err.message}\n`);
+      if (url === serverBase) {
+        try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
+      }
+    } finally {
+      if (st._cancelRef === cancelRef) st._cancelRef = null;
+      if (!isCancelled()) {
+        getState(url).busy = false;
+      }
+    }
+  }
+
+  const cmdCancel = async (token, chatId) => {
+    const st = getState(serverBase);
+    if (!st.busy) {
+      await sendLongMessage(token, chatId, 'Nothing to cancel.');
+      return;
+    }
+    st.taskId++;
+    st.busy = false;
+    // Abort the SSE stream so the server stops processing
+    if (st._cancelRef && st._cancelRef.current) {
+      st._cancelRef.current.destroy();
+      st._cancelRef.current = null;
+    }
+    await sendLongMessage(token, chatId, '✅ Cancelled.');
+    process.stderr.write(`  → /cancel on ${serverBase}\n`);
+  }
+
+  const cmdStatus = async (token, chatId) => {
+    const st = getState(serverBase);
+    const busyInfo = st.busy ? '⏳ busy' : '✅ idle';
+    const dir = serverDir(serverBase);
+    const lines = ['**Server:**'];
+    if (dir) lines.push('  • **Path:** `' + dir + '`');
+    lines.push('  • **URL:** `' + serverBase + '`');
+    lines.push('  • **Status:** ' + busyInfo);
+    lines.push('**Session:** ' + (st.activeSessionId ? '`' + st.activeSessionId + '`' : '*none (TUI+SSE)*'));
+    await sendLongMessage(token, chatId, lines.join('\n'));
+  };
+
+  const cmdShutdown = async (token, chatId) => {
+    await sendLongMessage(token, chatId, '👋 Shutting down...');
+    try {
+      fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId));
+    } catch (_) {}
+    try { await getUpdates(token, offset, 1); } catch (_) {}
+    process.stderr.write('/shutdown received, exiting...\n');
+    process.exit(0);
+  };
+
+  const cmds = { ...COMMANDS, status: cmdStatus, cancel: cmdCancel };
+  if (DEV_MODE) cmds.shutdown = cmdShutdown;
+
   let offset = 0;
+
+  // Startup greeting to last-known chat
+  const savedChatId = (() => { try { return fs.readFileSync(STARTUP_CHAT_FILE, 'utf8').trim(); } catch { return null; } })();
+  if (savedChatId) {
+    const dir = serverDir(serverBase);
+    const lines = ['✅ Bot started.', '**Server:**'];
+    if (dir) lines.push('  • **Path:** `' + dir + '`');
+    lines.push('  • **URL:** `' + serverBase + '`');
+    lines.push('  • **Status:** ✅ idle');
+    lines.push('**Session:** *none (TUI+SSE)*');
+    try { await sendTelegramMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
+    try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
+  }
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
   while (true) {
@@ -362,39 +719,38 @@ async function main() {
       }
 
       process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
+      try { fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId)); } catch (_) {}
 
       // Intercept /commands
       if (text.startsWith('/')) {
         const parts = text.slice(1).split(' ');
         const cmd = parts[0].toLowerCase();
         const cmdArgs = parts.slice(1);
-        const handler = COMMANDS[cmd];
+        const handler = cmds[cmd];
         if (handler) {
           try {
-            await handler(token, chatId, cmdArgs, setServer);
+            await handler(token, chatId, cmdArgs, setServer, setActiveSession, serverBase);
           } catch (err) {
             process.stderr.write(`Error handling /${cmd}: ${err.message}\n`);
             try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
           }
         } else {
           await sendLongMessage(token, chatId,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /servers`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models`);
         }
         continue;
       }
 
-      try {
-        await sendText(serverBase, `[Telegram] ${text}`);
-        const answer = await listenForFinalAnswer(serverBase);
-        if (answer.trim()) {
-          await sendLongMessage(token, chatId, answer.trim());
-        }
-      } catch (err) {
-        process.stderr.write(`Error processing message: ${err.message}\n`);
-        try {
-          await sendLongMessage(token, chatId, `Error: ${err.message}`);
-        } catch (_) {}
+      // Non-command message — process in background
+      const st = getState(serverBase);
+      if (st.busy) {
+        await sendLongMessage(token, chatId, '⏳ Server is busy processing a previous message. Please wait for it to finish, or use /cancel to cancel it.');
+        continue;
       }
+      st.busy = true;
+      const myTaskId = ++st.taskId;
+      process.stderr.write(`  → started background processing (task ${myTaskId})\n`);
+      processMessageAsync(chatId, text, serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId);
     }
   }
 }
