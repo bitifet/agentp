@@ -339,6 +339,9 @@ function doNew(targetDir, longMode) {
 
   pinWindowName(winIdx);
 
+  // Truncate log file so stale URL from previous run can't be matched by polling
+  try { fs.truncateSync(lf); } catch { /* may not exist yet */ }
+
   // Send the command to the interactive shell (like typing it manually)
   tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
     `opencode serve --port 0 2>&1 | tee '${lf}'`, 'Enter']);
