@@ -9,7 +9,7 @@ This package provides three CLI tools:
 
 - **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
 - **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
-- **`tgagentp`** — bridges a Telegram bot chat with an OpenCode TUI session (receives messages from Telegram, forwards them to OpenCode, sends answers back)
+- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode TUI sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, and remote restart.
 
 It is designed for prompt-driven workflows where you want to do things like:
 
@@ -123,7 +123,7 @@ Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.oc
 
 Subcommands:
 
-- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility. Errors if one already exists there. Warns if a parent directory already has a server.
+- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
@@ -165,45 +165,58 @@ Operational hint:
 
 ## tgagentp
 
-Bridge a Telegram bot chat with an OpenCode TUI session.
+Bridge a Telegram bot chat with OpenCode TUI sessions managed by `ocmux`.
 
 ```bash
-tgagentp [options] [url]
+tgagentp [options]
 ```
 
-Keeps running indefinitely. For each text message received from Telegram it:
+Keeps running indefinitely. On each text message from Telegram it:
 
-1. Forwards the message text to the OpenCode server (same protocol as `agentp`).
-2. Waits for the assistant to finish.
+1. Routes non-command messages to the current active server's TUI (same protocol as `agentp`).
+2. Waits for the assistant to finish (background async — commands remain responsive).
 3. Sends the full answer back to the same Telegram chat.
 
 Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
+### Slash commands
+
+| Command | Action |
+|---|---|
+| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`) |
+| `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
+| `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
+| `/sessions` | List recent sessions for the current server (max 50, with date headings) |
+| `/sessions switch <number\|name>` | Switch active session by position or partial name match |
+| `/agents` | List available agents (name, mode, model, description) |
+| `/models` | List connected providers with model counts, context limits, and costs |
+| `/status` | Show current server path, URL, busy status, and active session |
+| `/cancel` | Cancel the current AI response for the active server |
+| `/shutdown` | (requires `--dev`) Stop tgagentp gracefully; acknowledge offset and exit |
+
+### Per-server state
+
+`tgagentp` tracks state independently per server URL: busy/idle status, pending response, active session ID, and cancellation token. Switching servers while one is busy stores the answer as pending — switching back delivers it.
+
 ### Setup
 
 1. Create a bot with [@BotFather](https://t.me/BotFather) on Telegram and copy the token.
-2. Export the token as an environment variable before starting `tgagentp`:
+2. Export the token and start `tgagentp`:
 
 ```bash
 export TELEGRAM_BOT_TOKEN="your-bot-token-here"
-```
-
-3. Start `tgagentp`:
-
-```bash
 tgagentp
-tgagentp 4096
-tgagentp http://192.168.1.50:4096
 ```
 
 ### Options
 
 - `--version`: show version
 - `--help`: show help message
+- `--dev`: enable `/shutdown` command for remote restart (run via `while true; do tgagentp --dev; done`)
 
-### Arguments
+### Telemetry
 
-- `url`: OpenCode TUI server URL or port number (defaults to `4096`). Same format as `agentp`.
+A startup greeting is sent to the last known chat on boot — includes /status-style server info. The chat ID is persisted at `/tmp/tgagentp-startup-chat`.
 
 ### Environment variables
 
@@ -212,6 +225,7 @@ tgagentp http://192.168.1.50:4096
 | `TELEGRAM_BOT_TOKEN` | **Required.** Telegram bot token from @BotFather. |
 | `OPENCODE_SERVER_PASSWORD` | Optional. OpenCode server HTTP Basic Auth password. |
 | `OPENCODE_SERVER_USERNAME` | Optional. OpenCode server username (default: `opencode`). |
+| `TGAGENTP_ALLOWED_CHAT_IDS` | Optional. Comma-separated Telegram chat IDs that are allowed to use the bot. |
 
 ## License
 
