@@ -596,10 +596,13 @@ async function cmdAgents(token, chatId, args, setServer, setActiveSession, serve
       }
       const target = matches[0];
       getState(server).activeAgentName = target.name;
-      const mode = target.mode === 'primary' ? '' : ` (${target.mode})`;
+      const st = getState(server);
+      if (st.activeSessionId) {
+        selectSession(server, st.activeSessionId);
+      }
       const model = target.model ? ` — \`${target.model.providerID}/${target.model.modelID}\`` : '';
       await sendLongMessage(token, chatId,
-        `Switched to agent: **${target.name}**${mode}${model}\nSubsequent messages will use this agent.`);
+        `Switched to agent: **${target.name}**${model}\nSubsequent messages will use this agent.`);
     } catch (err) {
       await sendLongMessage(token, chatId, `Error switching agent: ${err.message}`);
     }
