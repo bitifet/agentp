@@ -598,6 +598,7 @@ async function cmdAgents(token, chatId, args, setServer, setActiveSession, serve
       getState(server).activeAgentName = target.name;
       const st = getState(server);
       if (st.activeSessionId) {
+        updateSession(server, st.activeSessionId, undefined, target.name);
         selectSession(server, st.activeSessionId);
       }
       const model = target.model ? ` — \`${target.model.providerID}/${target.model.modelID}\`` : '';
