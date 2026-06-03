@@ -233,7 +233,7 @@ async function cmdHelp(token, chatId, args) {
     }
     if (topic === 'agents') {
       await sendLongMessage(token, chatId,
-        '`/agents` — list all available agents (name, mode, assigned model, description).\n' +
+        '`/agents` — list primary agents (with ▶ marker for the active one).\n' +
         '`/agents switch <name>` — switch the active agent. Subsequent messages will use this agent.\n\n' +
         'Agent switching requires an active session (`/sessions switch` or `/sessions new`).');
       return;
@@ -612,13 +612,19 @@ async function cmdAgents(token, chatId, args, setServer, setActiveSession, serve
       await sendLongMessage(token, chatId, 'No agents available.');
       return;
     }
-    const lines = agents.map(a => {
-      const mode = a.mode === 'primary' ? '' : ` (${a.mode})`;
+    const primary = agents.filter(a => a.mode === 'primary');
+    if (primary.length === 0) {
+      await sendLongMessage(token, chatId, 'No primary agents available.');
+      return;
+    }
+    const activeAgentName = getState(server).activeAgentName;
+    const lines = primary.map(a => {
+      const bullet = a.name === activeAgentName ? '▶ ' : ' · ';
       const model = a.model ? ` — \`${a.model.providerID}/${a.model.modelID}\`` : '';
       const desc = a.description ? `. ${a.description}` : '';
-      return '**' + a.name + '**' + mode + model + desc;
+      return bullet + '**' + a.name + '**' + model + desc;
     });
-    await sendLongMessage(token, chatId, 'Agents:\n' + lines.join('\n'));
+    await sendLongMessage(token, chatId, 'Primary agents:\n' + lines.join('\n'));
   } catch (err) {
     await sendLongMessage(token, chatId, `Error listing agents: ${err.message}`);
   }
