@@ -2,7 +2,7 @@
 
 ## Three binaries, all registered
 
-- `bin/agentp` (Node.js) — registered in `package.json` `"bin"` — pipes stdin → opencode TUI
+- `bin/agentp` (Node.js) — registered in `package.json` `"bin"` — pipes stdin → opencode session
 - `bin/ocmux` (Node.js) — registered in `package.json` `"bin"` — manages opencode tmux sessions
 - `bin/tgagentp` (Node.js) — registered in `package.json` `"bin"` — bridges Telegram bot ↔ opencode TUI
 
@@ -37,7 +37,7 @@ Extracted from `bin/agentp`; used by both `agentp` and `tgagentp`:
 - `listenForFinalAnswer(server, onText?, cancelRef?)` — SSE event stream listener; `cancelRef` allows true server-side abort via `req.destroy()`
 - `listSessions(server, directory?)` — `GET /session`; returns parsed JSON array; optional `?directory=` filter
 - `createSession(server, title?)` — `POST /session`; returns the created `Session` object; optional `title`
-- `updateSession(server, sessionId, title)` — `PATCH /session/:id`; returns the updated `Session` object
+- `updateSession(server, sessionId, title, agent?)` — `PATCH /session/:id`; returns the updated `Session` object; optional `agent` to set the session's agent
 - `sendToSession(server, sessionId, text, agent?)` — `POST /session/:id/message`; returns concatenated text parts from response; optional `agent` to handle the message
 - `selectSession(server, sessionId)` — `POST /session/:id/select`; tells the TUI to navigate to the given session (silently ignores 404 if the endpoint isn't available in older opencode versions)
 - `listAgents(server)` — `GET /agent`; returns parsed JSON array of agent objects
@@ -77,7 +77,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 - Single tmux session named `"Opencode"`
 - Windows named by full project directory path
-- Server pane runs `opencode serve --port 0` (via send-keys → interactive shell for env var support), TUI pane runs `opencode attach --continue`
+- Server pane runs `opencode serve --port 0` (via send-keys → interactive shell for env var support), TUI pane runs `opencode attach --continue`; `ocmux serve --print-logs` adds `--print-logs` to the serve command
 - Log file per project: `/tmp/opencode-serve-<hashDir(dir)>.log` — captured via `tee`, read by ocmux polling loop
 - Per-project `.ocmux.json` with upward directory search (git-like)
 - Auto-restarts dead TUI panes on switch (respawn-pane or split-window)
@@ -112,7 +112,6 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 - agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints
 - ocmux `--print-logs` flag — pass-through to `opencode serve --print-logs` (prints server logs to stderr in the server pane)
-- `ocmux serve --print-logs` for server log tailing
 - /agents lists only primary agents with ▶ active marker
 - /agents switch calls `updateSession(agent)` to persist agent on session + `selectSession` to refresh TUI
 - Logging rebalance: stdout for info, stderr for errors/debug/trace, `--verbose` flag, `2>/dev/null` default usage
