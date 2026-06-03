@@ -42,7 +42,7 @@ Shared ocmux session discovery; used by both `bin/ocmux` and `bin/tgagentp`:
 
 - `readState(file)` — parses `.ocmux.json`, returns `null` on error
 - `statefileFor(dir)` — `path.join(dir, '.ocmux.json')`
-- `tuiPaneId(windowIndex)` — returns pane ID if TUI process (`node`) is running, `null` if dead
+- `tuiPaneId(windowIndex)` — returns pane ID of the TUI pane (pane index != 0), `null` if dead
 - `windowByDir(dir)` — returns window index by name match
 - `windowNameByIndex(idx)` — reverse: name from index
 - `activeWindowIndex()` — returns index of currently selected tmux window
@@ -95,7 +95,12 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Pending
 
-*(none)*
+- TUI navigation on session switch (open code API limitation — likely not possible)
+- `--print-logs` flag for `ocmux serve`
+
+### In Progress
+
+- Event-driven permission handling via Telegram: `POST /session/:id/prompt_async` + `GET /event` SSE listener for `permission.updated` events + `/allow`, `/reject`, `/always` commands — implemented, pending user testing
 
 ### Done
 

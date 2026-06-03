@@ -4,7 +4,19 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, listAgents, listProviders } = require('../lib/opencode.js');
+const { sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders } = require('../lib/opencode.js');
+
+// Monkey-patch stderr to prefix all output with timestamps
+{
+  const origWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = function (chunk, encoding, cb) {
+    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '');
+    const str = typeof chunk === 'string' ? chunk : chunk.toString(encoding || 'utf8');
+    const lines = str.split('\n');
+    const prefixed = lines.map(l => l ? `[${ts}] ${l}` : l).join('\n');
+    return origWrite(prefixed, encoding, cb);
+  };
+}
 
 const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
 const { listServers, activateServer } = require('../lib/ocmux.js');
@@ -224,8 +236,18 @@ async function cmdHelp(token, chatId, args) {
         'with status, context limit, and input/output costs.');
       return;
     }
+    if (topic === 'allow' || topic === 'reject' || topic === 'always') {
+      await sendLongMessage(token, chatId,
+        '`/allow` — approve a permission request once\n' +
+        '`/reject` — deny a permission request\n' +
+        '`/always` — approve and remember for the session\n\n' +
+        'These commands respond to OpenCode permission prompts forwarded by tgagentp.\n' +
+        'When OpenCode needs approval (e.g. to run a shell command), tgagentp sends a\n' +
+        '🔐 notification to the chat. Use one of these commands to answer.');
+      return;
+    }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
@@ -243,6 +265,7 @@ async function cmdHelp(token, chatId, args) {
     '`/agents` — list available agents\n' +
     '`/agents switch <name>` — switch active agent\n' +
     '`/models` — list providers and models\n' +
+    '`/allow` / `/reject` / `/always` — respond to permission requests\n' +
     '`/shutdown` — stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
@@ -297,7 +320,11 @@ async function cmdServers(token, chatId, args, setServer) {
     await sendLongMessage(token, chatId, 'No servers running.');
     return;
   }
-  const lines = servers.map(s => `  ${s.url} → ${s.dir} (${s.status})`);
+  const activeUrl = normalizeUrl(serverBase);
+  const lines = servers.map(s => {
+    const bullet = normalizeUrl(s.url) === activeUrl ? '▶ ' : ' · ';
+    return bullet + `${s.url} → ${s.dir} (${s.status})`;
+  });
   await sendLongMessage(token, chatId, 'Active servers:\n' + lines.join('\n'));
 }
 
@@ -324,14 +351,16 @@ function sortedSessions(sessions, limit) {
     .slice(0, limit || 50);
 }
 
-// Find the most recently updated session and return its ID.
+// Find the most recently updated session and return its ID and name.
 // Returns null if no sessions exist or the server is unreachable.
 async function discoverActiveSession(server) {
   try {
     const sessions = await listSessions(server);
     if (!sessions || sessions.length === 0) return null;
     const sorted = sortedSessions(sessions, 1);
-    return sorted.length > 0 ? sorted[0].id : null;
+    if (sorted.length === 0) return null;
+    const s = sorted[0];
+    return { id: s.id, name: sessionName(s) };
   } catch {
     return null;
   }
@@ -603,6 +632,56 @@ async function cmdModels(token, chatId, args, setServer, setActiveSession, serve
   }
 }
 
+const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the current state.';
+
+async function cmdAllow(token, chatId, args, setServer, setActiveSession, server) {
+  const st = getState(server);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatId, '/allow' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'once');
+    await sendLongMessage(token, chatId, '✅ Permission approved (once).');
+    process.stderr.write(`  → /allow: ${p.type} ${p.pattern || ''}\n`);
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error: ${err.message}`);
+  }
+}
+
+async function cmdReject(token, chatId, args, setServer, setActiveSession, server) {
+  const st = getState(server);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatId, '/reject' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'reject');
+    await sendLongMessage(token, chatId, '⛔ Permission denied.');
+    process.stderr.write(`  → /reject: ${p.type} ${p.pattern || ''}\n`);
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error: ${err.message}`);
+  }
+}
+
+async function cmdAlways(token, chatId, args, setServer, setActiveSession, server) {
+  const st = getState(server);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatId, '/always' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'always');
+    await sendLongMessage(token, chatId, '✅ Permission approved (always).');
+    process.stderr.write(`  → /always: ${p.type} ${p.pattern || ''}\n`);
+  } catch (err) {
+    await sendLongMessage(token, chatId, `Error: ${err.message}`);
+  }
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -610,6 +689,9 @@ const COMMANDS = {
   'session': cmdSessions,
   'agents': cmdAgents,
   'models': cmdModels,
+  'allow': cmdAllow,
+  'reject': cmdReject,
+  'always': cmdAlways,
 };
 
 // --------------------------------------------------------------------------
@@ -618,7 +700,13 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeAgentName: null, taskId: 0 };
+  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null };
+}
+
+function sessionLabel(st) {
+  if (st.activeSessionName) return '`' + st.activeSessionName + '`';
+  if (st.activeSessionId) return '`' + st.activeSessionId + '`';
+  return '*none (TUI+SSE)*';
 }
 
 // --------------------------------------------------------------------------
@@ -698,13 +786,21 @@ async function main() {
 
   getState(serverBase);
 
-  // Discover the TUI's current session on startup
-  discoverActiveSession(serverBase).then(id => {
-    if (id) {
-      getState(serverBase).activeSessionId = id;
-      process.stderr.write(`  → discovered session: ${id}\n`);
-    }
-  });
+  process.stderr.write('Discovering server state...\n');
+  const [discovered, agents] = await Promise.all([
+    discoverActiveSession(serverBase),
+    listAgents(serverBase).catch(() => []),
+  ]);
+  if (discovered) {
+    getState(serverBase).activeSessionId = discovered.id;
+    getState(serverBase).activeSessionName = discovered.name;
+    process.stderr.write(`  → session: ${discovered.name || discovered.id}\n`);
+  }
+  const defaultAgent = agents.find(a => a.mode === 'primary') || agents[0];
+  if (defaultAgent) {
+    getState(serverBase).activeAgentName = defaultAgent.name;
+    process.stderr.write(`  → agent: ${defaultAgent.name}\n`);
+  }
 
   process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
 
@@ -712,10 +808,19 @@ async function main() {
     serverBase = url;
     getState(url);
     process.stderr.write(`Switched to server: ${url}\n`);
-    const sessionId = await discoverActiveSession(url);
-    if (sessionId) {
-      getState(url).activeSessionId = sessionId;
-      process.stderr.write(`  → discovered session: ${sessionId}\n`);
+    const [discovered, agents] = await Promise.all([
+      discoverActiveSession(url),
+      listAgents(url).catch(() => []),
+    ]);
+    if (discovered) {
+      getState(url).activeSessionId = discovered.id;
+      getState(url).activeSessionName = discovered.name;
+      process.stderr.write(`  → session: ${discovered.name || discovered.id}\n`);
+    }
+    const defaultAgent = agents.find(a => a.mode === 'primary') || agents[0];
+    if (defaultAgent) {
+      getState(url).activeAgentName = defaultAgent.name;
+      process.stderr.write(`  → agent: ${defaultAgent.name}\n`);
     }
     const p = getState(url).pendingResponse;
     if (p) {
@@ -738,15 +843,57 @@ async function main() {
     try {
       let answer;
       if (useSession) {
-        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName);
+        // Event-driven flow: start SSE listener first, then send message async
+        const notifiedPerms = new Set();
+        const ssePromise = listenForSessionEvents(url, sessionId, {
+          onPermission: (perm) => {
+            const st2 = getState(url);
+            const permDump = JSON.stringify(perm);
+            process.stderr.write(`  → permission_asked callback: ${permDump}\n`);
+            st2.pendingPermission = { server: url, sessionId, permissionId: perm.id, type: perm.permission || 'unspecified', pattern: perm.patterns || perm.pattern, title: perm.title };
+            if (!notifiedPerms.has(perm.id)) {
+              notifiedPerms.add(perm.id);
+              const toolStr = perm.permission || 'unspecified';
+              const patternArr = perm.patterns || (perm.pattern ? [perm.pattern] : []);
+              const patternStr = patternArr.join(', ');
+              const msg = '🔐 **Permission needed**\n'
+                + '**Tool:** `' + toolStr + '`\n'
+                + (patternStr ? '**Target:** `' + patternStr + '`\n' : '')
+                + (perm.title ? '**Detail:** ' + perm.title + '\n' : '')
+                + 'Use `/allow` to approve once, `/always` to always allow, or `/reject` to deny.';
+              process.stderr.write(`  → sending permission notification to chat ${chatId}\n`);
+              sendLongMessage(token, chatId, msg)
+                .then(() => process.stderr.write(`  → permission notification sent OK\n`))
+                .catch((err) => process.stderr.write(`  → permission notification failed: ${err.message}\n`));
+            } else {
+              process.stderr.write(`  → permission ${perm.id} already notified, updating pendingPermission only\n`);
+            }
+          },
+          onPermissionReplied: () => {
+            process.stderr.write(`  → permission_replied: clearing pendingPermission\n`);
+            getState(url).pendingPermission = null;
+          },
+        }, cancelRef);
+        // Send message (SSE is already listening — no race)
+        try {
+          await sendToSessionAsync(url, sessionId, `[Telegram] ${text}`, st.activeAgentName);
+        } catch (err) {
+          // Abort SSE listener on send failure to avoid resource leak
+          if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
+          throw err;
+        }
+        // Wait for the SSE listener to collect the full answer
+        answer = await ssePromise;
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
       }
       if (isCancelled()) {
         process.stderr.write(`  → cancelled, discarding response from ${url}\n`);
+        st.pendingPermission = null;
         return;
       }
+      st.pendingPermission = null;
       if (url === serverBase) {
         if (answer && answer.trim()) {
           await sendLongMessage(token, chatId, answer.trim());
@@ -758,6 +905,7 @@ async function main() {
     } catch (err) {
       if (isCancelled()) {
         process.stderr.write(`  → cancelled, ignoring error from ${url}: ${err.message}\n`);
+        st.pendingPermission = null;
         return;
       }
       process.stderr.write(`Error processing message (${url}): ${err.message}\n`);
@@ -765,6 +913,7 @@ async function main() {
         try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
       }
     } finally {
+      st.pendingPermission = null;
       if (st._cancelRef === cancelRef) st._cancelRef = null;
       if (!isCancelled()) {
         getState(url).busy = false;
@@ -797,7 +946,7 @@ async function main() {
     if (dir) lines.push('  • **Path:** `' + dir + '`');
     lines.push('  • **URL:** `' + serverBase + '`');
     lines.push('  • **Status:** ' + busyInfo);
-    lines.push('**Session:** ' + (st.activeSessionId ? '`' + st.activeSessionId + '`' : '*none (TUI+SSE)*'));
+    lines.push('**Session:** ' + sessionLabel(st));
     lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
     await sendLongMessage(token, chatId, lines.join('\n'));
   };
@@ -826,8 +975,8 @@ async function main() {
     if (dir) lines.push('  • **Path:** `' + dir + '`');
     lines.push('  • **URL:** `' + serverBase + '`');
     lines.push('  • **Status:** ✅ idle');
-    const sessionLabel = st.activeSessionId ? '`' + st.activeSessionId + '`' : '*none (TUI+SSE)*';
-    lines.push('**Session:** ' + sessionLabel);
+    lines.push('**Session:** ' + sessionLabel(st));
+    lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
     try { await sendLongMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
     try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
   }
