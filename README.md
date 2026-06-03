@@ -7,9 +7,9 @@
 
 This package provides three CLI tools:
 
-- **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
+- **`agentp`** — pipes prompt text into a running OpenCode session and streams the assistant final answer back to stdout
 - **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
-- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode TUI sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, and remote restart.
+- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session/agent switching, model listing, permission handling, and remote restart.
 
 It is designed for prompt-driven workflows where you want to do things like:
 
@@ -39,7 +39,7 @@ npm link
 
 Notes:
 
-- `agentp` connects to the OpenCode event endpoint over HTTP.
+- `agentp` connects via the OpenCode session API (`POST /session/:id/message`).
 - In practice this means running `opencode serve` (or equivalent serve mode) so the port is open.
 - `opencode attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
 - If the OpenCode server is password-protected (`OPENCODE_SERVER_PASSWORD`), both `agentp` and `ocmux` automatically send the required HTTP Basic Auth credentials.
@@ -123,9 +123,10 @@ Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.oc
 
 Subcommands:
 
-- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`serve [--git|--GIT] [--print-logs] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
+  - `--print-logs` tails the server log file to stdout after startup (Ctrl+C to stop; log output appears in the terminal where `ocmux` was invoked, not inside the tmux pane).
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`list`** — List all running servers with their directories, URLs, and status.
 
@@ -153,11 +154,10 @@ Notes:
 
 ## How agentp Works
 
-1. Clears the current TUI prompt input.
-2. Appends each line from stdin to the TUI prompt.
-3. Submits the prompt.
-4. Listens to the event stream and prints assistant text parts.
-5. Stops when the session reaches idle state.
+1. Reads all stdin into a single prompt string.
+2. Finds the most recently updated session on the server (or creates a new one named `agentp`).
+3. Sends the prompt via the OpenCode session API (`POST /session/:id/message`).
+4. Prints the assistant's response to stdout.
 
 Operational hint:
 
@@ -173,9 +173,9 @@ tgagentp [options]
 
 Keeps running indefinitely. On each text message from Telegram it:
 
-1. Routes non-command messages to the current active server's TUI (same protocol as `agentp`).
-2. Waits for the assistant to finish (background async — commands remain responsive).
-3. Sends the full answer back to the same Telegram chat.
+1. Routes non-command messages to the current active session via `POST /session/:id/prompt_async`.
+2. Streams the answer back to the chat via the event stream (background async — commands remain responsive).
+3. Sends the full answer to the same Telegram chat as a reply to the original message.
 
 Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
@@ -183,16 +183,20 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
 | Command | Action |
 |---|---|
-| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`) |
+| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
 | `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
 | `/sessions switch <number\|name>` | Switch active session by position or partial name match |
-| `/agents` | List available agents (name, mode, model, description) |
+| `/agents` | List primary agents (▶ marker for the active one) |
+| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
 | `/models` | List connected providers with model counts, context limits, and costs |
 | `/status` | Show current server path, URL, busy status, and active session |
 | `/cancel` | Cancel the current AI response for the active server |
 | `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
+| `/allow` | Approve a permission request once |
+| `/reject` | Deny a permission request |
+| `/always` | Approve and remember for the session |
 | `/shutdown [force]` | (requires `--dev`) Stop tgagentp; refuses if busy unless `force` is given |
 
 ### Per-server state

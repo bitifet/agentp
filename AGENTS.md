@@ -67,7 +67,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - `GET /event` (SSE stream)
 - `GET /session` — list sessions (optional `?directory=` filter)
 - `POST /session` — create a new session (optional `{ title? }` body)
-- `PATCH /session/:id` — update session properties (`{ title }`)
+- `PATCH /session/:id` — update session properties (`{ title }`, optional `{ agent }`)
 - `POST /session/:id/select` — tell the TUI to navigate to a session (only with TUI attached)
 - `POST /session/:id/message` — send message to session (returns parts synchronously; optional `agent` field)
 - `GET /agent` — list available agents
@@ -89,10 +89,10 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [port]` | pipe stdin → opencode TUI, stream answer to stdout |
+| `agentp [--qa] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API) |
 | `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`) |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
-| `ocmux serve [dir]` | start opencode serve in a tmux window (primary verb) |
+| `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
 | `ocmux new [dir]` | alias for `serve` (backwards compat, to be removed in 1.0) |
 | `ocmux kill [dir]` | kill server + tmux window |
 | `ocmux list [-l]` | list running servers |
@@ -102,7 +102,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Pending
 
-- `--print-logs` flag for `ocmux serve`
+*(none)*
 
 ### In Progress
 
@@ -110,12 +110,16 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
+- agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints
+- ocmux `--print-logs` flag — tails server log to caller's terminal after startup
+- `ocmux serve --print-logs` for server log tailing
+- /agents lists only primary agents with ▶ active marker
+- /agents switch calls `updateSession(agent)` to persist agent on session + `selectSession` to refresh TUI
 - Logging rebalance: stdout for info, stderr for errors/debug/trace, `--verbose` flag, `2>/dev/null` default usage
 - `/shutdown force` — refuses shutdown when busy unless `force` flag is given; goodbye message includes state
 - `/think [on|off|switch]` — toggle real-time forwarding of model thinking messages to the chat; `--think` CLI flag to start enabled
 - Event-driven permission handling (`POST /session/:id/prompt_async` + SSE listener + `/allow`, `/reject`, `/always` commands) — included in v0.7.0
 - TUI navigation on `/sessions switch` and `/sessions new` — `POST /tui/select-session` now works in opencode 1.15.13 (was: tried second, never reached)
-- /agents switch <name> — switch active agent on the active session
 - /sessions new [name] — create a new session, TUI follows via /session/:id/select
 - /sessions rename <name> — rename the current active session
 - Merge /session into /sessions (keep /session as alias)
