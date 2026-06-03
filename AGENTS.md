@@ -111,7 +111,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 ### Done
 
 - agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints
-- ocmux `--print-logs` flag — tails server log to caller's terminal after startup
+- ocmux `--print-logs` flag — pass-through to `opencode serve --print-logs` (prints server logs to stderr in the server pane)
 - `ocmux serve --print-logs` for server log tailing
 - /agents lists only primary agents with ▶ active marker
 - /agents switch calls `updateSession(agent)` to persist agent on session + `selectSession` to refresh TUI

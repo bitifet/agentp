@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
-const { spawnSync, execSync, spawn } = require('child_process');
+const { spawnSync, execSync } = require('child_process');
 const os = require('os');
 const {
   readState,
@@ -192,7 +192,7 @@ function printHelp() {
   console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
   console.error('          --GIT  Use the nearest parent with a .git directory only.');
   console.error('          Refuses to create above an existing .ocmux.json found while searching.');
-  console.error('          --print-logs  Continuously print server logs to stdout after startup.');
+  console.error(          '          --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
   console.error('  kill    Kill the server found upward from <directory>.');
   console.error('          Removes its tmux window and state file.');
   console.error('  list    List all running servers with their directories and URLs.');
@@ -344,8 +344,9 @@ function doNew(targetDir, longMode, printLogs) {
   try { fs.truncateSync(lf); } catch { /* may not exist yet */ }
 
   // Send the command to the interactive shell (like typing it manually)
+  const serveFlags = printLogs ? '--port 0 --print-logs' : '--port 0';
   tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
-    `opencode serve --port 0 2>&1 | tee '${lf}'`, 'Enter']);
+    `opencode serve ${serveFlags} 2>&1 | tee '${lf}'`, 'Enter']);
 
   // Wait up to 10s for the URL in the logfile.
   // Don't break on first match — keep polling so url ends up holding the
@@ -382,13 +383,6 @@ function doNew(targetDir, longMode, printLogs) {
   }
 
   outputUrl(url, targetDir, longMode);
-
-  if (printLogs) {
-    console.error('Tailing server logs (Ctrl+C to stop)...');
-    const tail = spawn('tail', ['-f', '-n', '+1', lf], { stdio: 'inherit' });
-    tail.on('exit', () => process.exit(0));
-    process.on('SIGINT', () => { tail.kill(); process.exit(0); });
-  }
 }
 
 // ---------------------------------------------------------------------------

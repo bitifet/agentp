@@ -126,7 +126,7 @@ Subcommands:
 - **`serve [--git|--GIT] [--print-logs] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
-  - `--print-logs` tails the server log file to stdout after startup (Ctrl+C to stop; log output appears in the terminal where `ocmux` was invoked, not inside the tmux pane).
+  - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr inside the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`list`** — List all running servers with their directories, URLs, and status.
 
