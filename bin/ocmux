@@ -346,13 +346,15 @@ function doNew(targetDir, longMode) {
   tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
     `opencode serve --port 0 2>&1 | tee '${lf}'`, 'Enter']);
 
-  // Wait up to 10s for the URL in the logfile
+  // Wait up to 10s for the URL in the logfile.
+  // Don't break on first match — keep polling so url ends up holding the
+  // final URL in case the server prints multiple URLs during startup.
   let url = null;
   for (let i = 0; i < 50; i++) {
     sleep(0.2);
     const log = (() => { try { return fs.readFileSync(lf, 'utf8'); } catch { return ''; } })();
     const m = log.match(URL_RE);
-    if (m) { url = m[1]; break; }
+    if (m) url = m[1];
   }
 
   if (!url) {
