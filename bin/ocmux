@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
-const { spawnSync, execSync } = require('child_process');
+const { spawnSync, execSync, spawn } = require('child_process');
 const os = require('os');
 const {
   readState,
@@ -192,6 +192,7 @@ function printHelp() {
   console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
   console.error('          --GIT  Use the nearest parent with a .git directory only.');
   console.error('          Refuses to create above an existing .ocmux.json found while searching.');
+  console.error('          --print-logs  Continuously print server logs to stdout after startup.');
   console.error('  kill    Kill the server found upward from <directory>.');
   console.error('          Removes its tmux window and state file.');
   console.error('  list    List all running servers with their directories and URLs.');
@@ -290,7 +291,7 @@ function cmdList() {
 // Subcommand: new
 // ---------------------------------------------------------------------------
 
-function cmdNew(targetDir, longMode) {
+function cmdNew(targetDir, longMode, printLogs) {
   const sf = path.join(targetDir, '.ocmux.json');
   if (fs.existsSync(sf)) {
     console.error(`Error: a server already exists in ${targetDir}.`);
@@ -311,14 +312,14 @@ function cmdNew(targetDir, longMode) {
         console.error('Cancelled.');
         process.exit(0);
       }
-      doNew(targetDir, longMode);
+      doNew(targetDir, longMode, printLogs);
     });
   } else {
-    doNew(targetDir, longMode);
+    doNew(targetDir, longMode, printLogs);
   }
 }
 
-function doNew(targetDir, longMode) {
+function doNew(targetDir, longMode, printLogs) {
   ensureSession();
   const lf = logfileFor(targetDir);
 
@@ -381,6 +382,13 @@ function doNew(targetDir, longMode) {
   }
 
   outputUrl(url, targetDir, longMode);
+
+  if (printLogs) {
+    console.error('Tailing server logs (Ctrl+C to stop)...');
+    const tail = spawn('tail', ['-f', '-n', '+1', lf], { stdio: 'inherit' });
+    tail.on('exit', () => process.exit(0));
+    process.on('SIGINT', () => { tail.kill(); process.exit(0); });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -432,12 +440,15 @@ function cmdKill(statefile) {
 function main() {
   let longMode = false;
   let gitMode = null;
+  let printLogs = false;
   const positional = [];
   let dirIsForced = false;
 
   for (const arg of process.argv.slice(2)) {
     if (arg === '-l') {
       longMode = true;
+    } else if (arg === '--print-logs') {
+      printLogs = true;
     } else if (arg === '--git') {
       if (gitMode && gitMode !== 'nearest') {
         console.error("Error: cannot combine '--git' with '--GIT'.");
@@ -506,6 +517,10 @@ function main() {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
+    if (printLogs) {
+      console.error("Error: '--print-logs' is only valid with 'serve'.");
+      process.exit(1);
+    }
     if (targetDir !== process.cwd()) {
       console.error("Error: 'list' does not accept a directory path.");
       process.exit(1);
@@ -514,6 +529,10 @@ function main() {
   } else if (subcommand === 'kill') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (printLogs) {
+      console.error("Error: '--print-logs' is only valid with 'serve'.");
       process.exit(1);
     }
     const sf = findParentStatefile(targetDir);
@@ -528,10 +547,14 @@ function main() {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
       targetDir = resolveGitDir(targetDir, gitMode === 'root', flagLabel);
     }
-    cmdNew(targetDir, longMode);
+    cmdNew(targetDir, longMode, printLogs);
   } else {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (printLogs) {
+      console.error("Error: '--print-logs' is only valid with 'serve'.");
       process.exit(1);
     }
     // Default mode
