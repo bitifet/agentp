@@ -109,6 +109,8 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Fix: /sessions switch and /sessions new call selectSession (TUI navigation doesn't work — see With Issues)
 - Fix: active session highlighted with ▶ bullet in session list
 - Message splitting (>4096 chars, breaks at newlines)
+- Fix: tuiPaneId detects 'bun' (opencode 1.15.x) in addition to 'node'
+- Fix: URL polling in ocmux doNew takes last match, not first (more robust with bun startup)
 - lib/ocmux.js shared session discovery, refactor ocmux + tgagentp
 - /cancel with true server-side SSE abort via cancelRef
 - /shutdown (--dev mode) with Telegram offset acknowledgment
