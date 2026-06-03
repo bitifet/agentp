@@ -14,6 +14,13 @@
 - **`"type": "commonjs"`**, requires Node >= 18.
 - **Linux and macOS compatible.** All tools use portable Node.js APIs only.
 
+## Logging conventions (tgagentp)
+
+- **stdout** — informational messages (startup, discovery, session switches)
+- **stderr** — errors (always shown) + trace/debug (only with `--verbose` flag)
+- Default usage for clean console: `tgagentp 2>/dev/null`
+- The `log` helper object at the top of `bin/tgagentp` provides `log.info()`, `log.error()`, and `log.debug()`.
+
 ## `.ocmux.json`
 
 Runtime state file created by `bin/ocmux` (contains URL, log path, and window index). **Not in `.gitignore`** — avoid committing it.
@@ -95,15 +102,19 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Pending
 
-- TUI navigation on session switch (open code API limitation — likely not possible)
 - `--print-logs` flag for `ocmux serve`
 
 ### In Progress
 
-- Event-driven permission handling via Telegram: `POST /session/:id/prompt_async` + `GET /event` SSE listener for `permission.updated` events + `/allow`, `/reject`, `/always` commands — implemented, pending user testing
+*(none)*
 
 ### Done
 
+- Logging rebalance: stdout for info, stderr for errors/debug/trace, `--verbose` flag, `2>/dev/null` default usage
+- `/shutdown force` — refuses shutdown when busy unless `force` flag is given; goodbye message includes state
+- `/think [on|off|switch]` — toggle real-time forwarding of model thinking messages to the chat; `--think` CLI flag to start enabled
+- Event-driven permission handling (`POST /session/:id/prompt_async` + SSE listener + `/allow`, `/reject`, `/always` commands) — included in v0.7.0
+- TUI navigation on `/sessions switch` and `/sessions new` — `POST /tui/select-session` now works in opencode 1.15.13 (was: tried second, never reached)
 - /agents switch <name> — switch active agent on the active session
 - /sessions new [name] — create a new session, TUI follows via /session/:id/select
 - /sessions rename <name> — rename the current active session
@@ -111,7 +122,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Case-insensitive matching for all switch subcommands (/servers, /sessions, /agents)
 - Fix: /sessions filter includes sessions with directory (TUI sessions) + active session exception
 - Fix: /sessions now shows the active session even without agent set (exception in filter)
-- Fix: /sessions switch and /sessions new call selectSession (TUI navigation doesn't work — see With Issues)
+- Fix: /sessions switch and /sessions new call selectSession (TUI navigation didn't work in opencode < 1.15.x)
 - Fix: active session highlighted with ▶ bullet in session list
 - Fix: discover TUI session on startup and server switch via `discoverActiveSession()`
 - Message splitting (>4096 chars, breaks at newlines)
@@ -120,10 +131,6 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - lib/ocmux.js shared session discovery, refactor ocmux + tgagentp
 - /cancel with true server-side SSE abort via cancelRef
 - /shutdown (--dev mode) with Telegram offset acknowledgment
-
-### With Issues
-
-- `/sessions switch` and `/sessions new` — `selectSession` tries `POST /session/:id/select` and `POST /tui/select-session` but the TUI pane doesn't navigate to the session. Message routing (via `activeSessionId` + `sendToSession`) works correctly in the background. This is a known limitation — the TUI must be navigated manually to see the conversation in the UI. The underlying opencode API may lack the needed TUI navigation endpoints.
 
 ### Verified
 

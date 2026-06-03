@@ -6,17 +6,13 @@ const path = require('path');
 const { version } = require('../package.json');
 const { sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders } = require('../lib/opencode.js');
 
-// Monkey-patch stderr to prefix all output with timestamps
-{
-  const origWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = function (chunk, encoding, cb) {
-    const ts = new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '');
-    const str = typeof chunk === 'string' ? chunk : chunk.toString(encoding || 'utf8');
-    const lines = str.split('\n');
-    const prefixed = lines.map(l => l ? `[${ts}] ${l}` : l).join('\n');
-    return origWrite(prefixed, encoding, cb);
-  };
-}
+// Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
+const log = {
+  verbose: false,
+  info(msg) { process.stdout.write(`${new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')} ${msg}\n`); },
+  error(msg) { process.stderr.write(`${msg}\n`); },
+  debug(msg) { if (this.verbose) process.stderr.write(`${msg}\n`); },
+};
 
 const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
 const { listServers, activateServer } = require('../lib/ocmux.js');
@@ -63,9 +59,10 @@ function getUpdates(token, offset, timeout) {
   });
 }
 
-function sendTelegramMessage(token, chatId, text, parseMode) {
+function sendTelegramMessage(token, chatId, text, parseMode, replyTo) {
   const params = { chat_id: chatId, text };
   if (parseMode) params.parse_mode = parseMode;
+  if (replyTo) params.reply_to_message_id = replyTo;
   return telegramRequest(token, 'sendMessage', params);
 }
 
@@ -173,12 +170,32 @@ function splitMessage(text, maxLength = 4096) {
 // Converts Markdown to Telegram HTML formatting.
 // Splits the raw text first, then converts each chunk independently
 // to avoid broken HTML tags across messages.
-async function sendLongMessage(token, chatId, text) {
+async function sendLongMessage(token, chatId, text, replyTo) {
   const chunks = splitMessage(text);
-  for (const chunk of chunks) {
-    const html = convertMarkdownToHtml(chunk);
-    await sendTelegramMessage(token, chatId, html, 'HTML');
+  for (let i = 0; i < chunks.length; i++) {
+    const html = convertMarkdownToHtml(chunks[i]);
+    await sendTelegramMessage(token, chatId, html, 'HTML', i === 0 ? replyTo : undefined);
   }
+}
+
+// Build a quoted reply context from a Telegram reply_to_message.
+// Returns empty string if the message isn't a reply or has no text.
+// Uses a dynamic code-fence length (max consecutive backticks + 1)
+// so nested backticks never break the structure.
+function quoteReply(msg) {
+  const rm = msg.reply_to_message;
+  if (!rm || !rm.text) return '';
+  const replyFrom = rm.from?.username
+    ? `@${rm.from.username}`
+    : [rm.from?.first_name, rm.from?.last_name].filter(Boolean).join(' ') || 'unknown';
+  const senderType = rm.from?.is_bot ? 'assistant' : 'user';
+  let maxBackticks = 0;
+  for (let i = 0, cur = 0; i < rm.text.length; i++) {
+    if (rm.text[i] === '`') { cur++; maxBackticks = Math.max(maxBackticks, cur); }
+    else cur = 0;
+  }
+  const fence = '`'.repeat(maxBackticks + 1);
+  return `In response to ${replyFrom} (${senderType}):\n\n${fence}\n${rm.text}\n${fence}\n\n`;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,7 +224,8 @@ async function cmdHelp(token, chatId, args) {
     }
     if (topic === 'shutdown') {
       await sendLongMessage(token, chatId,
-        '`/shutdown` — stop tgagentp process\n\n' +
+        '`/shutdown` — stop tgagentp process\n' +
+        '`/shutdown force` — force shutdown even if busy (in-flight work will be lost)\n\n' +
         'Only available when tgagentp is started with `--dev` flag.\n' +
         'Useful when running tgagentp in a restart loop:\n' +
         '`while true; do tgagentp --dev; done`');
@@ -246,8 +264,19 @@ async function cmdHelp(token, chatId, args) {
         '🔐 notification to the chat. Use one of these commands to answer.');
       return;
     }
+    if (topic === 'think') {
+      await sendLongMessage(token, chatId,
+        '`/think` — toggle thinking message forwarding\n' +
+        '`/think on` — forward model thinking to the chat in real-time\n' +
+        '`/think off` — stop forwarding thinking messages (default)\n' +
+        '`/think switch` — toggle current state\n\n' +
+        'When enabled, the model\'s internal reasoning steps are sent to the chat\n' +
+        'as they are generated, prefixed with 💭.\n' +
+        'Can also be enabled at startup with `--think` flag.');
+      return;
+    }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
@@ -265,12 +294,13 @@ async function cmdHelp(token, chatId, args) {
     '`/agents` — list available agents\n' +
     '`/agents switch <name>` — switch active agent\n' +
     '`/models` — list providers and models\n' +
+    '`/think` — toggle thinking message forwarding\n' +
     '`/allow` / `/reject` / `/always` — respond to permission requests\n' +
     '`/shutdown` — stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
-async function cmdServers(token, chatId, args, setServer) {
+async function cmdServers(token, chatId, args, setServer, setActiveSession, serverBase) {
   if (args.length > 0 && args[0].toLowerCase() === 'switch') {
     if (args.length < 2) {
       await sendLongMessage(token, chatId,
@@ -644,7 +674,7 @@ async function cmdAllow(token, chatId, args, setServer, setActiveSession, server
   try {
     await respondToPermission(p.server, p.sessionId, p.permissionId, 'once');
     await sendLongMessage(token, chatId, '✅ Permission approved (once).');
-    process.stderr.write(`  → /allow: ${p.type} ${p.pattern || ''}\n`);
+    log.debug(`  → /allow: ${p.type} ${p.pattern || ''}`);
   } catch (err) {
     await sendLongMessage(token, chatId, `Error: ${err.message}`);
   }
@@ -660,7 +690,7 @@ async function cmdReject(token, chatId, args, setServer, setActiveSession, serve
   try {
     await respondToPermission(p.server, p.sessionId, p.permissionId, 'reject');
     await sendLongMessage(token, chatId, '⛔ Permission denied.');
-    process.stderr.write(`  → /reject: ${p.type} ${p.pattern || ''}\n`);
+    log.debug(`  → /reject: ${p.type} ${p.pattern || ''}`);
   } catch (err) {
     await sendLongMessage(token, chatId, `Error: ${err.message}`);
   }
@@ -676,9 +706,27 @@ async function cmdAlways(token, chatId, args, setServer, setActiveSession, serve
   try {
     await respondToPermission(p.server, p.sessionId, p.permissionId, 'always');
     await sendLongMessage(token, chatId, '✅ Permission approved (always).');
-    process.stderr.write(`  → /always: ${p.type} ${p.pattern || ''}\n`);
+    log.debug(`  → /always: ${p.type} ${p.pattern || ''}`);
   } catch (err) {
     await sendLongMessage(token, chatId, `Error: ${err.message}`);
+  }
+}
+
+async function cmdThink(token, chatId, args, setServer, setActiveSession, server) {
+  const st = getState(server);
+  const sub = args && args.length > 0 ? args[0].toLowerCase() : 'switch';
+  if (sub === 'on') {
+    st.thinkingEnabled = true;
+    await sendLongMessage(token, chatId, '💭 Thinking messages **on** (forwarded to chat).');
+  } else if (sub === 'off') {
+    st.thinkingEnabled = false;
+    await sendLongMessage(token, chatId, '💭 Thinking messages **off**.');
+  } else if (sub === 'switch') {
+    st.thinkingEnabled = !st.thinkingEnabled;
+    await sendLongMessage(token, chatId,
+      `💭 Thinking messages ${st.thinkingEnabled ? '**on**' : '**off**'}.`);
+  } else {
+    await sendLongMessage(token, chatId, 'Usage: `/think [on|off|switch]` (default: switch).');
   }
 }
 
@@ -689,6 +737,7 @@ const COMMANDS = {
   'session': cmdSessions,
   'agents': cmdAgents,
   'models': cmdModels,
+  'think': cmdThink,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -700,7 +749,7 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null };
+  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false };
 }
 
 function sessionLabel(st) {
@@ -725,6 +774,10 @@ async function main() {
       process.exit(0);
     } else if (args[i] === '--dev') {
       DEV_MODE = true;
+    } else if (args[i] === '--verbose') {
+      log.verbose = true;
+    } else if (args[i] === '--think') {
+      getState(serverBase).thinkingEnabled = true;
     } else if (args[i] === '--help') {
       console.error('Usage: tgagentp [options] [url]');
       console.error('');
@@ -732,9 +785,11 @@ async function main() {
       console.error('Incoming Telegram messages are forwarded to OpenCode; answers are sent back to the chat.');
       console.error('');
       console.error('Options:');
-      console.error('  --dev      Enable development mode (adds /shutdown command)');
-      console.error('  --version  Show version');
-      console.error('  --help     Show this help message');
+      console.error('  --dev       Enable development mode (adds /shutdown command)');
+      console.error('  --version   Show version');
+      console.error('  --verbose   Show detailed logs (errors, trace, debug) on stderr');
+      console.error('  --think     Start with thinking messages enabled (default: off)');
+      console.error('  --help      Show this help message');
       console.error('');
       console.error('Arguments:');
       console.error('  url        OpenCode TUI server URL or port number (default: 4096)');
@@ -769,24 +824,24 @@ async function main() {
     process.exit(1);
   }
 
-  process.stderr.write(`tgagentp v${version} started. OpenCode server: ${serverBase}\n`);
+  log.info(`tgagentp v${version} started. OpenCode server: ${serverBase}`);
 
   if (!process.env.OPENCODE_SERVER_PASSWORD) {
-    process.stderr.write('🔓 ⚠️  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.\n');
+    log.error('🔓  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.');
   }
 
   const allowedChatIds = parseAllowlist(process.env.TGAGENTP_ALLOWED_CHAT_IDS);
   if (allowedChatIds) {
-    process.stderr.write(`Chat allowlist: ${allowedChatIds.length} chat(s) configured\n`);
+    log.info(`Chat allowlist: ${allowedChatIds.length} chat(s) configured`);
   } else {
-    process.stderr.write('Chat allowlist: not configured (all chats accepted)\n');
+    log.info('Chat allowlist: not configured (all chats accepted)');
   }
 
   let lockedChatId = null;
 
   getState(serverBase);
 
-  process.stderr.write('Discovering server state...\n');
+  log.info('Discovering server state...');
   const [discovered, agents] = await Promise.all([
     discoverActiveSession(serverBase),
     listAgents(serverBase).catch(() => []),
@@ -794,20 +849,20 @@ async function main() {
   if (discovered) {
     getState(serverBase).activeSessionId = discovered.id;
     getState(serverBase).activeSessionName = discovered.name;
-    process.stderr.write(`  → session: ${discovered.name || discovered.id}\n`);
+    log.info(`  → session: ${discovered.name || discovered.id}`);
   }
   const defaultAgent = agents.find(a => a.mode === 'primary') || agents[0];
   if (defaultAgent) {
     getState(serverBase).activeAgentName = defaultAgent.name;
-    process.stderr.write(`  → agent: ${defaultAgent.name}\n`);
+    log.info(`  → agent: ${defaultAgent.name}`);
   }
 
-  process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
+  log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
 
   const setServer = async (url) => {
     serverBase = url;
     getState(url);
-    process.stderr.write(`Switched to server: ${url}\n`);
+    log.info(`Switched to server: ${url}`);
     const [discovered, agents] = await Promise.all([
       discoverActiveSession(url),
       listAgents(url).catch(() => []),
@@ -815,12 +870,12 @@ async function main() {
     if (discovered) {
       getState(url).activeSessionId = discovered.id;
       getState(url).activeSessionName = discovered.name;
-      process.stderr.write(`  → session: ${discovered.name || discovered.id}\n`);
+      log.info(`  → session: ${discovered.name || discovered.id}`);
     }
     const defaultAgent = agents.find(a => a.mode === 'primary') || agents[0];
     if (defaultAgent) {
       getState(url).activeAgentName = defaultAgent.name;
-      process.stderr.write(`  → agent: ${defaultAgent.name}\n`);
+      log.info(`  → agent: ${defaultAgent.name}`);
     }
     const p = getState(url).pendingResponse;
     if (p) {
@@ -832,10 +887,10 @@ async function main() {
 
   const setActiveSession = (id) => {
     getState(serverBase).activeSessionId = id;
-    process.stderr.write(`Switched to session: ${id}\n`);
+    log.info(`Switched to session: ${id}`);
   };
 
-  async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId) {
+  async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId, replyTo) {
     const st = getState(url);
     const isCancelled = () => getState(url).taskId !== myTaskId;
     const cancelRef = { current: null };
@@ -845,11 +900,25 @@ async function main() {
       if (useSession) {
         // Event-driven flow: start SSE listener first, then send message async
         const notifiedPerms = new Set();
+        let thinkingBuf = '';
         const ssePromise = listenForSessionEvents(url, sessionId, {
+          onText: null,
+          onThinking: (chunk) => {
+            if (!getState(url).thinkingEnabled) { thinkingBuf = ''; return; }
+            // Forward thinking chunks in real-time
+            thinkingBuf += chunk;
+            if (thinkingBuf.length >= 50 || chunk.endsWith('\n')) {
+              const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              sendLongMessage(token, chatId, html, replyTo)
+                .then(() => {})
+                .catch(() => {});
+              thinkingBuf = '';
+            }
+          },
           onPermission: (perm) => {
             const st2 = getState(url);
             const permDump = JSON.stringify(perm);
-            process.stderr.write(`  → permission_asked callback: ${permDump}\n`);
+            log.debug(`  → permission_asked callback: ${permDump}`);
             st2.pendingPermission = { server: url, sessionId, permissionId: perm.id, type: perm.permission || 'unspecified', pattern: perm.patterns || perm.pattern, title: perm.title };
             if (!notifiedPerms.has(perm.id)) {
               notifiedPerms.add(perm.id);
@@ -861,16 +930,16 @@ async function main() {
                 + (patternStr ? '**Target:** `' + patternStr + '`\n' : '')
                 + (perm.title ? '**Detail:** ' + perm.title + '\n' : '')
                 + 'Use `/allow` to approve once, `/always` to always allow, or `/reject` to deny.';
-              process.stderr.write(`  → sending permission notification to chat ${chatId}\n`);
-              sendLongMessage(token, chatId, msg)
-                .then(() => process.stderr.write(`  → permission notification sent OK\n`))
-                .catch((err) => process.stderr.write(`  → permission notification failed: ${err.message}\n`));
+              log.debug(`  → sending permission notification to chat ${chatId}`);
+              sendLongMessage(token, chatId, msg, replyTo)
+                .then(() => log.debug(`  → permission notification sent OK`))
+                .catch((err) => log.debug(`  → permission notification failed: ${err.message}`));
             } else {
-              process.stderr.write(`  → permission ${perm.id} already notified, updating pendingPermission only\n`);
+              log.debug(`  → permission ${perm.id} already notified, updating pendingPermission only`);
             }
           },
           onPermissionReplied: () => {
-            process.stderr.write(`  → permission_replied: clearing pendingPermission\n`);
+            log.debug(`  → permission_replied: clearing pendingPermission`);
             getState(url).pendingPermission = null;
           },
         }, cancelRef);
@@ -884,33 +953,39 @@ async function main() {
         }
         // Wait for the SSE listener to collect the full answer
         answer = await ssePromise;
+        // Flush any remaining thinking buffer
+        if (thinkingBuf) {
+          const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          sendLongMessage(token, chatId, html, replyTo).catch(() => {});
+          thinkingBuf = '';
+        }
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
       }
       if (isCancelled()) {
-        process.stderr.write(`  → cancelled, discarding response from ${url}\n`);
+        log.debug(`  → cancelled, discarding response from ${url}`);
         st.pendingPermission = null;
         return;
       }
       st.pendingPermission = null;
       if (url === serverBase) {
         if (answer && answer.trim()) {
-          await sendLongMessage(token, chatId, answer.trim());
+          await sendLongMessage(token, chatId, answer.trim(), replyTo);
         }
       } else {
         getState(url).pendingResponse = answer;
-        await sendLongMessage(token, chatId, `✅ Server \`${url}\` finished processing. Switch back to see the response.`);
+        await sendLongMessage(token, chatId, `✅ Server \`${url}\` finished processing. Switch back to see the response.`, replyTo);
       }
     } catch (err) {
       if (isCancelled()) {
-        process.stderr.write(`  → cancelled, ignoring error from ${url}: ${err.message}\n`);
+        log.debug(`  → cancelled, ignoring error from ${url}: ${err.message}`);
         st.pendingPermission = null;
         return;
       }
-      process.stderr.write(`Error processing message (${url}): ${err.message}\n`);
+      log.error(`Error processing message (${url}): ${err.message}`);
       if (url === serverBase) {
-        try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
+        try { await sendLongMessage(token, chatId, `Error: ${err.message}`, replyTo); } catch (_) {}
       }
     } finally {
       st.pendingPermission = null;
@@ -935,7 +1010,7 @@ async function main() {
       st._cancelRef.current = null;
     }
     await sendLongMessage(token, chatId, '✅ Cancelled.');
-    process.stderr.write(`  → /cancel on ${serverBase}\n`);
+    log.debug(`  → /cancel on ${serverBase}`);
   }
 
   const cmdStatus = async (token, chatId) => {
@@ -951,13 +1026,22 @@ async function main() {
     await sendLongMessage(token, chatId, lines.join('\n'));
   };
 
-  const cmdShutdown = async (token, chatId) => {
-    await sendLongMessage(token, chatId, '👋 Shutting down...');
+  const cmdShutdown = async (token, chatId, args) => {
+    const st = getState(serverBase);
+    const isForce = args && args.length > 0 && args[0].toLowerCase() === 'force';
+    if (st.busy && !isForce) {
+      await sendLongMessage(token, chatId,
+        '⏳ Server is busy processing a message.\n' +
+        'Use `/shutdown force` to shut down anyway (in-flight response will be lost).');
+      return;
+    }
+    const status = st.busy ? '⏳ busy (forced)' : '✅ idle';
+    await sendLongMessage(token, chatId, `👋 Shutting down (state: ${status})...`);
     try {
       fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId));
     } catch (_) {}
     try { await getUpdates(token, offset, 1); } catch (_) {}
-    process.stderr.write('/shutdown received, exiting...\n');
+    log.debug('/shutdown received, exiting...');
     process.exit(0);
   };
 
@@ -987,13 +1071,13 @@ async function main() {
     try {
       result = await getUpdates(token, offset, 30);
     } catch (err) {
-      process.stderr.write(`Polling error: ${err.message}\n`);
+      log.error(`Polling error: ${err.message}`);
       await new Promise((r) => setTimeout(r, 5000));
       continue;
     }
 
     if (!result.ok) {
-      process.stderr.write(`Telegram API error: ${result.description || JSON.stringify(result)}\n`);
+      log.error(`Telegram API error: ${result.description || JSON.stringify(result)}`);
       await new Promise((r) => setTimeout(r, 5000));
       continue;
     }
@@ -1008,6 +1092,7 @@ async function main() {
       }
 
       const chatId = String(msg.chat.id);
+      const replyTo = msg.message_id;
       const text = msg.text;
       const from = msg.from?.username
         ? `@${msg.from.username}`
@@ -1015,21 +1100,24 @@ async function main() {
 
       // Enforce chat allowlist if configured
       if (allowedChatIds && !allowedChatIds.includes(chatId)) {
-        process.stderr.write(`[chat ${chatId}] ${from}: blocked (not in allowlist)\n`);
+        log.debug(`[chat ${chatId}] ${from}: blocked (not in allowlist)`);
         continue;
       }
 
       // Lock to the first chat that connects (single-user guard)
       if (lockedChatId === null) {
         lockedChatId = chatId;
-        process.stderr.write(`[chat ${chatId}] ${from}: locked to this chat\n`);
+        log.debug(`[chat ${chatId}] ${from}: locked to this chat`);
       } else if (lockedChatId !== chatId) {
-        process.stderr.write(`[chat ${chatId}] ${from}: blocked (locked to ${lockedChatId})\n`);
+        log.debug(`[chat ${chatId}] ${from}: blocked (locked to ${lockedChatId})`);
         continue;
       }
 
-      process.stderr.write(`[chat ${chatId}] ${from}: ${text}\n`);
+      log.debug(`[chat ${chatId}] ${from}: ${text}`);
       try { fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId)); } catch (_) {}
+
+      // Build reply context if this message is a Telegram reply
+      const replyContext = quoteReply(msg);
 
       // Intercept /commands
       if (text.startsWith('/')) {
@@ -1041,7 +1129,7 @@ async function main() {
           try {
             await handler(token, chatId, cmdArgs, setServer, setActiveSession, serverBase);
           } catch (err) {
-            process.stderr.write(`Error handling /${cmd}: ${err.message}\n`);
+            log.error(`Error handling /${cmd}: ${err.message}`);
             try { await sendLongMessage(token, chatId, `Error: ${err.message}`); } catch (_) {}
           }
         } else {
@@ -1059,14 +1147,14 @@ async function main() {
       }
       st.busy = true;
       const myTaskId = ++st.taskId;
-      process.stderr.write(`  → started background processing (task ${myTaskId})\n`);
-      processMessageAsync(chatId, text, serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId);
+      log.debug(`  → started background processing (task ${myTaskId})`);
+      processMessageAsync(chatId, replyContext + text, serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId, replyTo);
     }
   }
 }
 
 process.on('SIGINT', () => {
-  process.stderr.write('\ntgagentp stopped.\n');
+  log.info('tgagentp stopped.');
   process.exit(0);
 });
 

@@ -192,7 +192,8 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/models` | List connected providers with model counts, context limits, and costs |
 | `/status` | Show current server path, URL, busy status, and active session |
 | `/cancel` | Cancel the current AI response for the active server |
-| `/shutdown` | (requires `--dev`) Stop tgagentp gracefully; acknowledge offset and exit |
+| `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
+| `/shutdown [force]` | (requires `--dev`) Stop tgagentp; refuses if busy unless `force` is given |
 
 ### Per-server state
 
@@ -212,7 +213,26 @@ tgagentp
 
 - `--version`: show version
 - `--help`: show help message
+- `--verbose`: show detailed logs (errors, trace, debug) on stderr
+- `--think`: start with thinking messages enabled (default: off)
 - `--dev`: enable `/shutdown` command for remote restart (run via `while true; do tgagentp --dev; done`)
+
+### Logging
+
+Informational messages (startup, discovery, session switches) go to **stdout**. Errors, warnings, and trace/debug messages go to **stderr**. With `--verbose`, detailed
+trace/debug messages are also printed to stderr.
+
+For a clean console with only essential info:
+
+```bash
+tgagentp 2>/dev/null
+```
+
+To capture everything (info + errors) to a log file:
+
+```bash
+tgagentp 2>/var/log/tgagentp.log
+```
 
 ### Telemetry
 
