@@ -3,28 +3,19 @@
 const readline = require('readline');
 const { version } = require('../package.json');
 const {
-  clearPrompt,
-  appendPrompt,
-  submitPrompt,
-  listenForFinalAnswer,
+  sendToSession,
+  listSessions,
+  createSession,
 } = require('../lib/opencode');
 
-async function sendPrompt(server) {
-  let promptText = '';
-
-  await clearPrompt(server);
-
+async function readAllStdin() {
+  let text = '';
   const rl = readline.createInterface({ input: process.stdin });
-
   for await (const line of rl) {
-    const promptLine = line + '\n';
-    promptText += promptLine;
-    await appendPrompt(server, promptLine);
+    text += line + '\n';
   }
-
   rl.close();
-  await submitPrompt(server);
-  return promptText;
+  return text;
 }
 
 const HUMAN_ROW = '👤: ￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n'
@@ -43,7 +34,7 @@ async function main() {
     } else if (args[i] === '--help') {
       console.error('Usage: agentp [options] [url]');
       console.error('');
-      console.error('Pipe prompt text to an OpenCode TUI session and stream the assistant response to stdout.');
+      console.error('Pipe prompt text to an OpenCode session and get the assistant response on stdout.');
       console.error('');
       console.error('Options:');
       console.error('  --version  Show version');
@@ -51,7 +42,7 @@ async function main() {
       console.error('  --help     Show this help message');
       console.error('');
       console.error('Arguments:');
-      console.error('  url        OpenCode TUI server URL or port number (default: 4096)');
+      console.error('  url        OpenCode server URL or port number (default: 4096)');
       console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
       console.error('');
       console.error('See also: ocmux -- manage OpenCode tmux sessions (ocmux --help)');
@@ -71,7 +62,42 @@ async function main() {
     }
   }
 
-  const promptText = await sendPrompt(serverBase);
+  const promptText = await readAllStdin();
+
+  // Find most recent session or create one
+  let sessions;
+  try {
+    sessions = await listSessions(serverBase);
+  } catch (err) {
+    console.error('Error connecting to server:', err.message);
+    process.exit(1);
+  }
+
+  let sessionId = null;
+  if (sessions && sessions.length > 0) {
+    const sorted = sessions
+      .filter(s => s.time && s.time.updated)
+      .sort((a, b) => b.time.updated - a.time.updated);
+    if (sorted.length > 0) sessionId = sorted[0].id;
+  }
+
+  if (!sessionId) {
+    try {
+      const session = await createSession(serverBase, 'agentp');
+      sessionId = session.id;
+    } catch (err) {
+      console.error('Error creating session:', err.message);
+      process.exit(1);
+    }
+  }
+
+  let answer;
+  try {
+    answer = await sendToSession(serverBase, sessionId, promptText);
+  } catch (err) {
+    console.error('Error sending prompt:', err.message);
+    process.exit(1);
+  }
 
   if (qaMode) {
     process.stdout.write(HUMAN_ROW);
@@ -79,8 +105,8 @@ async function main() {
     process.stdout.write(AGENT_ROW);
   }
 
-  await listenForFinalAnswer(serverBase, (chunk) => process.stdout.write(chunk));
-  process.stdout.write('\n');
+  process.stdout.write(answer);
+  if (!answer.endsWith('\n')) process.stdout.write('\n');
   if (qaMode) {
     process.stdout.write(FINAL_ROW);
   }
