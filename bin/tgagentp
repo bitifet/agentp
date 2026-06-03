@@ -279,7 +279,7 @@ async function cmdServers(token, chatId, args, setServer) {
       return;
     }
     const target = matches[0];
-    const pending = setServer(target.url);
+    const pending = await setServer(target.url);
     activateServer(target.dir, target.index, target.url);
     let msg = `Switched to server: ${target.url} → ${target.dir}`;
     if (pending && pending.trim()) {
@@ -322,6 +322,19 @@ function sortedSessions(sessions, limit) {
     .filter(s => s.time && s.time.updated)
     .sort((a, b) => b.time.updated - a.time.updated)
     .slice(0, limit || 50);
+}
+
+// Find the most recently updated session and return its ID.
+// Returns null if no sessions exist or the server is unreachable.
+async function discoverActiveSession(server) {
+  try {
+    const sessions = await listSessions(server);
+    if (!sessions || sessions.length === 0) return null;
+    const sorted = sortedSessions(sessions, 1);
+    return sorted.length > 0 ? sorted[0].id : null;
+  } catch {
+    return null;
+  }
 }
 
 async function cmdSessions(token, chatId, args, setServer, setActiveSession, server) {
@@ -683,14 +696,27 @@ async function main() {
 
   let lockedChatId = null;
 
-  process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
-
   getState(serverBase);
 
-  const setServer = (url) => {
+  // Discover the TUI's current session on startup
+  discoverActiveSession(serverBase).then(id => {
+    if (id) {
+      getState(serverBase).activeSessionId = id;
+      process.stderr.write(`  → discovered session: ${id}\n`);
+    }
+  });
+
+  process.stderr.write('Waiting for Telegram messages... (Ctrl+C to stop)\n');
+
+  const setServer = async (url) => {
     serverBase = url;
     getState(url);
     process.stderr.write(`Switched to server: ${url}\n`);
+    const sessionId = await discoverActiveSession(url);
+    if (sessionId) {
+      getState(url).activeSessionId = sessionId;
+      process.stderr.write(`  → discovered session: ${sessionId}\n`);
+    }
     const p = getState(url).pendingResponse;
     if (p) {
       getState(url).pendingResponse = null;
@@ -794,12 +820,14 @@ async function main() {
   // Startup greeting to last-known chat
   const savedChatId = (() => { try { return fs.readFileSync(STARTUP_CHAT_FILE, 'utf8').trim(); } catch { return null; } })();
   if (savedChatId) {
+    const st = getState(serverBase);
     const dir = serverDir(serverBase);
     const lines = ['✅ Bot started.', '**Server:**'];
     if (dir) lines.push('  • **Path:** `' + dir + '`');
     lines.push('  • **URL:** `' + serverBase + '`');
     lines.push('  • **Status:** ✅ idle');
-    lines.push('**Session:** *none (TUI+SSE)*');
+    const sessionLabel = st.activeSessionId ? '`' + st.activeSessionId + '`' : '*none (TUI+SSE)*';
+    lines.push('**Session:** ' + sessionLabel);
     try { await sendLongMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
     try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
   }

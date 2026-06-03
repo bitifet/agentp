@@ -108,6 +108,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Fix: /sessions now shows the active session even without agent set (exception in filter)
 - Fix: /sessions switch and /sessions new call selectSession (TUI navigation doesn't work — see With Issues)
 - Fix: active session highlighted with ▶ bullet in session list
+- Fix: discover TUI session on startup and server switch via `discoverActiveSession()`
 - Message splitting (>4096 chars, breaks at newlines)
 - Fix: tuiPaneId detects 'bun' (opencode 1.15.x) in addition to 'node'
 - Fix: URL polling in ocmux doNew takes last match, not first (more robust with bun startup)
