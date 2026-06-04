@@ -710,7 +710,7 @@ const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the c
 // Agentp gateway — tiny HTTP server for agentp --tg
 // ---------------------------------------------------------------------------
 
-function startAgentpGateway(token, chatIdResolver) {
+function startAgentpGateway(token, chatIdResolver, serverBaseResolver) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       if (req.method !== 'POST' || req.url !== '/send') {
@@ -743,7 +743,7 @@ function startAgentpGateway(token, chatIdResolver) {
 
         const chatId = chatIdResolver();
         if (!chatId) return;
-        const activeUrl = normalizeUrl(serverBase);
+        const activeUrl = normalizeUrl(serverBaseResolver());
         const targetUrl = normalizeUrl(server);
 
         if (targetUrl === activeUrl) {
@@ -979,7 +979,8 @@ async function main() {
 
   // Start agentp gateway (tiny HTTP server for agentp --tg)
   const chatIdResolver = () => lockedChatId;
-  startAgentpGateway(token, chatIdResolver);
+  const serverBaseResolver = () => serverBase;
+  startAgentpGateway(token, chatIdResolver, serverBaseResolver);
 
   const setServer = async (url) => {
     serverBase = url;
