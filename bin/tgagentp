@@ -911,8 +911,14 @@ async function main() {
         // Event-driven flow: start SSE listener first, then send message async
         const notifiedPerms = new Set();
         let thinkingBuf = '';
+        let sseConnected;
+        const onConnected = Promise.race([
+          new Promise((resolve) => { sseConnected = resolve; }),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
         const ssePromise = listenForSessionEvents(url, sessionId, {
           onText: null,
+          onConnected: sseConnected,
           onThinking: (chunk) => {
             if (!getState(url).thinkingEnabled) { thinkingBuf = ''; return; }
             // Forward thinking chunks in real-time
@@ -953,7 +959,9 @@ async function main() {
             getState(url).pendingPermission = null;
           },
         }, cancelRef);
-        // Send message (SSE is already listening — no race)
+        // Wait for SSE stream to be confirmed active before sending, to avoid
+        // missing the session.idle event (race condition).
+        await onConnected;
         try {
           await sendToSessionAsync(url, sessionId, `[Telegram] ${text}`, st.activeAgentName);
         } catch (err) {
