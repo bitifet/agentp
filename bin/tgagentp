@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const http = require('http');
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
@@ -15,7 +16,38 @@ const log = {
 };
 
 const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
+const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
+const PORT_FILE = '/tmp/tgagentp-port';
+const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
 const { listServers, activateServer } = require('../lib/ocmux.js');
+
+// Agentp gateway message queue, keyed by server URL
+const agentpQueues = {};
+
+function validateAgentpAuth(req) {
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  if (!password) return true;
+  const username = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
+  const expected = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+  return req.headers.authorization === expected;
+}
+
+function flushAgentpQueue(server, token, chatId) {
+  if (!chatId) return;
+  const q = agentpQueues[server];
+  if (!q || q.messages.length === 0) return;
+  const msgs = q.messages.splice(0);
+  q.notified = false;
+  if (q.notifyTimer) { clearTimeout(q.notifyTimer); q.notifyTimer = null; }
+  sendLongMessage(token, chatId,
+    `📨 Delivering ${msgs.length} queued agentp message(s):`)
+    .then(() => {
+      for (const msg of msgs) {
+        sendLongMessage(token, chatId, msg.trim()).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
 
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
@@ -674,6 +706,77 @@ async function cmdModels(token, chatId, args, setServer, setActiveSession, serve
 
 const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the current state.';
 
+// ---------------------------------------------------------------------------
+// Agentp gateway — tiny HTTP server for agentp --tg
+// ---------------------------------------------------------------------------
+
+function startAgentpGateway(token, chatIdResolver) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      if (req.method !== 'POST' || req.url !== '/send') {
+        res.writeHead(405);
+        res.end('Method Not Allowed');
+        return;
+      }
+      if (!validateAgentpAuth(req)) {
+        res.writeHead(401);
+        res.end('Unauthorized');
+        return;
+      }
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => {
+        let data;
+        try { data = JSON.parse(body); } catch {
+          res.writeHead(400);
+          res.end('Bad Request');
+          return;
+        }
+        const { text, server } = data;
+        if (typeof text !== 'string' || typeof server !== 'string') {
+          res.writeHead(400);
+          res.end('Bad Request: text and server are required');
+          return;
+        }
+        res.writeHead(200);
+        res.end('OK');
+
+        const chatId = chatIdResolver();
+        if (!chatId) return;
+        const activeUrl = normalizeUrl(serverBase);
+        const targetUrl = normalizeUrl(server);
+
+        if (targetUrl === activeUrl) {
+          sendLongMessage(token, chatId, text.trim()).catch(() => {});
+        } else {
+          if (!agentpQueues[server]) {
+            agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
+          }
+          const q = agentpQueues[server];
+          q.messages.push(text);
+          if (!q.notifyTimer) {
+            q.notifyTimer = setTimeout(() => {
+              q.notifyTimer = null;
+              if (q.messages.length > 0 && !q.notified) {
+                q.notified = true;
+                sendLongMessage(token, chatId,
+                  `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
+                  .catch(() => {});
+              }
+            }, TGAGENTP_DEBOUNCE_MS);
+          }
+        }
+      });
+    });
+    server.listen(TGAGENTP_PORT, '127.0.0.1', () => {
+      const port = server.address().port;
+      try { fs.writeFileSync(PORT_FILE, String(port)); } catch (_) {}
+      log.info(`Agentp gateway listening on port ${port}`);
+      resolve(port);
+    });
+  });
+}
+
 async function cmdAllow(token, chatId, args, setServer, setActiveSession, server) {
   const st = getState(server);
   if (!st.pendingPermission) {
@@ -869,10 +972,18 @@ async function main() {
 
   log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
 
+  // Start agentp gateway (tiny HTTP server for agentp --tg)
+  const chatIdResolver = () => lockedChatId;
+  startAgentpGateway(token, chatIdResolver);
+
   const setServer = async (url) => {
     serverBase = url;
     getState(url);
     log.info(`Switched to server: ${url}`);
+
+    // Flush agentp queue for the new active server
+    flushAgentpQueue(url, token, lockedChatId);
+
     const [discovered, agents] = await Promise.all([
       discoverActiveSession(url),
       listAgents(url).catch(() => []),

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+const http = require('http');
+const fs = require('fs');
 const readline = require('readline');
 const { version } = require('../package.json');
 const {
@@ -7,6 +9,41 @@ const {
   listSessions,
   createSession,
 } = require('../lib/opencode');
+
+const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
+
+function notifyAgentpGateway(port, server, text) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ text, server });
+    const options = {
+      hostname: '127.0.0.1',
+      port,
+      path: '/send',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+    const password = process.env.OPENCODE_SERVER_PASSWORD;
+    if (password) {
+      const username = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
+      options.headers['Authorization'] = 'Basic ' +
+        Buffer.from(`${username}:${password}`).toString('base64');
+    }
+    const req = http.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode === 200) resolve();
+        else reject(new Error(`status ${res.statusCode}: ${data}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 async function readAllStdin() {
   let text = '';
@@ -25,6 +62,7 @@ const FINAL_ROW = '￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣�
 async function main() {
   let serverBase = 'http://localhost:4096';
   let qaMode = false;
+  let tgMode = null; // null = auto (qa-true → tg), true = --tg, false = --no-tg
 
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -39,7 +77,11 @@ async function main() {
       console.error('Options:');
       console.error('  --version  Show version');
       console.error('  --qa       Print the original prompt and answer with labels (useful as a filter)');
+      console.error('  --tg       Forward the answer to Telegram via agentp gateway (error if unreachable)');
+      console.error('  --no-tg    Do not forward to Telegram');
       console.error('  --help     Show this help message');
+      console.error('');
+      console.error('By default, --qa implies --tg; standalone mode implies --no-tg.');
       console.error('');
       console.error('Arguments:');
       console.error('  url        OpenCode server URL or port number (default: 4096)');
@@ -55,6 +97,10 @@ async function main() {
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;
+    } else if (args[i] === '--tg') {
+      tgMode = true;
+    } else if (args[i] === '--no-tg') {
+      tgMode = false;
     } else if (args[i].includes('://')) {
       serverBase = args[i].replace(/\/+$/, '');
     } else if (/^\d+$/.test(args[i])) {
@@ -109,6 +155,32 @@ async function main() {
   if (!answer.endsWith('\n')) process.stdout.write('\n');
   if (qaMode) {
     process.stdout.write(FINAL_ROW);
+  }
+
+  // Forward to Telegram if tgagentp gateway is reachable
+  if (tgMode === null) tgMode = qaMode;
+  if (tgMode) {
+    let tgPort;
+    try {
+      tgPort = fs.readFileSync(TGAGENTP_PORT_FILE, 'utf8').trim();
+    } catch {
+      if (tgMode === true) {
+        console.error('Error: tgagentp gateway not found. Is tgagentp running?');
+        process.exit(1);
+      }
+      // auto mode: silently degrade
+    }
+    if (tgPort) {
+      try {
+        await notifyAgentpGateway(tgPort, serverBase, answer);
+      } catch (err) {
+        if (tgMode === true) {
+          console.error('Error: tgagentp gateway unreachable:', err.message);
+          process.exit(1);
+        }
+        // auto mode: silently degrade
+      }
+    }
   }
 
   if (!process.env.OPENCODE_SERVER_PASSWORD) {
