@@ -139,17 +139,19 @@ async function main() {
           .sort((a, b) => b.time.updated - a.time.updated);
         // Try to extract messages; getSession may return data with
         // messages, or the sessions list may already contain them
-        let rawMessages = [];
+        let session;
         try {
-          const session = await getSession(serverBase, sorted[0].id);
-          rawMessages = session.messages || session.history || session.conversation || [];
+          session = await getSession(serverBase, sorted[0].id);
         } catch {
-          // If the dedicated endpoint fails, the list data may have messages
-          rawMessages = sorted[0].messages || sorted[0].history || sorted[0].conversation || [];
+          session = sorted[0];
         }
+        const rawMessages = session.messages || session.history || session.conversation || session.chats || session.entries || [];
         if (rawMessages.length === 0) {
           console.error('No message history available for the most recent session.');
-          console.error('The OpenCode server may not expose message history via the HTTP API.');
+          const keys = Object.keys(session).join(', ');
+          console.error(`Session fields available: ${keys}`);
+          const preview = JSON.stringify(session).slice(0, 500);
+          console.error(`Raw session data (first 500 chars): ${preview}`);
           process.exit(1);
         }
         const assistantTexts = rawMessages
@@ -179,6 +181,14 @@ async function main() {
       serverBase = args[i].replace(/\/+$/, '');
     } else if (/^\d+$/.test(args[i])) {
       serverBase = 'http://localhost:' + args[i];
+    } else if (args[i].startsWith('--')) {
+      console.error(`Error: unknown option '${args[i]}'`);
+      console.error(`Usage: agentp [options] [url]`);
+      console.error(`Try 'agentp --help' for more information.`);
+      process.exit(1);
+    } else {
+      console.error(`Error: unexpected argument '${args[i]}'`);
+      process.exit(1);
     }
   }
 
