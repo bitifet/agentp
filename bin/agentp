@@ -3,6 +3,7 @@
 const http = require('http');
 const fs = require('fs');
 const readline = require('readline');
+const child_process = require('child_process');
 const { version } = require('../package.json');
 const {
   sendToSession,
@@ -128,6 +129,7 @@ async function main() {
         process.exit(1);
       }
       const n = parseInt(nStr, 10);
+      // Query the opencode SQLite database for assistant responses
       try {
         const sessions = await listSessions(serverBase);
         if (!sessions || sessions.length === 0) {
@@ -137,35 +139,34 @@ async function main() {
         const sorted = sessions
           .filter(s => s.time && s.time.updated)
           .sort((a, b) => b.time.updated - a.time.updated);
-        // Try to extract messages; getSession may return data with
-        // messages, or the sessions list may already contain them
-        let session;
-        try {
-          session = await getSession(serverBase, sorted[0].id);
-        } catch {
-          session = sorted[0];
+        const sessionId = sorted[0].id;
+
+        // Locate the opencode database
+        const home = process.env.HOME || process.env.USERPROFILE || '';
+        const dbCandidates = [
+          `${home}/.local/share/opencode/opencode.db`,
+          `${home}/Library/Application Support/opencode/opencode.db`,
+          `${home}/.opencode/opencode.db`,
+        ];
+        let dbPath = null;
+        for (const p of dbCandidates) {
+          try { fs.accessSync(p); dbPath = p; break; } catch {}
         }
-        const rawMessages = session.messages || session.history || session.conversation || session.chats || session.entries || [];
-        if (rawMessages.length === 0) {
-          console.error('No message history available for the most recent session.');
-          const keys = Object.keys(session).join(', ');
-          console.error(`Session fields available: ${keys}`);
-          const preview = JSON.stringify(session).slice(0, 500);
-          console.error(`Raw session data (first 500 chars): ${preview}`);
+        if (!dbPath) {
+          console.error('Cannot locate opencode database.');
           process.exit(1);
         }
-        const assistantTexts = rawMessages
-          .filter(m => m.role === 'assistant')
-          .map(m => {
-            if (m.parts) return m.parts.filter(p => p.type === 'text').map(p => p.text).join('');
-            return m.content || m.text || '';
-          })
-          .filter(t => t.trim());
-        if (assistantTexts.length === 0) {
+
+        // Query concatenated text parts for assistant messages, newest first
+        const sql = `SELECT group_concat(p.data->>'text', '') as text FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '${sessionId.replace(/'/g, "''")}' AND m.data->>'role' = 'assistant' AND p.data->>'type' = 'text' GROUP BY m.id ORDER BY m.time_created DESC`;
+        const out = child_process.execFileSync('sqlite3', ['-json', dbPath, sql], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+        const rows = JSON.parse(out);
+        const texts = rows.map(r => r.text).reverse();
+        if (texts.length === 0) {
           console.error('No assistant answers found in session history.');
           process.exit(1);
         }
-        const lastN = assistantTexts.slice(-n);
+        const lastN = texts.slice(-n);
         process.stdout.write(lastN.join('\n'));
         if (lastN.length > 0 && !lastN[lastN.length - 1].endsWith('\n')) process.stdout.write('\n');
       } catch (err) {
