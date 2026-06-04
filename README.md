@@ -115,6 +115,15 @@ From Vim/Neovim, send the current visual selection and keep the prompt with the 
 :'<,'>!agentp --qa
 ```
 
+From Vim/Neovim, forward the answer to your Telegram:
+
+```vim
+:'<,'>!agentp --qa --tg
+```
+
+(Works as long as `tgagentp` is running. The answer appears both in the editor
+and in your Telegram chat.)
+
 ## ocmux
 
 Manage OpenCode server + TUI in tmux for project directories.
@@ -127,9 +136,10 @@ Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.oc
 
 Subcommands:
 
-- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`serve [--git|--GIT] [--print-logs] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
+  - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr in the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`list`** — List all running servers with their directories, URLs, and status.
 
@@ -157,10 +167,13 @@ Notes:
 
 ## How agentp Works
 
-1. Finds the most recently updated session, or creates one named `agentp`.
-2. Sends the prompt via the session API (`POST /session/:id/message`).
-3. Prints the assistant answer to stdout.
-4. With `--tg`, forwards the answer to Telegram via the agentp gateway.
+1. Reads all stdin into a single prompt string.
+2. Finds the most recently updated session, or creates one named `agentp`.
+3. Sends the prompt via the session API (`POST /session/:id/message`).
+4. Prints the assistant answer to stdout.
+5. With `--tg` (or by default when `--qa` is given), forwards the answer to Telegram
+   via the agentp gateway. The answer appears in your Telegram chat as if tgagentp
+   itself had processed the request.
 
 The session API ensures the request is processed even when no TUI is attached, and returns the full answer in a single HTTP response.
 
@@ -188,16 +201,20 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
 | Command | Action |
 |---|---|
-| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`) |
+| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
 | `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
 | `/sessions switch <number\|name>` | Switch active session by position or partial name match |
-| `/agents` | List available agents (name, mode, model, description) |
+| `/agents` | List primary agents (▶ marker for the active one) |
+| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
 | `/models` | List connected providers with model counts, context limits, and costs |
 | `/status` | Show current server path, URL, busy status, and active session |
 | `/cancel` | Cancel the current AI response for the active server |
 | `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
+| `/allow` | Approve a permission request once |
+| `/reject` | Deny a permission request |
+| `/always` | Approve and remember for the session |
 | `/shutdown [force]` | (requires `--dev`) Stop tgagentp; refuses if busy unless `force` is given |
 
 ### Per-server state

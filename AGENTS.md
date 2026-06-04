@@ -39,9 +39,12 @@ Extracted from `bin/agentp`; used by both `agentp` and `tgagentp`:
 - `createSession(server, title?)` — `POST /session`; returns the created `Session` object; optional `title`
 - `updateSession(server, sessionId, title, agent?)` — `PATCH /session/:id`; returns the updated `Session` object; optional `agent` to set the session's agent
 - `sendToSession(server, sessionId, text, agent?, cancelRef?)` — `POST /session/:id/message`; returns concatenated text parts from response; optional `agent`, optional `cancelRef` for aborting the request
+- `sendToSessionAsync(server, sessionId, text, agent?)` — `POST /session/:id/prompt_async`; returns 204; non-blocking, answer delivered via SSE
+- `respondToPermission(server, sessionId, permissionId, response)` — `POST /session/:id/permissions/:id`
 - `selectSession(server, sessionId)` — `POST /session/:id/select`; tells the TUI to navigate to the given session (silently ignores 404 if the endpoint isn't available in older opencode versions)
 - `listAgents(server)` — `GET /agent`; returns parsed JSON array of agent objects
 - `listProviders(server)` — `GET /provider`; returns parsed JSON array of provider objects
+- `listenForSessionEvents(server, sessionId, callbacks, cancelRef?)` — SSE listener for session events (text parts, permissions, thinking, session.idle)
 
 ## Shared `lib/ocmux.js`
 
@@ -70,6 +73,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - `PATCH /session/:id` — update session properties (`{ title }`, optional `{ agent }`)
 - `POST /session/:id/select` — tell the TUI to navigate to a session (only with TUI attached)
 - `POST /session/:id/message` — send message to session (returns parts synchronously; optional `agent` field)
+- `POST /session/:id/prompt_async` — send message to session (returns 204; answer via SSE)
 - `GET /agent` — list available agents
 - `GET /provider` — list connected providers/models
 
@@ -82,6 +86,8 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Messages for the active server are delivered immediately; others are queued per-server.
 - Debounced Telegram notification (configurable via `TGAGENTP_DEBOUNCE_MS`, default 5000ms).
 - Queued messages are flushed on `/servers switch`.
+
+## OpenCode tmux session model (ocmux)
 
 - Single tmux session named `"Opencode"`
 - Windows named by full project directory path
