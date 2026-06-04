@@ -116,7 +116,7 @@ From Vim/Neovim, send the current visual selection and keep the prompt with the 
 Manage OpenCode server + TUI in tmux for project directories.
 
 ```bash
-ocmux [-l] [<subcommand>] [<directory>]
+ocmux [options] [<subcommand>] [<directory>]
 ```
 
 Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.ocmux.json` and switches to that server's tmux window.
