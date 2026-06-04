@@ -126,10 +126,9 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
-- `/queue` command: queue messages when server is busy, auto-sent after current task finishes preserves replyTo chain — 0.9.0
-- `agentp --getLast n` — retrieve last n answers from session history — 0.9.0
-
-- `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.9.0
+- `/queue` command: queue messages when server is busy, auto-sent after current task finishes preserves replyTo chain — 0.10.0
+- `agentp --getLast n` — retrieve last n answers from session history — 0.10.0
+- `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.10.0
 - agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
 - agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning (not hard error) for `--tg`; auto mode silently degrades — 0.9.0
 - tgagentp: `lockedChatId` set at startup to fix race condition with agentp gateway — 0.9.0

@@ -2,17 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.10.0] - 2026-06-04
 
-- Rename package and CLI command from `aprompt` to `agentp`.
-- Extract shared OpenCode client logic into `lib/opencode.js`.
-- Add `tgagentp` — bridge a Telegram bot chat with an OpenCode TUI session.
+- `/queue` command: queue messages when server is busy, auto-sent after current task finishes, preserves replyTo chain.
+- `/record` command with ring buffer (100 msgs / 100KB), `/record stop` to clear; gateway returns `{ buffered }` JSON.
+- agentp `--flush`: flush tgagentp's recorded buffer without prepending to stdout.
+- agentp `--getLast n`: retrieve last n assistant answers from session history.
+- agentp `--qa` prepends recorded Telegram context (with rulers) to stdout.
+- `getSession()` in lib/opencode: `GET /session/:id` with fallback to session list.
+- `makeRequest` optional timeout parameter (used only for getSession; all other calls wait indefinitely).
+- Minimum 3-backtick code fence for reply quoting.
 
 ## [0.9.0] - 2026-06-04
 
-- `/record` command: ring buffer (100 msgs / 100KB), `/record stop` to clear; gateway returns `{ buffered }` JSON.
-- agentp `--flush`: flush tgagentp's recorded buffer without prepending to stdout.
-- agentp `--qa` prepends recorded Telegram context (with rulers) to stdout.
 - agentp `--tg`/`--no-tg` flags: gateway forwards answer to Telegram; auto mode silently degrades.
 - Agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning.
 - Full `--qa` output (rulers + prompt + answer) forwarded to Telegram.
