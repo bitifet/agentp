@@ -8,6 +8,7 @@ const {
   sendToSession,
   listSessions,
   createSession,
+  getSession,
 } = require('../lib/opencode');
 
 const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
@@ -94,6 +95,7 @@ async function main() {
       console.error('  --tg       Forward the answer to Telegram via agentp gateway (error if unavailable)');
       console.error('  --no-tg    Do not forward to Telegram');
       console.error('  --flush    Flush tgagentp\'s recorded buffer without prepending it to output');
+      console.error('  --getLast  Retrieve last N assistant answers from session history');
       console.error('  --help     Show this help message');
       console.error('');
       console.error('By default, --qa auto-detects tgagentp; standalone mode implies --no-tg.');
@@ -110,11 +112,65 @@ async function main() {
       console.error('  cat prompt.txt | agentp 4096');
       console.error('  # Vim/Neovim filter, preserving prompt + answer:');
       console.error("  :'<,'>!agentp --qa");
+      console.error('  # Retrieve last 3 assistant answers:');
+      console.error('  agentp --getLast 3');
+      console.error('  agentp --getLast 1 4096');
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;
     } else if (args[i] === '--flush') {
       flushMode = true;
+    } else if (args[i] === '--getLast') {
+      i++;
+      const nStr = args[i];
+      if (!nStr || !/^\d+$/.test(nStr)) {
+        console.error('Error: --getLast requires a number (e.g. --getLast 5)');
+        process.exit(1);
+      }
+      const n = parseInt(nStr, 10);
+      try {
+        const sessions = await listSessions(serverBase);
+        if (!sessions || sessions.length === 0) {
+          console.error('No sessions found.');
+          process.exit(1);
+        }
+        const sorted = sessions
+          .filter(s => s.time && s.time.updated)
+          .sort((a, b) => b.time.updated - a.time.updated);
+        // Try to extract messages; getSession may return data with
+        // messages, or the sessions list may already contain them
+        let rawMessages = [];
+        try {
+          const session = await getSession(serverBase, sorted[0].id);
+          rawMessages = session.messages || session.history || session.conversation || [];
+        } catch {
+          // If the dedicated endpoint fails, the list data may have messages
+          rawMessages = sorted[0].messages || sorted[0].history || sorted[0].conversation || [];
+        }
+        if (rawMessages.length === 0) {
+          console.error('No message history available for the most recent session.');
+          console.error('The OpenCode server may not expose message history via the HTTP API.');
+          process.exit(1);
+        }
+        const assistantTexts = rawMessages
+          .filter(m => m.role === 'assistant')
+          .map(m => {
+            if (m.parts) return m.parts.filter(p => p.type === 'text').map(p => p.text).join('');
+            return m.content || m.text || '';
+          })
+          .filter(t => t.trim());
+        if (assistantTexts.length === 0) {
+          console.error('No assistant answers found in session history.');
+          process.exit(1);
+        }
+        const lastN = assistantTexts.slice(-n);
+        process.stdout.write(lastN.join('\n'));
+        if (lastN.length > 0 && !lastN[lastN.length - 1].endsWith('\n')) process.stdout.write('\n');
+      } catch (err) {
+        console.error('Error retrieving session history:', err.message);
+        process.exit(1);
+      }
+      return;
     } else if (args[i] === '--tg') {
       tgMode = true;
     } else if (args[i] === '--no-tg') {

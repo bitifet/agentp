@@ -252,7 +252,7 @@ function quoteReply(msg) {
     if (rm.text[i] === '`') { cur++; maxBackticks = Math.max(maxBackticks, cur); }
     else cur = 0;
   }
-  const fence = '`'.repeat(maxBackticks + 1);
+  const fence = '`'.repeat(Math.max(3, maxBackticks + 1));
   return `In response to ${replyFrom} (${senderType}):\n\n${fence}\n${rm.text}\n${fence}\n\n`;
 }
 
@@ -333,6 +333,15 @@ async function cmdHelp(token, chatId, args) {
         'Can also be enabled at startup with `--think` flag.');
       return;
     }
+    if (topic === 'queue') {
+      await sendLongMessage(token, chatId,
+        '`/queue <message>` ─ queue a message when the server is busy\n\n' +
+        'When the server is processing a previous message, queuing allows you to\n' +
+        'continue working without waiting. Once the current task finishes, the next\n' +
+        'queued message is automatically sent and the answer will reply to the\n' +
+        'original queued message.');
+      return;
+    }
     if (topic === 'record') {
       await sendLongMessage(token, chatId,
         '`/record` ─ toggle recording of messages for agentp context\n' +
@@ -345,7 +354,7 @@ async function cmdHelp(token, chatId, args) {
       return;
     }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
@@ -365,6 +374,7 @@ async function cmdHelp(token, chatId, args) {
     '`/models` ─ list providers and models\n' +
     '`/think` ─ toggle thinking message forwarding\n' +
     '`/record` ─ record Telegram conversation for agentp context\n' +
+    '`/queue <message>` ─ queue a message when server is busy\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
@@ -895,6 +905,22 @@ async function cmdThink(token, chatId, args, setServer, setActiveSession, server
   }
 }
 
+async function cmdQueue(token, chatId, args, _, __, serverBase, replyTo) {
+  const st = getState(serverBase);
+  if (!st.busy) {
+    await sendLongMessage(token, chatId, 'Server is not busy. No need to queue — send your message directly.');
+    return;
+  }
+  const text = args.join(' ').trim();
+  if (!text) {
+    await sendLongMessage(token, chatId, 'Usage: `/queue <message>` — queue a message for when the server is idle.');
+    return;
+  }
+  if (!st.messageQueue) st.messageQueue = [];
+  st.messageQueue.push({ text, replyTo });
+  await sendLongMessage(token, chatId, `📥 Queued. ${st.messageQueue.length} message(s) in queue. Will be sent when the current task finishes.`);
+}
+
 async function cmdRecord(token, chatId, args) {
   if (args.length > 0 && args[0].toLowerCase() === 'stop') {
     recorder.active = false;
@@ -921,6 +947,7 @@ const COMMANDS = {
   'models': cmdModels,
   'think': cmdThink,
   'record': cmdRecord,
+  'queue': cmdQueue,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -932,7 +959,7 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false };
+  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false, messageQueue: [] };
 }
 
 function sessionLabel(st) {
@@ -1199,6 +1226,21 @@ async function main() {
       if (st._sessionReq === sessionCancelRef) st._sessionReq = null;
       if (!isCancelled()) {
         getState(url).busy = false;
+        // Drain message queue for this server
+        const q = st.messageQueue || [];
+        st.messageQueue = [];
+        if (q.length > 0) {
+          const next = q[0];
+          // Re-queue remaining items (if any) for the next round
+          st.messageQueue = q.slice(1);
+          const nextText = next.text;
+          const nextReplyTo = next.replyTo;
+          // Mark busy again and process
+          getState(url).busy = true;
+          const nextTaskId = ++st.taskId;
+          log.debug(`  → processing queued message (task ${nextTaskId})`);
+          processMessageAsync(chatId, nextText, url, !!st.activeSessionId, st.activeSessionId, nextTaskId, nextReplyTo);
+        }
       }
     }
   }
@@ -1347,7 +1389,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, chatId,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue`);
         }
         continue;
       }
@@ -1358,7 +1400,7 @@ async function main() {
       // Non-command message ─ process in background
       const st = getState(serverBase);
       if (st.busy) {
-        await sendLongMessage(token, chatId, '⏳ Server is busy processing a previous message. Please wait for it to finish, or use /cancel to cancel it.');
+        await sendLongMessage(token, chatId, '⏳ Server is busy. Use `/cancel` to cancel or `/queue <message>` to queue your message.');
         continue;
       }
       st.busy = true;

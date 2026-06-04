@@ -105,7 +105,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [--tg|--no-tg] [--flush] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears tgagentp's recorded buffer without prepending |
+| `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n answers |
 | `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`) |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
@@ -118,13 +118,16 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Pending
 
-- `agentp --getLast n` — retrieve last n answers from session history
+*(none)*
 
 ### In Progress
 
 *(none)*
 
 ### Done
+
+- `/queue` command: queue messages when server is busy, auto-sent after current task finishes preserves replyTo chain — 0.9.0
+- `agentp --getLast n` — retrieve last n answers from session history — 0.9.0
 
 - `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.9.0
 - agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
