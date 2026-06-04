@@ -7,9 +7,9 @@
 
 This package provides three CLI tools:
 
-- **`agentp`** — pipes prompt text into a running OpenCode session and streams the assistant final answer back to stdout
+- **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
 - **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
-- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session/agent switching, model listing, permission handling, and remote restart.
+- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode TUI sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, and remote restart.
 
 It is designed for prompt-driven workflows where you want to do things like:
 
@@ -39,7 +39,7 @@ npm link
 
 Notes:
 
-- `agentp` connects via the OpenCode session API (`POST /session/:id/message`).
+- `agentp` connects to the OpenCode event endpoint over HTTP.
 - In practice this means running `opencode serve` (or equivalent serve mode) so the port is open.
 - `opencode attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
 - If the OpenCode server is password-protected (`OPENCODE_SERVER_PASSWORD`), both `agentp` and `ocmux` automatically send the required HTTP Basic Auth credentials.
@@ -53,8 +53,12 @@ agentp [options] [url]
 Options:
 
 - `--qa`: print the original prompt and answer with labels (useful when used as a filter)
+- `--tg`: forward the answer to Telegram via tgagentp gateway (error if unreachable)
+- `--no-tg`: do not forward to Telegram
 - `--version`: show version
 - `--help`: show help message
+
+By default, `--qa` implies `--tg`; standalone mode implies `--no-tg`.
 
 Arguments:
 
@@ -116,17 +120,16 @@ From Vim/Neovim, send the current visual selection and keep the prompt with the 
 Manage OpenCode server + TUI in tmux for project directories.
 
 ```bash
-ocmux [options] [<subcommand>] [<directory>]
+ocmux [-l] [<subcommand>] [<directory>]
 ```
 
 Without arguments, searches upward from `<directory>` (default: `$PWD`) for `.ocmux.json` and switches to that server's tmux window.
 
 Subcommands:
 
-- **`serve [--git|--GIT] [--print-logs] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
+- **`serve [--git|--GIT] [dir]`** — Create a server in `dir` (default: `$PWD`) and attach a TUI pane. Aliased as `new` for backwards compatibility (to be removed in 1.0). Errors if one already exists there. Warns if a parent directory already has a server.
   - `--git` resolves `dir` to the nearest parent with a `.git` entry (file or dir); errors if none is found.
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
-  - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr inside the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`list`** — List all running servers with their directories, URLs, and status.
 
@@ -154,10 +157,12 @@ Notes:
 
 ## How agentp Works
 
-1. Reads all stdin into a single prompt string.
-2. Finds the most recently updated session on the server (or creates a new one named `agentp`).
-3. Sends the prompt via the OpenCode session API (`POST /session/:id/message`).
-4. Prints the assistant's response to stdout.
+1. Finds the most recently updated session, or creates one named `agentp`.
+2. Sends the prompt via the session API (`POST /session/:id/message`).
+3. Prints the assistant answer to stdout.
+4. With `--tg`, forwards the answer to Telegram via the agentp gateway.
+
+The session API ensures the request is processed even when no TUI is attached, and returns the full answer in a single HTTP response.
 
 Operational hint:
 
@@ -173,9 +178,9 @@ tgagentp [options]
 
 Keeps running indefinitely. On each text message from Telegram it:
 
-1. Routes non-command messages to the current active session via `POST /session/:id/prompt_async`.
-2. Streams the answer back to the chat via the event stream (background async — commands remain responsive).
-3. Sends the full answer to the same Telegram chat as a reply to the original message.
+1. Routes non-command messages to the current active server's TUI (same protocol as `agentp`).
+2. Waits for the assistant to finish (background async — commands remain responsive).
+3. Sends the full answer back to the same Telegram chat.
 
 Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
@@ -183,20 +188,16 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
 | Command | Action |
 |---|---|
-| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`) |
+| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
 | `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
 | `/sessions switch <number\|name>` | Switch active session by position or partial name match |
-| `/agents` | List primary agents (▶ marker for the active one) |
-| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
+| `/agents` | List available agents (name, mode, model, description) |
 | `/models` | List connected providers with model counts, context limits, and costs |
 | `/status` | Show current server path, URL, busy status, and active session |
 | `/cancel` | Cancel the current AI response for the active server |
 | `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
-| `/allow` | Approve a permission request once |
-| `/reject` | Deny a permission request |
-| `/always` | Approve and remember for the session |
 | `/shutdown [force]` | (requires `--dev`) Stop tgagentp; refuses if busy unless `force` is given |
 
 ### Per-server state
@@ -220,6 +221,17 @@ tgagentp
 - `--verbose`: show detailed logs (errors, trace, debug) on stderr
 - `--think`: start with thinking messages enabled (default: off)
 - `--dev`: enable `/shutdown` command for remote restart (run via `while true; do tgagentp --dev; done`)
+
+### Agentp gateway
+
+tgagentp starts a tiny HTTP server on `127.0.0.1` that accepts `POST /send` requests from `agentp --tg`. This enables cross-tool interoperability: answers obtained through `agentp` (from scripts, editors, or pipes) are forwarded to your Telegram chat.
+
+- Port is randomly assigned by default; overridable via `TGAGENTP_PORT`.
+- Port is written to `/tmp/tgagentp-port` for agentp discovery.
+- Authentication reuses `OPENCODE_SERVER_PASSWORD`.
+- Messages for the active server are delivered immediately.
+- Messages for non-active servers are queued and delivered on `/servers switch`.
+- Debounced Telegram notification on queue (configurable via `TGAGENTP_DEBOUNCE_MS`).
 
 ### Logging
 
@@ -247,9 +259,11 @@ A startup greeting is sent to the last known chat on boot — includes /status-s
 | Variable | Description |
 |---|---|
 | `TELEGRAM_BOT_TOKEN` | **Required.** Telegram bot token from @BotFather. |
-| `OPENCODE_SERVER_PASSWORD` | Optional. OpenCode server HTTP Basic Auth password. |
+| `OPENCODE_SERVER_PASSWORD` | Optional. OpenCode server HTTP Basic Auth password (also used for agentp gateway auth). |
 | `OPENCODE_SERVER_USERNAME` | Optional. OpenCode server username (default: `opencode`). |
 | `TGAGENTP_ALLOWED_CHAT_IDS` | Optional. Comma-separated Telegram chat IDs that are allowed to use the bot. |
+| `TGAGENTP_PORT` | Optional. Agentp gateway listen port (default: `0` = random). |
+| `TGAGENTP_DEBOUNCE_MS` | Optional. Debounce interval for queued-message notifications (default: `5000`). |
 
 ## License
 

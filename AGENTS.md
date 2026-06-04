@@ -38,7 +38,7 @@ Extracted from `bin/agentp`; used by both `agentp` and `tgagentp`:
 - `listSessions(server, directory?)` — `GET /session`; returns parsed JSON array; optional `?directory=` filter
 - `createSession(server, title?)` — `POST /session`; returns the created `Session` object; optional `title`
 - `updateSession(server, sessionId, title, agent?)` — `PATCH /session/:id`; returns the updated `Session` object; optional `agent` to set the session's agent
-- `sendToSession(server, sessionId, text, agent?)` — `POST /session/:id/message`; returns concatenated text parts from response; optional `agent` to handle the message
+- `sendToSession(server, sessionId, text, agent?, cancelRef?)` — `POST /session/:id/message`; returns concatenated text parts from response; optional `agent`, optional `cancelRef` for aborting the request
 - `selectSession(server, sessionId)` — `POST /session/:id/select`; tells the TUI to navigate to the given session (silently ignores 404 if the endpoint isn't available in older opencode versions)
 - `listAgents(server)` — `GET /agent`; returns parsed JSON array of agent objects
 - `listProviders(server)` — `GET /provider`; returns parsed JSON array of provider objects
@@ -73,7 +73,15 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - `GET /agent` — list available agents
 - `GET /provider` — list connected providers/models
 
-## OpenCode tmux session model (ocmux)
+## Agentp gateway (tgagentp ↔ agentp interop)
+
+- tgagentp starts a tiny HTTP server (POST /send) on `127.0.0.1`, port from `TGAGENTP_PORT` (default 0 = random).
+- Port is written to `/tmp/tgagentp-port` for agentp discovery.
+- Validates `Authorization` header against `OPENCODE_SERVER_PASSWORD`.
+- agentp `--tg` reads the port file and POSTs `{ text, server }` to the gateway.
+- Messages for the active server are delivered immediately; others are queued per-server.
+- Debounced Telegram notification (configurable via `TGAGENTP_DEBOUNCE_MS`, default 5000ms).
+- Queued messages are flushed on `/servers switch`.
 
 - Single tmux session named `"Opencode"`
 - Windows named by full project directory path
@@ -89,7 +97,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API) |
+| `agentp [--qa] [--tg|--no-tg] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram |
 | `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`) |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
@@ -102,7 +110,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Pending
 
-*(none)*
+- `agentp --getLast n` — retrieve last n answers from session history
 
 ### In Progress
 
@@ -110,6 +118,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
+- agentp `--tg`/`--no-tg` — gateway forwards answer to Telegram via tgagentp HTTP server; per-server queue with debounced notifications; auto-flush on server switch
 - agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints
 - ocmux `--print-logs` flag — pass-through to `opencode serve --print-logs` (prints server logs to stderr in the server pane)
 - /agents lists only primary agents with ▶ active marker
