@@ -910,10 +910,15 @@ async function main() {
       console.error('');
       console.error('Environment variables:');
       console.error('  TELEGRAM_BOT_TOKEN         Telegram bot token (required)');
-      console.error('  OPENCODE_SERVER_PASSWORD    OpenCode server password (optional)');
+      console.error('  OPENCODE_SERVER_PASSWORD    OpenCode server password (optional, also used for agentp gateway auth)');
       console.error('  OPENCODE_SERVER_USERNAME    OpenCode server username (optional, default: opencode)');
       console.error('  TGAGENTP_ALLOWED_CHAT_IDS   Comma-separated Telegram chat IDs (optional)');
       console.error('                               Example: "123456,-789012"');
+      console.error('  TGAGENTP_PORT               Agentp gateway listen port (optional, default: random)');
+      console.error('  TGAGENTP_DEBOUNCE_MS        Debounce interval for queued agentp messages (optional, default: 5000)');
+      console.error('');
+      console.error('Also starts an agentp gateway (tiny HTTP server on localhost) that');
+      console.error('accepts POST /send from agentp --tg and forwards answers to Telegram.');
       console.error('');
       console.error('See also: agentp, ocmux');
       console.error('');

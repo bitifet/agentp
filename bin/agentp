@@ -82,12 +82,13 @@ async function main() {
       console.error('  --help     Show this help message');
       console.error('');
       console.error('By default, --qa implies --tg; standalone mode implies --no-tg.');
+      console.error('tgagentp must be running for --tg to work.');
       console.error('');
       console.error('Arguments:');
       console.error('  url        OpenCode server URL or port number (default: 4096)');
       console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
       console.error('');
-      console.error('See also: ocmux -- manage OpenCode tmux sessions (ocmux --help)');
+      console.error('See also: tgagentp -- Telegram bridge (tgagentp --help), ocmux -- manage OpenCode tmux sessions (ocmux --help)');
       console.error('');
       console.error('Examples:');
       console.error('  printf "Summarize this file" | agentp');
