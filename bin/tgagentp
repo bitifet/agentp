@@ -50,6 +50,32 @@ function flushAgentpQueue(server, token, chatId) {
 }
 
 // ---------------------------------------------------------------------------
+// /record — ring buffer for Telegram conversation context
+// ---------------------------------------------------------------------------
+
+const MAX_RECORDED_MSGS = 100;
+const MAX_RECORDED_BYTES = 100 * 1024;
+
+const recorder = { active: false, messages: [], bytes: 0 };
+
+function bufferMessage(role, text) {
+  if (!recorder.active) return;
+  recorder.messages.push({ role, text });
+  recorder.bytes += Buffer.byteLength(text, 'utf8');
+  while (recorder.messages.length > MAX_RECORDED_MSGS || recorder.bytes > MAX_RECORDED_BYTES) {
+    const oldest = recorder.messages.shift();
+    recorder.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+  }
+}
+
+function flushRecorded() {
+  if (!recorder.active) return [];
+  const msgs = recorder.messages.splice(0);
+  recorder.bytes = 0;
+  return msgs;
+}
+
+// ---------------------------------------------------------------------------
 // Telegram Bot API helpers
 // ---------------------------------------------------------------------------
 
@@ -307,8 +333,19 @@ async function cmdHelp(token, chatId, args) {
         'Can also be enabled at startup with `--think` flag.');
       return;
     }
+    if (topic === 'record') {
+      await sendLongMessage(token, chatId,
+        '`/record` ─ toggle recording of messages for agentp context\n' +
+        '`/record stop` ─ stop recording and clear buffer\n\n' +
+        'When recording is active, all user and assistant messages are buffered in memory\n' +
+        '(max 100 messages / 100KB). The next `agentp` invocation retrieves the buffered\n' +
+        'conversation and prepends it to its `--qa` stdout output, so OpenCode can\n' +
+        'see the full conversation context.\n\n' +
+        'Buffered messages are NOT sent back to Telegram (they are already there).');
+      return;
+    }
     await sendLongMessage(token, chatId,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatId,
@@ -327,6 +364,7 @@ async function cmdHelp(token, chatId, args) {
     '`/agents switch <name>` ─ switch active agent\n' +
     '`/models` ─ list providers and models\n' +
     '`/think` ─ toggle thinking message forwarding\n' +
+    '`/record` ─ record Telegram conversation for agentp context\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
@@ -740,10 +778,13 @@ function startAgentpGateway(token, chatIdResolver, serverBaseResolver) {
               res.end('Bad Request: text and server are required');
               return;
             }
-            res.writeHead(200);
-            res.end('OK');
-
             const chatId = chatIdResolver();
+
+            // Return recorded conversation buffer before forwarding
+            const buffered = flushRecorded();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ buffered }));
+
             if (!chatId) return;
             const activeUrl = normalizeUrl(serverBaseResolver());
             const targetUrl = normalizeUrl(server);
@@ -854,6 +895,23 @@ async function cmdThink(token, chatId, args, setServer, setActiveSession, server
   }
 }
 
+async function cmdRecord(token, chatId, args) {
+  if (args.length > 0 && args[0].toLowerCase() === 'stop') {
+    recorder.active = false;
+    recorder.messages = [];
+    recorder.bytes = 0;
+    await sendLongMessage(token, chatId, '⏹ Recording stopped. Buffer cleared.');
+    return;
+  }
+  recorder.active = !recorder.active;
+  if (!recorder.active) {
+    recorder.messages = [];
+    recorder.bytes = 0;
+  }
+  await sendLongMessage(token, chatId,
+    recorder.active ? '🔴 Recording started. Messages will be cached for agentp.' : '⏹ Recording stopped. Buffer cleared.');
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -862,6 +920,7 @@ const COMMANDS = {
   'agents': cmdAgents,
   'models': cmdModels,
   'think': cmdThink,
+  'record': cmdRecord,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -1113,11 +1172,14 @@ async function main() {
       st.pendingPermission = null;
       if (url === serverBase) {
         if (answer && answer.trim()) {
-          await sendLongMessage(token, chatId, answer.trim(), replyTo);
+          const trimmed = answer.trim();
+          await sendLongMessage(token, chatId, trimmed, replyTo);
+          bufferMessage('assistant', trimmed);
         }
       } else {
         getState(url).pendingResponse = answer;
         await sendLongMessage(token, chatId, `✅ Server \`${url}\` finished processing. Switch back to see the response.`, replyTo);
+        if (answer && answer.trim()) bufferMessage('assistant', answer.trim());
       }
     } catch (err) {
       // Clean up SSE listener if it's still active
@@ -1285,10 +1347,13 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, chatId,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record`);
         }
         continue;
       }
+
+      // Buffer user messages for /record
+      bufferMessage('user', replyContext + text);
 
       // Non-command message ─ process in background
       const st = getState(serverBase);

@@ -192,7 +192,7 @@ function printHelp() {
   console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
   console.error('          --GIT  Use the nearest parent with a .git directory only.');
   console.error('          Refuses to create above an existing .ocmux.json found while searching.');
-  console.error(          '          --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
+  console.error('          --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
   console.error('  kill    Kill the server found upward from <directory>.');
   console.error('          Removes its tmux window and state file.');
   console.error('  list    List all running servers with their directories and URLs.');

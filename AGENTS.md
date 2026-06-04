@@ -86,6 +86,8 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Messages for the active server are delivered immediately; others are queued per-server.
 - Debounced Telegram notification (configurable via `TGAGENTP_DEBOUNCE_MS`, default 5000ms).
 - Queued messages are flushed on `/servers switch`.
+- Gateway response includes `{ buffered: [...] }` — recorded conversation messages (see `/record` command) flushed on each POST.
+- agentp `--qa` prepends the buffered context to stdout; `--flush` bypasses prepending but still triggers the flush.
 
 ## OpenCode tmux session model (ocmux)
 
@@ -103,7 +105,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [--tg|--no-tg] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram |
+| `agentp [--qa] [--tg|--no-tg] [--flush] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears tgagentp's recorded buffer without prepending |
 | `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`) |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
@@ -124,6 +126,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
+- `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.9.0
 - agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
 - agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning (not hard error) for `--tg`; auto mode silently degrades — 0.9.0
 - tgagentp: `lockedChatId` set at startup to fix race condition with agentp gateway — 0.9.0

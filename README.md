@@ -55,10 +55,12 @@ Options:
 - `--qa`: print the original prompt and answer with labels (useful when used as a filter)
 - `--tg`: forward the answer to Telegram via tgagentp gateway (error if unreachable)
 - `--no-tg`: do not forward to Telegram
+- `--flush`: flush tgagentp's recorded buffer without prepending it to output
 - `--version`: show version
 - `--help`: show help message
 
-By default, `--qa` implies `--tg`; standalone mode implies `--no-tg`.
+By default, `--qa` auto-detects tgagentp (silently degrades if unavailable); standalone mode implies `--no-tg`.
+With `--tg`, errors if tgagentp is unavailable.
 
 Arguments:
 
@@ -124,6 +126,15 @@ From Vim/Neovim, forward the answer to your Telegram:
 (Works as long as `tgagentp` is running. The answer appears both in the editor
 and in your Telegram chat.)
 
+From Vim/Neovim, flush the recorded buffer without prepending context:
+
+```vim
+:'<,'>!agentp --qa --flush
+```
+
+Useful when you've finished a conversation thread and want to reset the recorded
+context for a new topic.
+
 ## ocmux
 
 Manage OpenCode server + TUI in tmux for project directories.
@@ -174,6 +185,10 @@ Notes:
 5. With `--tg` (or by default when `--qa` is given), forwards the answer to Telegram
    via the agentp gateway. The answer appears in your Telegram chat as if tgagentp
    itself had processed the request.
+6. If tgagentp's [/record](#tgagentp) feature was active, the gateway response includes
+   the recorded conversation buffer. In `--qa` mode, agentp prepends this buffer (with
+   rulers) to its stdout so OpenCode receives the full Telegram context. Use `--flush`
+   to clear the buffer without prepending.
 
 The session API ensures the request is processed even when no TUI is attached, and returns the full answer in a single HTTP response.
 
@@ -201,7 +216,7 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 
 | Command | Action |
 |---|---|
-| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`) |
+| `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`, `record`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
 | `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
@@ -212,6 +227,7 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/status` | Show current server path, URL, busy status, and active session |
 | `/cancel` | Cancel the current AI response for the active server |
 | `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
+| `/record [stop]` | Toggle recording of Telegram conversation for agentp context; `/record stop` clears and stops |
 | `/allow` | Approve a permission request once |
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |
@@ -249,6 +265,7 @@ tgagentp starts a tiny HTTP server on `127.0.0.1` that accepts `POST /send` requ
 - Messages for the active server are delivered immediately.
 - Messages for non-active servers are queued and delivered on `/servers switch`.
 - Debounced Telegram notification on queue (configurable via `TGAGENTP_DEBOUNCE_MS`).
+- When [/record](#tgagentp) is active, the gateway response includes the recorded conversation buffer. `agentp --qa` prepends this buffer (with rulers) to its stdout so the full Telegram context is available to OpenCode. Use `agentp --qa --flush` to flush the buffer without prepending.
 
 ### Logging
 

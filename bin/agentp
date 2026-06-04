@@ -35,8 +35,16 @@ function notifyAgentpGateway(port, server, text) {
       let data = '';
       res.on('data', (chunk) => { data += chunk; });
       res.on('end', () => {
-        if (res.statusCode === 200) resolve();
-        else reject(new Error(`status ${res.statusCode}: ${data}`));
+        if (res.statusCode === 200) {
+          try {
+            const result = JSON.parse(data);
+            resolve(result.buffered || []);
+          } catch {
+            resolve([]);
+          }
+        } else {
+          reject(new Error(`status ${res.statusCode}: ${data}`));
+        }
       });
     });
     req.setTimeout(5000, () => {
@@ -66,6 +74,7 @@ const FINAL_ROW = '    —————————————————\n';
 async function main() {
   let serverBase = 'http://localhost:4096';
   let qaMode = false;
+  let flushMode = false;
   // tgMode: false = disabled, 'auto' = auto-detect, true = explicit --tg
   let tgMode = null;
 
@@ -84,6 +93,7 @@ async function main() {
       console.error('  --qa       Print the original prompt and answer with labels (useful as a filter)');
       console.error('  --tg       Forward the answer to Telegram via agentp gateway (error if unavailable)');
       console.error('  --no-tg    Do not forward to Telegram');
+      console.error('  --flush    Flush tgagentp\'s recorded buffer without prepending it to output');
       console.error('  --help     Show this help message');
       console.error('');
       console.error('By default, --qa auto-detects tgagentp; standalone mode implies --no-tg.');
@@ -103,6 +113,8 @@ async function main() {
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;
+    } else if (args[i] === '--flush') {
+      flushMode = true;
     } else if (args[i] === '--tg') {
       tgMode = true;
     } else if (args[i] === '--no-tg') {
@@ -172,26 +184,37 @@ async function main() {
     process.exit(1);
   }
 
-  // Build full --qa output and send to stdout
-  let tgText = answer;
+  // Build the message to send to Telegram (QA pair with rulers)
+  let tgMessage = answer;
   if (qaMode) {
-    tgText = HUMAN_ROW + promptText + AGENT_ROW + answer;
-    if (!answer.endsWith('\n')) tgText += '\n';
-    tgText += FINAL_ROW;
-    process.stdout.write(tgText);
-  } else {
-    process.stdout.write(answer);
-    if (!answer.endsWith('\n')) process.stdout.write('\n');
+    tgMessage = HUMAN_ROW + promptText + AGENT_ROW + answer;
+    if (!answer.endsWith('\n')) tgMessage += '\n';
+    tgMessage += FINAL_ROW;
   }
 
-  // Post-send: notify tgagentp if we have a port
+  // Post-send: notify tgagentp, get recorded context back
+  let buffered = [];
   let tgError = null;
   if (tgPort) {
     try {
-      await notifyAgentpGateway(tgPort, serverBase, tgText);
+      buffered = await notifyAgentpGateway(tgPort, serverBase, tgMessage);
     } catch (err) {
       tgError = err;
     }
+  }
+
+  // Build stdout output (prepend recorded context if any, unless --flush)
+  if (qaMode) {
+    if (!flushMode && buffered.length > 0) {
+      for (const msg of buffered) {
+        const row = msg.role === 'user' ? HUMAN_ROW : AGENT_ROW;
+        process.stdout.write(row + msg.text + '\n');
+      }
+    }
+    process.stdout.write(tgMessage);
+  } else {
+    process.stdout.write(tgMessage);
+    if (!tgMessage.endsWith('\n')) process.stdout.write('\n');
   }
 
   // Warnings at the end (stderr)
