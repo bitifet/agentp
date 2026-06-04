@@ -104,7 +104,7 @@ function convertMarkdownToHtml(text) {
 
   return parts.map((part, i) => {
     if (i % 2 === 1) {
-      // Code block — strip language tag, escape entities, wrap in <pre>
+      // Code block ─ strip language tag, escape entities, wrap in <pre>
       const nl = part.indexOf('\n');
       const inner = nl >= 0 ? part.slice(nl + 1) : part;
       return '<pre>' + inner
@@ -239,25 +239,25 @@ async function cmdHelp(token, chatId, args) {
     const topic = args[0].toLowerCase();
     if (topic === 'servers') {
       await sendLongMessage(token, chatId,
-        '`/servers` — list all opencode servers (ocmux sessions)\n' +
-        '`/servers switch <name>` — switch target server\n\n' +
+        '`/servers` ─ list all opencode servers (ocmux sessions)\n' +
+        '`/servers switch <name>` ─ switch target server\n\n' +
         '`<name>` can be a full path or basename of the project directory.');
       return;
     }
     if (topic === 'sessions') {
       await sendLongMessage(token, chatId,
-        '`/sessions` — list active sessions (numbered, newest first, max 50)\n' +
-        '`/sessions switch <number-or-name>` — send messages to a specific session\n' +
-        '`/sessions new [name]` — create a new session\n' +
-        '`/sessions rename <name>` — rename the active session\n\n' +
+        '`/sessions` ─ list active sessions (numbered, newest first, max 50)\n' +
+        '`/sessions switch <number-or-name>` ─ send messages to a specific session\n' +
+        '`/sessions new [name]` ─ create a new session\n' +
+        '`/sessions rename <name>` ─ rename the active session\n\n' +
         'Switch by number (from the list) or by case-insensitive partial name match.\n' +
         'Use `/sessions` to find session numbers.');
       return;
     }
     if (topic === 'shutdown') {
       await sendLongMessage(token, chatId,
-        '`/shutdown` — stop tgagentp process\n' +
-        '`/shutdown force` — force shutdown even if busy (in-flight work will be lost)\n\n' +
+        '`/shutdown` ─ stop tgagentp process\n' +
+        '`/shutdown force` ─ force shutdown even if busy (in-flight work will be lost)\n\n' +
         'Only available when tgagentp is started with `--dev` flag.\n' +
         'Useful when running tgagentp in a restart loop:\n' +
         '`while true; do tgagentp --dev; done`');
@@ -265,32 +265,32 @@ async function cmdHelp(token, chatId, args) {
     }
     if (topic === 'agents') {
       await sendLongMessage(token, chatId,
-        '`/agents` — list primary agents (with ▶ marker for the active one).\n' +
-        '`/agents switch <name>` — switch the active agent. Subsequent messages will use this agent.\n\n' +
+        '`/agents` ─ list primary agents (with ▶ marker for the active one).\n' +
+        '`/agents switch <name>` ─ switch the active agent. Subsequent messages will use this agent.\n\n' +
         'Agent switching requires an active session (`/sessions switch` or `/sessions new`).');
       return;
     }
     if (topic === 'session') {
       await sendLongMessage(token, chatId,
         '`/session` is an alias for `/sessions`.\n\n' +
-        '`/sessions` — list active sessions\n' +
-        '`/sessions switch <number-or-name>` — switch to a session\n' +
-        '`/sessions new [name]` — create a new session\n' +
-        '`/sessions rename <name>` — rename the active session');
+        '`/sessions` ─ list active sessions\n' +
+        '`/sessions switch <number-or-name>` ─ switch to a session\n' +
+        '`/sessions new [name]` ─ create a new session\n' +
+        '`/sessions rename <name>` ─ rename the active session');
       return;
     }
     if (topic === 'models') {
       await sendLongMessage(token, chatId,
-        '`/models` — list all providers and their models.\n' +
+        '`/models` ─ list all providers and their models.\n' +
         'Shows provider name, connection status, default model, and up to 5 models per provider\n' +
         'with status, context limit, and input/output costs.');
       return;
     }
     if (topic === 'allow' || topic === 'reject' || topic === 'always') {
       await sendLongMessage(token, chatId,
-        '`/allow` — approve a permission request once\n' +
-        '`/reject` — deny a permission request\n' +
-        '`/always` — approve and remember for the session\n\n' +
+        '`/allow` ─ approve a permission request once\n' +
+        '`/reject` ─ deny a permission request\n' +
+        '`/always` ─ approve and remember for the session\n\n' +
         'These commands respond to OpenCode permission prompts forwarded by tgagentp.\n' +
         'When OpenCode needs approval (e.g. to run a shell command), tgagentp sends a\n' +
         '🔐 notification to the chat. Use one of these commands to answer.');
@@ -298,10 +298,10 @@ async function cmdHelp(token, chatId, args) {
     }
     if (topic === 'think') {
       await sendLongMessage(token, chatId,
-        '`/think` — toggle thinking message forwarding\n' +
-        '`/think on` — forward model thinking to the chat in real-time\n' +
-        '`/think off` — stop forwarding thinking messages (default)\n' +
-        '`/think switch` — toggle current state\n\n' +
+        '`/think` ─ toggle thinking message forwarding\n' +
+        '`/think on` ─ forward model thinking to the chat in real-time\n' +
+        '`/think off` ─ stop forwarding thinking messages (default)\n' +
+        '`/think switch` ─ toggle current state\n\n' +
         'When enabled, the model\'s internal reasoning steps are sent to the chat\n' +
         'as they are generated, prefixed with 💭.\n' +
         'Can also be enabled at startup with `--think` flag.');
@@ -312,23 +312,23 @@ async function cmdHelp(token, chatId, args) {
     return;
   }
   await sendLongMessage(token, chatId,
-    '`/help` — show this message\n' +
-    '`/help <topic>` — detailed help\n' +
-    '`/status` — show current server and session\n' +
-    '`/cancel` — cancel the running prompt\n' +
-    '`/servers` — list running opencode servers\n' +
-    '`/servers switch <name>` — switch to a different server\n' +
-    '`/sessions` — list/create/switch/rename sessions\n' +
-    '`/sessions switch <number-or-name>` — switch to a session\n' +
-    '`/sessions new [name]` — create a new session\n' +
-    '`/sessions rename <name>` — rename the active session\n' +
-    '`/session` — alias for `/sessions`\n' +
-    '`/agents` — list available agents\n' +
-    '`/agents switch <name>` — switch active agent\n' +
-    '`/models` — list providers and models\n' +
-    '`/think` — toggle thinking message forwarding\n' +
-    '`/allow` / `/reject` / `/always` — respond to permission requests\n' +
-    '`/shutdown` — stop tgagentp (only with `--dev` flag)\n\n' +
+    '`/help` ─ show this message\n' +
+    '`/help <topic>` ─ detailed help\n' +
+    '`/status` ─ show current server and session\n' +
+    '`/cancel` ─ cancel the running prompt\n' +
+    '`/servers` ─ list running opencode servers\n' +
+    '`/servers switch <name>` ─ switch to a different server\n' +
+    '`/sessions` ─ list/create/switch/rename sessions\n' +
+    '`/sessions switch <number-or-name>` ─ switch to a session\n' +
+    '`/sessions new [name]` ─ create a new session\n' +
+    '`/sessions rename <name>` ─ rename the active session\n' +
+    '`/session` ─ alias for `/sessions`\n' +
+    '`/agents` ─ list available agents\n' +
+    '`/agents switch <name>` ─ switch active agent\n' +
+    '`/models` ─ list providers and models\n' +
+    '`/think` ─ toggle thinking message forwarding\n' +
+    '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
+    '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
@@ -525,10 +525,10 @@ async function cmdSessions(token, chatId, args, setServer, setActiveSession, ser
     await sendLongMessage(token, chatId,
       `Unknown subcommand: /sessions ${sub}\n\n` +
       'Usage:\n' +
-      '  `/sessions` — list sessions\n' +
-      '  `/sessions switch <number-or-name>` — switch to a session\n' +
-      '  `/sessions new [name]` — create a new session\n' +
-      '  `/sessions rename <name>` — rename the active session');
+      '  `/sessions` ─ list sessions\n' +
+      '  `/sessions switch <number-or-name>` ─ switch to a session\n' +
+      '  `/sessions new [name]` ─ create a new session\n' +
+      '  `/sessions rename <name>` ─ rename the active session');
     return;
   }
 
@@ -633,7 +633,7 @@ async function cmdAgents(token, chatId, args, setServer, setActiveSession, serve
         updateSession(server, st.activeSessionId, undefined, target.name);
         selectSession(server, st.activeSessionId);
       }
-      const model = target.model ? ` — \`${target.model.providerID}/${target.model.modelID}\`` : '';
+      const model = target.model ? ` ─ \`${target.model.providerID}/${target.model.modelID}\`` : '';
       await sendLongMessage(token, chatId,
         `Switched to agent: **${target.name}**${model}\nSubsequent messages will use this agent.`);
     } catch (err) {
@@ -656,7 +656,7 @@ async function cmdAgents(token, chatId, args, setServer, setActiveSession, serve
     const activeAgentName = getState(server).activeAgentName;
     const lines = primary.map(a => {
       const bullet = a.name === activeAgentName ? '▶ ' : ' · ';
-      const model = a.model ? ` — \`${a.model.providerID}/${a.model.modelID}\`` : '';
+      const model = a.model ? ` ─ \`${a.model.providerID}/${a.model.modelID}\`` : '';
       const desc = a.description ? `. ${a.description}` : '';
       return bullet + '**' + a.name + '**' + model + desc;
     });
@@ -707,66 +707,77 @@ async function cmdModels(token, chatId, args, setServer, setActiveSession, serve
 const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the current state.';
 
 // ---------------------------------------------------------------------------
-// Agentp gateway — tiny HTTP server for agentp --tg
+// Agentp gateway ─ tiny HTTP server for agentp --tg
 // ---------------------------------------------------------------------------
 
 function startAgentpGateway(token, chatIdResolver, serverBaseResolver) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
-      if (req.method !== 'POST' || req.url !== '/send') {
-        res.writeHead(405);
-        res.end('Method Not Allowed');
-        return;
-      }
-      if (!validateAgentpAuth(req)) {
-        res.writeHead(401);
-        res.end('Unauthorized');
-        return;
-      }
-      let body = '';
-      req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
-        let data;
-        try { data = JSON.parse(body); } catch {
-          res.writeHead(400);
-          res.end('Bad Request');
+      try {
+        if (req.method !== 'POST' || req.url !== '/send') {
+          res.writeHead(405);
+          res.end('Method Not Allowed');
           return;
         }
-        const { text, server } = data;
-        if (typeof text !== 'string' || typeof server !== 'string') {
-          res.writeHead(400);
-          res.end('Bad Request: text and server are required');
+        if (!validateAgentpAuth(req)) {
+          res.writeHead(401);
+          res.end('Unauthorized');
           return;
         }
-        res.writeHead(200);
-        res.end('OK');
+        let body = '';
+        req.on('data', (chunk) => { body += chunk; });
+        req.on('end', () => {
+          try {
+            let data;
+            try { data = JSON.parse(body); } catch {
+              res.writeHead(400);
+              res.end('Bad Request');
+              return;
+            }
+            const { text, server } = data;
+            if (typeof text !== 'string' || typeof server !== 'string') {
+              res.writeHead(400);
+              res.end('Bad Request: text and server are required');
+              return;
+            }
+            res.writeHead(200);
+            res.end('OK');
 
-        const chatId = chatIdResolver();
-        if (!chatId) return;
-        const activeUrl = normalizeUrl(serverBaseResolver());
-        const targetUrl = normalizeUrl(server);
+            const chatId = chatIdResolver();
+            if (!chatId) return;
+            const activeUrl = normalizeUrl(serverBaseResolver());
+            const targetUrl = normalizeUrl(server);
 
-        if (targetUrl === activeUrl) {
-          sendLongMessage(token, chatId, text.trim()).catch(() => {});
-        } else {
-          if (!agentpQueues[server]) {
-            agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
-          }
-          const q = agentpQueues[server];
-          q.messages.push(text);
-          if (!q.notifyTimer) {
-            q.notifyTimer = setTimeout(() => {
-              q.notifyTimer = null;
-              if (q.messages.length > 0 && !q.notified) {
-                q.notified = true;
-                sendLongMessage(token, chatId,
-                  `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
-                  .catch(() => {});
+            if (targetUrl === activeUrl) {
+              sendLongMessage(token, chatId, text.trim()).catch(() => {});
+            } else {
+              if (!agentpQueues[server]) {
+                agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
               }
-            }, TGAGENTP_DEBOUNCE_MS);
+              const q = agentpQueues[server];
+              q.messages.push(text);
+              if (!q.notifyTimer) {
+                q.notifyTimer = setTimeout(() => {
+                  q.notifyTimer = null;
+                  if (q.messages.length > 0 && !q.notified) {
+                    q.notified = true;
+                    sendLongMessage(token, chatId,
+                      `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
+                      .catch(() => {});
+                  }
+                }, TGAGENTP_DEBOUNCE_MS);
+              }
+            }
+          } catch (err) {
+            log.error(`Agentp gateway handler error: ${err.message}`);
           }
-        }
-      });
+        });
+      } catch (err) {
+        log.error(`Agentp gateway handler error: ${err.message}`);
+      }
+    });
+    server.on('error', (err) => {
+      log.error(`Agentp gateway server error: ${err.message}`);
     });
     server.listen(TGAGENTP_PORT, '127.0.0.1', () => {
       const port = server.address().port;
@@ -1201,6 +1212,7 @@ async function main() {
     lines.push('**Session:** ' + sessionLabel(st));
     lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
     try { await sendLongMessage(token, savedChatId, lines.join('\n')); } catch (_) {}
+    lockedChatId = savedChatId;
     try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
   }
 
@@ -1278,7 +1290,7 @@ async function main() {
         continue;
       }
 
-      // Non-command message — process in background
+      // Non-command message ─ process in background
       const st = getState(serverBase);
       if (st.busy) {
         await sendLongMessage(token, chatId, '⏳ Server is busy processing a previous message. Please wait for it to finish, or use /cancel to cancel it.');

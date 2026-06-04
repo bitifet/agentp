@@ -39,6 +39,10 @@ function notifyAgentpGateway(port, server, text) {
         else reject(new Error(`status ${res.statusCode}: ${data}`));
       });
     });
+    req.setTimeout(5000, () => {
+      req.destroy();
+      reject(new Error('Connection timed out'));
+    });
     req.on('error', reject);
     req.write(body);
     req.end();
@@ -55,14 +59,15 @@ async function readAllStdin() {
   return text;
 }
 
-const HUMAN_ROW = '👤: ￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n'
-const AGENT_ROW = '🤖: ￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n'
-const FINAL_ROW = '￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣￣\n';
+const HUMAN_ROW = '👤: —————————————————\n'
+const AGENT_ROW = '🤖: —————————————————\n'
+const FINAL_ROW = '    —————————————————\n';
 
 async function main() {
   let serverBase = 'http://localhost:4096';
   let qaMode = false;
-  let tgMode = null; // null = auto (qa-true → tg), true = --tg, false = --no-tg
+  // tgMode: false = disabled, 'auto' = auto-detect, true = explicit --tg
+  let tgMode = null;
 
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -77,12 +82,12 @@ async function main() {
       console.error('Options:');
       console.error('  --version  Show version');
       console.error('  --qa       Print the original prompt and answer with labels (useful as a filter)');
-      console.error('  --tg       Forward the answer to Telegram via agentp gateway (error if unreachable)');
+      console.error('  --tg       Forward the answer to Telegram via agentp gateway (error if unavailable)');
       console.error('  --no-tg    Do not forward to Telegram');
       console.error('  --help     Show this help message');
       console.error('');
-      console.error('By default, --qa implies --tg; standalone mode implies --no-tg.');
-      console.error('tgagentp must be running for --tg to work.');
+      console.error('By default, --qa auto-detects tgagentp; standalone mode implies --no-tg.');
+      console.error('--tg: error if tgagentp is unavailable; auto mode: silently degrade.');
       console.error('');
       console.error('Arguments:');
       console.error('  url        OpenCode server URL or port number (default: 4096)');
@@ -107,6 +112,27 @@ async function main() {
     } else if (/^\d+$/.test(args[i])) {
       serverBase = 'http://localhost:' + args[i];
     }
+  }
+
+  // Resolve default: --qa → auto-detect, standalone → disabled
+  if (tgMode === null) {
+    tgMode = qaMode ? 'auto' : false;
+  }
+
+  // Pre-send: probe tgagentp gateway if enabled
+  let tgPort = null;
+  if (tgMode) {
+    try {
+      tgPort = fs.readFileSync(TGAGENTP_PORT_FILE, 'utf8').trim();
+      if (!tgPort || !/^\d+$/.test(tgPort)) tgPort = null;
+    } catch {
+      tgPort = null;
+    }
+    if (!tgPort && tgMode === true) {
+      console.error('Error: tgagentp gateway not found. Is tgagentp running?');
+      process.exit(1);
+    }
+    // auto mode: tgPort stays null → silently skip tgagentp
   }
 
   const promptText = await readAllStdin();
@@ -146,44 +172,33 @@ async function main() {
     process.exit(1);
   }
 
+  // Build full --qa output and send to stdout
+  let tgText = answer;
   if (qaMode) {
-    process.stdout.write(HUMAN_ROW);
-    process.stdout.write(promptText);
-    process.stdout.write(AGENT_ROW);
+    tgText = HUMAN_ROW + promptText + AGENT_ROW + answer;
+    if (!answer.endsWith('\n')) tgText += '\n';
+    tgText += FINAL_ROW;
+    process.stdout.write(tgText);
+  } else {
+    process.stdout.write(answer);
+    if (!answer.endsWith('\n')) process.stdout.write('\n');
   }
 
-  process.stdout.write(answer);
-  if (!answer.endsWith('\n')) process.stdout.write('\n');
-  if (qaMode) {
-    process.stdout.write(FINAL_ROW);
-  }
-
-  // Forward to Telegram if tgagentp gateway is reachable
-  if (tgMode === null) tgMode = qaMode;
-  if (tgMode) {
-    let tgPort;
+  // Post-send: notify tgagentp if we have a port
+  let tgError = null;
+  if (tgPort) {
     try {
-      tgPort = fs.readFileSync(TGAGENTP_PORT_FILE, 'utf8').trim();
-    } catch {
-      if (tgMode === true) {
-        console.error('Error: tgagentp gateway not found. Is tgagentp running?');
-        process.exit(1);
-      }
-      // auto mode: silently degrade
-    }
-    if (tgPort) {
-      try {
-        await notifyAgentpGateway(tgPort, serverBase, answer);
-      } catch (err) {
-        if (tgMode === true) {
-          console.error('Error: tgagentp gateway unreachable:', err.message);
-          process.exit(1);
-        }
-        // auto mode: silently degrade
-      }
+      await notifyAgentpGateway(tgPort, serverBase, tgText);
+    } catch (err) {
+      tgError = err;
     }
   }
 
+  // Warnings at the end (stderr)
+  if (tgError && tgMode === true) {
+    process.stderr.write('\n');
+    process.stderr.write(`⚠️  Telegram notification failed: ${tgError.message}\n`);
+  }
   if (!process.env.OPENCODE_SERVER_PASSWORD) {
     process.stderr.write('\n');
     process.stderr.write('🔓 ⚠️  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.\n');

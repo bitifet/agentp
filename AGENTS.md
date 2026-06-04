@@ -124,6 +124,10 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
+- agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
+- agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning (not hard error) for `--tg`; auto mode silently degrades — 0.9.0
+- tgagentp: `lockedChatId` set at startup to fix race condition with agentp gateway — 0.9.0
+- tgagentp: server error handler + try-catch in gateway handler (no crash on socket errors) — 0.9.0
 - agentp `--tg`/`--no-tg` — gateway forwards answer to Telegram via tgagentp HTTP server; per-server queue with debounced notifications; auto-flush on server switch
 - agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints
 - ocmux `--print-logs` flag — pass-through to `opencode serve --print-logs` (prints server logs to stderr in the server pane)
