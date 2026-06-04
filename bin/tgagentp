@@ -904,11 +904,15 @@ async function main() {
     const st = getState(url);
     const isCancelled = () => getState(url).taskId !== myTaskId;
     const cancelRef = { current: null };
+    const sessionCancelRef = { current: null };
     st._cancelRef = cancelRef;
+    st._sessionReq = sessionCancelRef;
     try {
       let answer;
       if (useSession) {
-        // Event-driven flow: start SSE listener first, then send message async
+        // Dual approach:
+        // 1. SSE for permissions/thinking events (connected before sending)
+        // 2. Synchronous sendToSession (POST /session/:id/message) for reliable answer
         const notifiedPerms = new Set();
         let thinkingBuf = '';
         let sseConnected;
@@ -916,12 +920,11 @@ async function main() {
           new Promise((resolve) => { sseConnected = resolve; }),
           new Promise((resolve) => setTimeout(resolve, 5000)),
         ]);
-        const ssePromise = listenForSessionEvents(url, sessionId, {
+        listenForSessionEvents(url, sessionId, {
           onText: null,
           onConnected: sseConnected,
           onThinking: (chunk) => {
             if (!getState(url).thinkingEnabled) { thinkingBuf = ''; return; }
-            // Forward thinking chunks in real-time
             thinkingBuf += chunk;
             if (thinkingBuf.length >= 50 || chunk.endsWith('\n')) {
               const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -958,25 +961,18 @@ async function main() {
             log.debug(`  → permission_replied: clearing pendingPermission`);
             getState(url).pendingPermission = null;
           },
-        }, cancelRef);
-        // Wait for SSE stream to be confirmed active before sending, to avoid
-        // missing the session.idle event (race condition).
+        }, cancelRef).catch(() => {});
+        // Wait for SSE to connect, then send synchronously
         await onConnected;
-        try {
-          await sendToSessionAsync(url, sessionId, `[Telegram] ${text}`, st.activeAgentName);
-        } catch (err) {
-          // Abort SSE listener on send failure to avoid resource leak
-          if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
-          throw err;
-        }
-        // Wait for the SSE listener to collect the full answer
-        answer = await ssePromise;
+        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName, sessionCancelRef);
         // Flush any remaining thinking buffer
         if (thinkingBuf) {
           const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           sendLongMessage(token, chatId, html, replyTo).catch(() => {});
           thinkingBuf = '';
         }
+        // Clean up SSE listener
+        if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
@@ -996,6 +992,8 @@ async function main() {
         await sendLongMessage(token, chatId, `✅ Server \`${url}\` finished processing. Switch back to see the response.`, replyTo);
       }
     } catch (err) {
+      // Clean up SSE listener if it's still active
+      if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
       if (isCancelled()) {
         log.debug(`  → cancelled, ignoring error from ${url}: ${err.message}`);
         st.pendingPermission = null;
@@ -1008,6 +1006,7 @@ async function main() {
     } finally {
       st.pendingPermission = null;
       if (st._cancelRef === cancelRef) st._cancelRef = null;
+      if (st._sessionReq === sessionCancelRef) st._sessionReq = null;
       if (!isCancelled()) {
         getState(url).busy = false;
       }
@@ -1026,6 +1025,11 @@ async function main() {
     if (st._cancelRef && st._cancelRef.current) {
       st._cancelRef.current.destroy();
       st._cancelRef.current = null;
+    }
+    // Abort the synchronous session request if in progress
+    if (st._sessionReq && st._sessionReq.current) {
+      st._sessionReq.current.destroy();
+      st._sessionReq.current = null;
     }
     await sendLongMessage(token, chatId, '✅ Cancelled.');
     log.debug(`  → /cancel on ${serverBase}`);
