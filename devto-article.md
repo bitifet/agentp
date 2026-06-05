@@ -35,32 +35,51 @@ This replaces your visual selection with the answer. `--qa` preserves the prompt
 Each project gets its own tmux window with a dedicated `opencode serve` + TUI pane. Auto-restarts dead panes, pins window names, stores state in `.ocmux.json` (discovered upward like `.git`).
 
 ```bash
-ocmux serve ~/projects/myapp   # create
-ocmux list                      # list all
-ocmux ~/projects/myapp          # switch (shows url)
-ocmux                           # same as ocmux $(pwd)
-ocmux kill ~/projects/myapp     # remove
-ocmux kill                      # same as ocmux $(pwd)
+ocmux serve ~/projects/myapp        # create (new window)
+ocmux serve --print-logs ~/projects/myapp  # also print server logs to terminal
+ocmux list                          # list all
+ocmux list -l                       # list with full URLs
+ocmux ~/projects/myapp              # switch (shows url)
+ocmux                               # same as ocmux $(pwd)
+ocmux kill ~/projects/myapp         # remove
+ocmux kill                          # same as ocmux $(pwd)
 ```
+
+`ocmux` also supports `--git` and `--GIT` flags for git base directory resolution: `--git` matches with either worktrees or repository roots, while `--GIT` requires an actual repository root (not a worktree).
 
 ### `tgagentp` — The Telegram Bridge
 
-A Telegram bot that routes messages to your OpenCode servers. Multi-server aware, slash-commands for everything.
+A Telegram bot that routes messages to your OpenCode servers. Multi-chat, multi-server, slash-commands for everything.
+
+```bash
+tgagentp                                  # default port 4096
+tgagentp --think                          # start with thinking forwarding enabled
+tgagentp --dev                            # enable /shutdown for remote restart
+tgagentp 8080                             # custom port
+TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
+```
 
 **Slash commands:**
 
 | Command | What it does |
 |---|---|
+| `/help` | Show available commands |
+| `/status` | Show current server, session, agent, and health |
 | `/servers` | List/switch between ocmux projects |
 | `/sessions` | List/switch/create/rename sessions |
 | `/agents` | List/switch active agent |
 | `/models` | List providers and models |
+| `/allow` | Approve a tool permission once |
+| `/reject` | Deny a tool permission |
+| `/always` | Approve a permission and remember the choice |
 | `/queue <msg>` | Queue message when busy — auto-sent after current task finishes (replies chain!) |
 | `/record` | Record / pause / retrofill conversation for `agentp` context |
 | `/flush` | Clear all queued messages (manual or auto-queued) |
 | `/note <text>` | Save a note (not forwarded to agent — context via reply quoting) |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
+
+Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
 
 ---
 
@@ -92,20 +111,34 @@ Now we can auto-switch to the right OpenCode server every time we use it no matt
 
 The killer integration: `agentp` and `tgagentp` talk to each other through a tiny HTTP gateway.
 
-- **`agentp --tg`** forwards the answer to your Telegram chat after every pipe.
-- **`agentp --qa`** auto-detects tgagentp and sends the full QA pair (rulers + prompt + answer) if tgagentp is running.
-- **`/record`** buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context. Retroactively buffer past messages with `/record N`.
-- **`agentp --flush`** clears the buffer without prepending.
-- **`agentp --getLast 5`** retrieves the last 5 assistant answers from session history (or QA pairs with `--getLast 5 --qa`).
+- **`agentp --tg`** — forwards the answer to your Telegram chat after every pipe (hard error if tgagentp not running).
+- **`agentp --no-tg`** — explicitly disable Telegram forwarding (overrides auto-detection in `--qa` mode).
+- **`agentp --qa`** — auto-detects tgagentp and sends the full QA pair (rulers + prompt + answer) if tgagentp is running.
+- **`/record`** — buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context. Retroactively buffer past messages with `/record N`.
+- **`agentp --flush`** — clears the buffer without prepending.
+- **`agentp --getLast 5`** — retrieves the last 5 assistant answers from session history (or QA pairs with `--getLast 5 --qa`).
 - **Auto-queue** — when a server is unreachable, messages are automatically queued and delivered when it comes back. `/flush` clears the queue.
-- **Server health detection** — `tgagentp` periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
+- **Server health detection** — tgagentp periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
+- **Multi-chat** — each Telegram chat or forum thread has independent server, session, and recorder state. Perfect for teams sharing one bot.
+- **Message splitting** — long answers are split at 4096 characters (respecting newlines) to stay within Telegram limits.
 
 ```vim
-:'<,'>!agentp --qa --tg          " answer in editor + Telegram (complains if no tgagentp)
+:'<,'>!agentp --qa --tg          " answer in editor + Telegram (hard error if no tgagentp)
 :'<,'>!agentp --qa               " same + Telegram only if tgagentp detected
-:'<,'>!agentp --qa --flush       " flush "/record"ed buffer
-:'<,'>!agentp                    " only replaces. Userful snippets, etc.. + --tg to also send to Telegram
+:'<,'>!agentp --qa --flush       " flush /record buffer
+:'<,'>!agentp                    " only replaces. Useful for simple snippets.
+:'<,'>!agentp --no-tg            " same as above, explicitly skip Telegram
 ```
+
+**Environment variables:**
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from @BotFather |
+| `TGAGENTP_ALLOWED_CHAT_IDS` | No | all | Comma-separated chat IDs to allow (e.g. `"123456,-789012"`) |
+| `TGAGENTP_PORT` | No | random | Port for the agentp gateway (agentp --tg discovers it automatically) |
+| `TGAGENTP_DEBOUNCE_MS` | No | 5000 | Debounce interval for queued-agentp Telegram notifications (ms) |
+| `OPENCODE_SERVER_PASSWORD` | No | — | Password for authenticated OpenCode servers |
 
 All of this with **zero npm dependencies** — just Node.js 18+ stdlib.
 
@@ -135,10 +168,9 @@ printf "Explain this codebase" | agentp
 
 # With Telegram (set up a bot with @BotFather first)
 export TELEGRAM_BOT_TOKEN="your-token"
-tgagentp
+export OPENCODE_SERVER_PASSWORD="your-password"   # optional but recommended
+tgagentp --think
 ```
-
-If your OpenCode server is password-protected, set `OPENCODE_SERVER_PASSWORD`.
 
 ---
 
