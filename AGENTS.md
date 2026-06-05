@@ -168,6 +168,10 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - lib/ocmux.js shared session discovery, refactor ocmux + tgagentp
 - /cancel with true server-side SSE abort via cancelRef
 - /shutdown (--dev mode) with Telegram offset acknowledgment
+- Fix: SSE log lines in `listenForSessionEvents` missing timestamps — added optional `logFn` parameter with timestamped default — 0.11.0
+- Fix: agentp gateway drops messages after restart (`serverOwners` empty) — restore from `STARTUP_CHAT_FILE` + populate on first message — 0.11.0
+- Fix: `flushRecorded(owningChatId)` passes object as `chatId` — destructure to `owningChatId.chatId, owningChatId.threadId` so `getChatState` key matches — 0.11.0
+- docs: sync devto article with current features (permission commands, env vars, --no-tg, ocmux flags, multi-chat) — 0.11.0
 
 ### Verified
 
