@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders } = require('../lib/opencode.js');
+const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders } = require('../lib/opencode.js');
 
 // Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
 const log = {
@@ -48,6 +48,30 @@ function flushAgentpQueue(server, token, chatId, threadId) {
       }
     })
     .catch(() => {});
+}
+
+// Check if an opencode server is reachable by hitting its /session endpoint.
+// Uses a short 5s timeout; returns true for any HTTP response (even 4xx/5xx)
+// and false only for connection-level failures (dead server, DNS, timeout).
+function isServerAlive(url) {
+  return new Promise((resolve) => {
+    const mod = url.startsWith('https') ? https : http;
+    const parsed = new URL(url + '/session');
+    const opts = {
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname,
+      method: 'GET',
+      headers: { ...getAuthHeaders() },
+    };
+    const req = mod.request(opts, (res) => {
+      res.resume();
+      resolve(true);
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(5000, () => { req.destroy(); resolve(false); });
+    req.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -366,7 +390,24 @@ async function cmdHelp(token, chatId, args, chatState) {
         'When the server is processing a previous message, queuing allows you to\n' +
         'continue working without waiting. Once the current task finishes, the next\n' +
         'queued message is automatically sent and the answer will reply to the\n' +
-        'original queued message.');
+        'original queued message.\n\n' +
+        'Messages are also automatically queued when the server is unreachable.\n' +
+        'Use `/flush` to clear the queue at any time.');
+      return;
+    }
+    if (topic === 'flush') {
+      await sendLongMessage(token, chatState,
+        '`/flush` ─ clear all queued messages\n\n' +
+        'Flushes both the regular message queue and any queued agentp messages.\n' +
+        'Messages are queued automatically when the server is unreachable or busy.');
+      return;
+    }
+    if (topic === 'note') {
+      await sendLongMessage(token, chatState,
+        '`/note <text>` ─ save a note in the chat\n\n' +
+        'Notes are NOT forwarded to the agent. They are stored as a regular message\n' +
+        'in the chat. If you reply to a note with a message that doesn\'t start with\n' +
+        '`/note`, the note text is included as context (via the reply-to quoting mechanism).');
       return;
     }
     if (topic === 'record') {
@@ -402,6 +443,8 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/think` ─ toggle thinking message forwarding\n' +
     '`/record` ─ record Telegram conversation for agentp context\n' +
     '`/queue <message>` ─ queue a message when server is busy\n' +
+    '`/flush` ─ clear all queued messages\n' +
+    '`/note <text>` ─ save a note in the chat (not forwarded to the agent)\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
@@ -972,6 +1015,36 @@ async function cmdRecord(token, chatId, args, chatState, setServerForChat, setAc
     rec.active ? '🔴 Recording started. Messages will be cached for agentp.' : '⏹ Recording stopped. Buffer cleared.');
 }
 
+async function cmdFlush(token, chatId, args, chatState) {
+  const st = getState(chatState.serverBase);
+  const server = chatState.serverBase;
+  const q = st.messageQueue || [];
+  const qlen = q.length;
+
+  // Clear the message queue
+  st.messageQueue = [];
+
+  // Clear the agentp queue
+  const aq = agentpQueues[server];
+  let alen = 0;
+  if (aq) {
+    alen = aq.messages.length;
+    aq.messages = [];
+    aq.notified = false;
+    if (aq.notifyTimer) { clearTimeout(aq.notifyTimer); aq.notifyTimer = null; }
+  }
+
+  await sendLongMessage(token, chatState,
+    qlen + alen > 0
+      ? `🧹 Flushed ${qlen} queued message(s) and ${alen} agentp message(s).`
+      : '🧹 No queued messages to flush.');
+}
+
+async function cmdNote(token, chatId, args, chatState) {
+  // No-op: the message is already in the chat. /note prevents forwarding to the agent.
+  // Replying to a note with a non-/note message includes it via the quote mechanism.
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -982,6 +1055,8 @@ const COMMANDS = {
   'think': cmdThink,
   'record': cmdRecord,
   'queue': cmdQueue,
+  'flush': cmdFlush,
+  'note': cmdNote,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -993,7 +1068,7 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false, messageQueue: [] };
+  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false, messageQueue: [] };
 }
 
 function sessionLabel(st) {
@@ -1266,9 +1341,28 @@ async function main() {
         return;
       }
       log.error(`Error processing message (${url}): ${err.message}`);
+
+      // Detect connection errors (server dead) and requeue the message
+      const isConnError = err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' ||
+        err.code === 'ETIMEDOUT' || err.message.includes('socket hang up') ||
+        err.message.includes('connect ECONNREFUSED');
+      if (isConnError) {
+        st.serverDead = true;
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.unshift({ text, replyTo });
+        log.info(`Server ${url} appears dead. Re-queued message.`);
+      }
+
       const chatServer = getChatState(chatId, threadId).serverBase;
       if (url === chatServer) {
-        try { await sendLongMessage(token, chatState, `Error: ${err.message}`, replyTo, threadId); } catch (_) {}
+        const msg = isConnError
+          ? `⚠️ Server \`${url}\` is unreachable. The message has been requeued and will be sent when the server is available again.\n\n` +
+            `**Options:**\n` +
+            `• Start the server: \`ocmux serve\`\n` +
+            `• Switch to another server: \`/servers switch <name>\`\n` +
+            `• Flush the queue: \`/flush\``
+          : `Error: ${err.message}`;
+        try { await sendLongMessage(token, chatState, msg, replyTo, threadId); } catch (_) {}
       }
     } finally {
       st.pendingPermission = null;
@@ -1276,6 +1370,8 @@ async function main() {
       if (st._sessionReq === sessionCancelRef) st._sessionReq = null;
       if (!isCancelled()) {
         getState(url).busy = false;
+        // Don't drain the queue if the server is dead — messages stay queued
+        if (st.serverDead) return;
         const q = st.messageQueue || [];
         st.messageQueue = [];
         if (q.length > 0) {
@@ -1316,12 +1412,13 @@ async function main() {
   const cmdStatus = async (token, chatId) => {
     const cs = getChatState(chatId);
     const st = getState(cs.serverBase);
+    const deadInfo = st.serverDead ? ' ❌ unreachable' : '';
     const busyInfo = st.busy ? '⏳ busy' : '✅ idle';
     const dir = serverDir(cs.serverBase);
     const lines = ['**Server:**'];
     if (dir) lines.push('  • **Path:** `' + dir + '`');
     lines.push('  • **URL:** `' + cs.serverBase + '`');
-    lines.push('  • **Status:** ' + busyInfo);
+    lines.push('  • **Status:** ' + busyInfo + deadInfo);
     lines.push('**Session:** ' + sessionLabel(st));
     lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
     await sendLongMessage(token, cs, lines.join('\n'));
@@ -1439,7 +1536,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note`);
         }
         continue;
       }
@@ -1449,6 +1546,34 @@ async function main() {
 
       // Non-command message ─ process in background
       const st = getState(cs.serverBase);
+
+      // Server health check: detect dead servers and auto-reconnect
+      if (st.serverDead) {
+        const alive = await isServerAlive(cs.serverBase);
+        if (alive) {
+          st.serverDead = false;
+          log.info(`Server ${cs.serverBase} is back online`);
+        }
+      }
+      if (st.serverDead) {
+        // Server is dead ─ auto-queue and notify
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.push({ text: replyContext + text, replyTo });
+        const qlen = st.messageQueue.length;
+        const servers = listServers();
+        const suggestions = [];
+        suggestions.push(`• Start the server: \`ocmux serve\``);
+        if (servers.length > 0) {
+          suggestions.push(`• Switch to another server: \`/servers switch <name>\``);
+        }
+        suggestions.push(`• Flush the queue: \`/flush\``);
+        await sendLongMessage(token, cs,
+          `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
+          `Your message has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
+          `**Options:**\n${suggestions.join('\n')}`);
+        continue;
+      }
+
       if (st.busy) {
         await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel or `/queue <message>` to queue your message.');
         continue;
