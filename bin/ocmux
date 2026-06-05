@@ -207,6 +207,7 @@ function printHelp() {
   console.error('  -h       Show this help');
   console.error('');
   console.error('See also: agentp -- pipe prompts into OpenCode from stdin');
+  console.error('          tgagentp -- Telegram bridge for OpenCode (tgagentp --help)');
   process.exit(0);
 }
 

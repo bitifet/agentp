@@ -56,7 +56,9 @@ A Telegram bot that routes messages to your OpenCode servers. Multi-server aware
 | `/agents` | List/switch active agent |
 | `/models` | List providers and models |
 | `/queue <msg>` | Queue message when busy — auto-sent after current task finishes (replies chain!) |
-| `/record` | Record conversation for `agentp` context injection |
+| `/record` | Record / pause / retrofill conversation for `agentp` context |
+| `/flush` | Clear all queued messages (manual or auto-queued) |
+| `/note <text>` | Save a note (not forwarded to agent — context via reply quoting) |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
 
@@ -92,9 +94,11 @@ The killer integration: `agentp` and `tgagentp` talk to each other through a tin
 
 - **`agentp --tg`** forwards the answer to your Telegram chat after every pipe.
 - **`agentp --qa`** auto-detects tgagentp and sends the full QA pair (rulers + prompt + answer) if tgagentp is running.
-- **`/record`** buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context.
+- **`/record`** buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context. Retroactively buffer past messages with `/record N`.
 - **`agentp --flush`** clears the buffer without prepending.
-- **`agentp --getLast 5`** retrieves the last 5 assistant answers from session history.
+- **`agentp --getLast 5`** retrieves the last 5 assistant answers from session history (or QA pairs with `--getLast 5 --qa`).
+- **Auto-queue** — when a server is unreachable, messages are automatically queued and delivered when it comes back. `/flush` clears the queue.
+- **Server health detection** — `tgagentp` periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
 
 ```vim
 :'<,'>!agentp --qa --tg          " answer in editor + Telegram (complains if no tgagentp)

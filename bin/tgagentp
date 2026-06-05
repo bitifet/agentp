@@ -96,15 +96,30 @@ function getChatState(chatId, threadId, defaultServer) {
       chatId,
       threadId: threadId || null,
       serverBase: defaultServer || 'http://localhost:4096',
-      recording: { active: false, messages: [], bytes: 0 },
+      recording: { active: false, paused: false, messages: [], bytes: 0 },
+      ring: { messages: [], bytes: 0 },
     };
   }
   return chatStates[key];
 }
 
+const RING_MAX_MSGS = 50;
+const RING_MAX_BYTES = 50 * 1024;
+
 function bufferMessage(chatId, threadId, role, text) {
   const cs = getChatState(chatId, threadId);
-  if (!cs.recording.active) return;
+
+  // Always maintain an in-memory ring buffer of recent messages.
+  // This enables retroactive /record N: copy last N messages into recording.
+  cs.ring.messages.push({ role, text });
+  cs.ring.bytes += Buffer.byteLength(text, 'utf8');
+  while (cs.ring.messages.length > RING_MAX_MSGS || cs.ring.bytes > RING_MAX_BYTES) {
+    const oldest = cs.ring.messages.shift();
+    cs.ring.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+  }
+
+  // Recording buffer (only when active AND not paused)
+  if (!cs.recording.active || cs.recording.paused) return;
   cs.recording.messages.push({ role, text });
   cs.recording.bytes += Buffer.byteLength(text, 'utf8');
   while (cs.recording.messages.length > MAX_RECORDED_MSGS || cs.recording.bytes > MAX_RECORDED_BYTES) {
@@ -410,19 +425,38 @@ async function cmdHelp(token, chatId, args, chatState) {
         '`/note`, the note text is included as context (via the reply-to quoting mechanism).');
       return;
     }
+    if (topic === 'status') {
+      await sendLongMessage(token, chatState,
+        '`/status` ─ show current server, session, agent, and queue info\n\n' +
+        'Shows:\n' +
+        '• Server URL and directory path\n' +
+        '• Status: ✅ idle, ⏳ busy, or ❌ unreachable\n' +
+        '• Active session name/ID\n' +
+        '• Active agent name\n' +
+        '• Number of queued messages');
+      return;
+    }
     if (topic === 'record') {
       await sendLongMessage(token, chatState,
-        '`/record` ─ toggle recording of messages for agentp context\n' +
-        '`/record stop` ─ stop recording and clear buffer\n\n' +
-        'When recording is active, all user and assistant messages are buffered in memory\n' +
-        '(max 100 messages / 100KB). The next `agentp` invocation retrieves the buffered\n' +
-        'conversation and prepends it to its `--qa` stdout output, so OpenCode can\n' +
-        'see the full conversation context.\n\n' +
-        'Buffered messages are NOT sent back to Telegram (they are already there).');
+        '`/record` ─ toggle between active/paused (starts fresh if inactive)\n' +
+        '`/record continue` ─ resume recording without clearing buffer\n' +
+        '`/record pause [N]` ─ pause recording, keep buffer (optionally discard last N)\n' +
+        '`/record flush` ─ clear buffer, keep current state (active/paused)\n' +
+        '`/record stop` ─ fully stop and clear buffer\n' +
+        '`/record N` ─ retroactively buffer the last N messages from the ring\n\n' +
+        '**States:**\n' +
+        '🔴 *active* — new messages are added to the buffer\n' +
+        '⏸ *paused* — buffer preserved, not recording new messages\n' +
+        '⏹ *inactive* — no buffer, nothing recorded\n\n' +
+        'When active or paused, the next `agentp` invocation retrieves the buffered\n' +
+        'conversation and prepends it to its `--qa` stdout output.\n' +
+        '`/record N` uses the always-on ring buffer (last 50 messages) to retroactively\n' +
+        'fill the recording buffer — as if `/record` had been enabled N messages ago.\n\n' +
+        'Max 100 messages / 100KB. Oldest messages are dropped first.');
       return;
     }
     await sendLongMessage(token, chatState,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help session`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatState,
@@ -997,22 +1031,104 @@ async function cmdQueue(token, chatId, args, chatState, setServerForChat, setAct
   await sendLongMessage(token, chatState, `📥 Queued. ${st.messageQueue.length} message(s) in queue. Will be sent when the current task finishes.`);
 }
 
+function recordingLabel(rec) {
+  if (rec.paused) return '⏸ paused';
+  return rec.active ? '🔴 active' : '⏹ inactive';
+}
+
 async function cmdRecord(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
   const rec = chatState.recording;
+  const ring = chatState.ring;
+
+  // /record N: retroactively buffer last N messages from the always-on ring
+  if (args.length > 0 && /^\d+$/.test(args[0])) {
+    const n = parseInt(args[0], 10);
+    const count = Math.min(n, ring.messages.length);
+    const msgs = ring.messages.slice(-count);
+    for (const m of msgs) {
+      rec.messages.push({ role: m.role, text: m.text });
+      rec.bytes += Buffer.byteLength(m.text, 'utf8');
+    }
+    while (rec.messages.length > MAX_RECORDED_MSGS || rec.bytes > MAX_RECORDED_BYTES) {
+      const oldest = rec.messages.shift();
+      rec.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+    }
+    rec.active = true;
+    rec.paused = false;
+    const label = rec.messages.length > 0 ? `🔴 *active*, ${rec.messages.length} buffered` : '⏹ *inactive*, buffer empty';
+    await sendLongMessage(token, chatState,
+      `${label} (${count} message(s) retroactively loaded from ring).`);
+    return;
+  }
+
+  // /record pause [N]: pause recording, keep buffer, optionally discard last N
+  if (args.length > 0 && args[0].toLowerCase() === 'pause') {
+    if (rec.active && !rec.paused && args.length > 1 && /^\d+$/.test(args[1])) {
+      const n = parseInt(args[1], 10);
+      const count = Math.min(n, rec.messages.length);
+      rec.messages.splice(-count);
+      rec.bytes = rec.messages.reduce((b, m) => b + Buffer.byteLength(m.text, 'utf8'), 0);
+      await sendLongMessage(token, chatState,
+        `⏸ Recording paused. Discarded last ${count} message(s). ${rec.messages.length} remaining.`);
+    } else {
+      rec.paused = true;
+      rec.active = true;
+      await sendLongMessage(token, chatState,
+        `⏸ Recording paused. Buffer preserved (${rec.messages.length} messages).`);
+    }
+    return;
+  }
+
+  // /record flush: clear buffer, keep state
+  if (args.length > 0 && args[0].toLowerCase() === 'flush') {
+    rec.messages = [];
+    rec.bytes = 0;
+    await sendLongMessage(token, chatState,
+      `🧹 Buffer cleared. State: ${recordingLabel(rec)}.`);
+    return;
+  }
+
+  // /record stop: flush + pause = fully stop and clear
   if (args.length > 0 && args[0].toLowerCase() === 'stop') {
     rec.active = false;
+    rec.paused = false;
     rec.messages = [];
     rec.bytes = 0;
     await sendLongMessage(token, chatState, '⏹ Recording stopped. Buffer cleared.');
     return;
   }
-  rec.active = !rec.active;
+
+  // /record (no args) or /record continue: toggle/continue
+  if (args.length > 0 && args[0].toLowerCase() === 'continue') {
+    rec.paused = false;
+    rec.active = true;
+    const empty = rec.messages.length === 0;
+    await sendLongMessage(token, chatState,
+      empty
+        ? '🔴 Recording started (buffer was empty).'
+        : `🔴 Recording continued. ${rec.messages.length} buffered message(s) will grow.`);
+    return;
+  }
+
+  // Bare /record: toggle between active ↔ paused (if active), or activate (if inactive)
   if (!rec.active) {
+    rec.active = true;
+    rec.paused = false;
     rec.messages = [];
     rec.bytes = 0;
+    await sendLongMessage(token, chatState, '🔴 Recording started.');
+  } else if (!rec.paused) {
+    rec.paused = true;
+    await sendLongMessage(token, chatState,
+      `⏸ Recording paused. ${rec.messages.length} message(s) preserved.`);
+  } else {
+    rec.paused = false;
+    const empty = rec.messages.length === 0;
+    await sendLongMessage(token, chatState,
+      empty
+        ? '🔴 Recording continued (buffer was empty).'
+        : `🔴 Recording continued. ${rec.messages.length} buffered message(s) will grow.`);
   }
-  await sendLongMessage(token, chatState,
-    rec.active ? '🔴 Recording started. Messages will be cached for agentp.' : '⏹ Recording stopped. Buffer cleared.');
 }
 
 async function cmdFlush(token, chatId, args, chatState) {

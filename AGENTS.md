@@ -105,9 +105,11 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n QA pairs with rulers (same format as `--qa`) |
-| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); supports multiple parallel chats, each with independent server/session/recorder |
+| `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API). `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n answers (or QA pairs with `--qa`). URL via `ocmux` or explicit. |
+| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); multi-chat/thread support, each with independent server/session/recorder |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
+| `tgagentp --think` | start with thinking message forwarding enabled |
+| `tgagentp --verbose` | detailed logs (errors, trace, debug) on stderr |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
 | `ocmux new [dir]` | alias for `serve` (backwards compat, to be removed in 1.0) |
 | `ocmux kill [dir]` | kill server + tmux window |
@@ -126,9 +128,16 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### Done
 
-- `/queue` command: queue messages when server is busy, auto-sent after current task finishes preserves replyTo chain — 0.10.0
-- `agentp --getLast n` — retrieve last n QA pairs (user prompts + assistant answers) from session history, formatted with rulers (same format as `--qa`) — 0.10.0
+- `/record` refactor: `/record N` (retrofill from ring), `/record pause [N]`, `/record continue`, `/record flush`, `/record stop`, always-on ring buffer (50 msgs), state transitions (active/paused/inactive) — 0.11.0
+- `/note` — no-op command: ignores message (not forwarded to agent); reply-to quoting handles context — 0.11.0
+- `/flush` — clears both message queue and agentp gateway queue — 0.11.0
+- `isServerAlive()` health check (5s timeout GET /session) — 0.11.0
+- Pre-send health check: auto-queues messages when server is unreachable, reconnection detection flushes queue — 0.11.0
+- Connection error detection in `processMessageAsync` catch: marks `serverDead`, requeues failed message — 0.11.0
+- Queue drain in `finally` skips processing when `serverDead` (prevents infinite loop) — 0.11.0
+- `/status` shows `❌ unreachable` when server is dead — 0.11.0
 - `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.10.0
+- `agentp --getLast n` — retrieve last n QA pairs (user prompts + assistant answers) from session history, formatted with rulers (same format as `--qa`) — 0.10.0
 - agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
 - agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning (not hard error) for `--tg`; auto mode silently degrades — 0.9.0
 - tgagentp: `lockedChatId` set at startup to fix race condition with agentp gateway — 0.9.0
