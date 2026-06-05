@@ -902,7 +902,7 @@ function startAgentpGateway(token, chatIdResolver, serverBaseResolver) {
             const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
 
             // Return recorded conversation buffer for the owning chat
-            const buffered = owningChatId ? flushRecorded(owningChatId) : [];
+            const buffered = owningChatId ? flushRecorded(owningChatId.chatId, owningChatId.threadId) : [];
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ buffered }));
 
