@@ -1,5 +1,4 @@
 # Agentp: Turn OpenCode Into a Headless AI Engine for Your Editor, Terminal, and Telegram
-
 OpenCode is great, but its TUI locks you in. You type in one window, watch it stream, and that's it. What if you could:
 
 - Pipe a prompt straight from Vim and replace your selection with the answer?
@@ -20,7 +19,7 @@ Stdin in, answer out. That's the core loop.
 
 ```bash
 printf "Summarize this file" | agentp
-cat prompt.txt | agentp 4096
+cat prompt.txt | agentp
 ```
 
 From Vim/Neovim:
@@ -38,8 +37,10 @@ Each project gets its own tmux window with a dedicated `opencode serve` + TUI pa
 ```bash
 ocmux serve ~/projects/myapp   # create
 ocmux list                      # list all
-ocmux ~/projects/myapp          # switch
+ocmux ~/projects/myapp          # switch (shows url)
+ocmux                           # same as ocmux $(pwd)
 ocmux kill ~/projects/myapp     # remove
+ocmux kill                      # same as ocmux $(pwd)
 ```
 
 ### `tgagentp` — The Telegram Bridge
@@ -58,6 +59,24 @@ A Telegram bot that routes messages to your OpenCode servers. Multi-server aware
 | `/record` | Record conversation for `agentp` context injection |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
+
+---
+
+### `agentp` and `ocmux` toghether
+
+- `agentp` defaults to http://localhost:4096 (the opencode default). But it accepts a port or a full URL as a parameter.
+
+- `ocmux` with no arguments switches the Opencode tmux session to the window of the current project (based on current directory) and prints the server URL.
+
+- Both combined let you talk to the right OpenCode server without bothering with ports or URLs. Just `agentp $(ocmux)` or `agentp --qa $(ocmux)` if you want to get the full QA pair with rulers and you are done.
+
+
+Now we can auto-swithch to the right OpenCode server every time we use it no matter where we are in the filesystem, and even from Vim:
+
+```vim
+:'<,'>!agentp --qa $(ocmux)
+```
+
 
 ---
 
