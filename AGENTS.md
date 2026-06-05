@@ -105,8 +105,8 @@ These endpoints are consumed but not documented elsewhere in the repo:
 |---|---|---|
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
-| `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n answers |
-| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`) |
+| `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API); `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n QA pairs with rulers (same format as `--qa`) |
+| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); supports multiple parallel chats, each with independent server/session/recorder |
 | `tgagentp --dev` | enable `/shutdown` command for remote restart |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
 | `ocmux new [dir]` | alias for `serve` (backwards compat, to be removed in 1.0) |
@@ -127,11 +127,12 @@ These endpoints are consumed but not documented elsewhere in the repo:
 ### Done
 
 - `/queue` command: queue messages when server is busy, auto-sent after current task finishes preserves replyTo chain — 0.10.0
-- `agentp --getLast n` — retrieve last n answers from session history — 0.10.0
+- `agentp --getLast n` — retrieve last n QA pairs (user prompts + assistant answers) from session history, formatted with rulers (same format as `--qa`) — 0.10.0
 - `/record` command with ring buffer (100 msgs / 100KB), gateway returns `{ buffered }`, agentp `--qa` prepends recorded context, `--flush` flushes without prepending — 0.10.0
 - agentp `--qa` full context forwarding to Telegram (rulers, prompt, answer) — 0.9.0
 - agentp resilience: 5s HTTP timeout, pre-send gate check, post-send warning (not hard error) for `--tg`; auto mode silently degrades — 0.9.0
 - tgagentp: `lockedChatId` set at startup to fix race condition with agentp gateway — 0.9.0
+- tgagentp: per-chat state refactor (multi-chat support); each chat has independent server/session/recorder; auto-activates tmux window on incoming message — 0.11.0
 - tgagentp: server error handler + try-catch in gateway handler (no crash on socket errors) — 0.9.0
 - agentp `--tg`/`--no-tg` — gateway forwards answer to Telegram via tgagentp HTTP server; per-server queue with debounced notifications; auto-flush on server switch
 - agentp session API migration — uses `POST /session/:id/message` instead of TUI endpoints

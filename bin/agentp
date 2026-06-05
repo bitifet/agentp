@@ -129,7 +129,6 @@ async function main() {
         process.exit(1);
       }
       const n = parseInt(nStr, 10);
-      // Query the opencode SQLite database for assistant responses
       try {
         const sessions = await listSessions(serverBase);
         if (!sessions || sessions.length === 0) {
@@ -141,34 +140,75 @@ async function main() {
           .sort((a, b) => b.time.updated - a.time.updated);
         const sessionId = sorted[0].id;
 
-        // Locate the opencode database
-        const home = process.env.HOME || process.env.USERPROFILE || '';
-        const dbCandidates = [
-          `${home}/.local/share/opencode/opencode.db`,
-          `${home}/Library/Application Support/opencode/opencode.db`,
-          `${home}/.opencode/opencode.db`,
-        ];
-        let dbPath = null;
-        for (const p of dbCandidates) {
-          try { fs.accessSync(p); dbPath = p; break; } catch {}
-        }
-        if (!dbPath) {
-          console.error('Cannot locate opencode database.');
-          process.exit(1);
+        function buildPairsFromMessages(messages) {
+          const pairs = [];
+          let cur = null;
+          for (const raw of messages) {
+            // Normalize: export gives {role, parts: [{type, text}]}, SQLite gives {role, text}
+            const m = raw.parts ? raw : { role: raw.role, parts: [{ type: 'text', text: raw.text }] };
+            const role = m.role;
+            const text = (m.parts || []).filter(p => p.type === 'text').map(p => p.text).join('').trim();
+            if (!text) continue;
+            if (role === 'user') {
+              if (cur) pairs.push(cur);
+              cur = { prompt: text, answer: '' };
+            } else if (role === 'assistant' && cur) {
+              if (cur.answer) cur.answer += '\n';
+              cur.answer += text;
+            }
+          }
+          // Don't push incomplete pair (no answer yet)
+          return pairs;
         }
 
-        // Query concatenated text parts for assistant messages, newest first
-        const sql = `SELECT group_concat(p.data->>'text', '') as text FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '${sessionId.replace(/'/g, "''")}' AND m.data->>'role' = 'assistant' AND p.data->>'type' = 'text' GROUP BY m.id ORDER BY m.time_created DESC`;
-        const out = child_process.execFileSync('sqlite3', ['-json', dbPath, sql], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
-        const rows = JSON.parse(out);
-        const texts = rows.map(r => r.text).reverse();
-        if (texts.length === 0) {
-          console.error('No assistant answers found in session history.');
+        function formatPairs(pairs) {
+          return pairs.map(p =>
+            HUMAN_ROW + p.prompt + '\n' + AGENT_ROW + p.answer + '\n' + FINAL_ROW
+          ).join('\n');
+        }
+
+        const formatAsQa = qaMode || args.includes('--qa');
+        function extractAnswers(pairs) {
+          return pairs.map(p => p.answer);
+        }
+        let output = '';
+        try {
+          const raw = child_process.execFileSync('opencode', ['export', sessionId], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+          const jsonStart = raw.indexOf('{');
+          const body = jsonStart >= 0 ? raw.slice(jsonStart) : raw;
+          const exportData = JSON.parse(body);
+          const messages = exportData.messages || [];
+          const pairs = buildPairsFromMessages(messages);
+          const lastN = pairs.slice(-n);
+          output = formatAsQa ? formatPairs(lastN) : extractAnswers(lastN).join('\n');
+        } catch {
+          // export JSON is malformed (opencode bug);
+          // fall back to SQLite
+          const home = process.env.HOME || process.env.USERPROFILE || '';
+          const dbCandidates = [
+            `${home}/.local/share/opencode/opencode.db`,
+            `${home}/Library/Application Support/opencode/opencode.db`,
+            `${home}/.opencode/opencode.db`,
+          ];
+          let dbPath = null;
+          for (const p of dbCandidates) {
+            try { fs.accessSync(p); dbPath = p; break; } catch {}
+          }
+          if (dbPath) {
+            const sql = `SELECT m.data->>'role' as role, group_concat(p.data->>'text', '') as text FROM message m JOIN part p ON p.message_id = m.id WHERE m.session_id = '${sessionId.replace(/'/g, "''")}' AND p.data->>'type' = 'text' AND m.data->>'role' IN ('user','assistant') GROUP BY m.id ORDER BY m.time_created ASC`;
+            const out = child_process.execFileSync('sqlite3', ['-json', dbPath, sql], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+            const messages = JSON.parse(out);
+            const pairs = buildPairsFromMessages(messages);
+            const lastN = pairs.slice(-n);
+            output = formatAsQa ? formatPairs(lastN) : extractAnswers(lastN).join('\n');
+          }
+        }
+        if (!output) {
+          console.error(formatAsQa ? 'No complete prompt-answer pairs found in session history.' : 'No assistant answers found in session history.');
           process.exit(1);
         }
-        const lastN = texts.slice(-n);
-        process.stdout.write(lastN.join('\n'));
-        if (lastN.length > 0 && !lastN[lastN.length - 1].endsWith('\n')) process.stdout.write('\n');
+        process.stdout.write(output);
+        if (!output.endsWith('\n')) process.stdout.write('\n');
       } catch (err) {
         console.error('Error retrieving session history:', err.message);
         process.exit(1);
