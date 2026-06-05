@@ -1295,6 +1295,16 @@ async function main() {
     log.info(`  → agent: ${defaultAgent.name}`);
   }
 
+  // Restore server owner from startup chat file so agentp gateway can forward messages
+  // immediately after restart, without waiting for a chat message.
+  try {
+    const savedChatId = fs.readFileSync(STARTUP_CHAT_FILE, 'utf8').trim();
+    if (savedChatId) {
+      serverOwners[serverBase] = { chatId: Number(savedChatId), threadId: null };
+      log.info(`  → restored server owner: chat ${savedChatId}`);
+    }
+  } catch (_) {}
+
   log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
 
   // Chat-aware server/session mutation callbacks (defined here for token access)
@@ -1622,6 +1632,12 @@ async function main() {
 
       // Per-chat state: get or create for this chat (thread-aware)
       const cs = getChatState(chatId, threadId, serverBase);
+
+      // Ensure this chat is registered as the owner of its server so agentp gateway
+      // can forward messages to it.
+      if (!serverOwners[cs.serverBase]) {
+        serverOwners[cs.serverBase] = { chatId, threadId };
+      }
 
       log.debug(`[chat ${chatId}] ${from}: ${text}`);
       try { fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId)); } catch (_) {}
