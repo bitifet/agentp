@@ -185,17 +185,21 @@ function printHelp() {
   console.error('that session is used.');
   console.error('');
   console.error('Subcommands:');
-  console.error('  serve   Create a server in <directory> (default: $PWD) and attach a TUI.');
-  console.error('          Aliased as "new" for backwards compatibility.');
-  console.error('          Errors if one already exists there.');
-  console.error('          Warns if a parent directory already has a server.');
-  console.error('          --git  Use the nearest parent with a .git entry (file or dir).');
-  console.error('          --GIT  Use the nearest parent with a .git directory only.');
-  console.error('          Refuses to create above an existing .ocmux.json found while searching.');
-  console.error('          --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
-  console.error('  kill    Kill the server found upward from <directory>.');
-  console.error('          Removes its tmux window and state file.');
-  console.error('  list    List all running servers with their directories and URLs.');
+  console.error('  serve     Create a server in <directory> (default: $PWD) and attach a TUI.');
+  console.error('            Aliased as "new" for backwards compatibility.');
+  console.error('            Errors if one already exists there.');
+  console.error('            Warns if a parent directory already has a server.');
+  console.error('            --git  Use the nearest parent with a .git entry (file or dir).');
+  console.error('            --GIT  Use the nearest parent with a .git directory only.');
+  console.error('            Refuses to create above an existing .ocmux.json found while searching.');
+  console.error('            --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
+  console.error('  kill      Kill the server found upward from <directory>.');
+  console.error('            Removes its tmux window and state file.');
+  console.error('  resurrect Recover a dead server: kills the old window, removes the state file,');
+  console.error('            then creates a fresh server + TUI in the same directory.');
+  console.error('            Works even if no tmux window exists (stale state file).');
+  console.error('            --print-logs  Pass --print-logs to the new opencode serve.');
+  console.error('  list      List all running servers with their directories and URLs.');
   console.error('');
   console.error('  --         Treat the next argument as a directory even if it matches');
   console.error('            a subcommand name (e.g. "ocmux -- kill").');
@@ -430,6 +434,54 @@ function cmdKill(statefile) {
 }
 
 // ---------------------------------------------------------------------------
+// Subcommand: resurrect — kill dead server and create a fresh one
+// ---------------------------------------------------------------------------
+
+function cmdResurrect(targetDir, longMode, printLogs) {
+  const sf = findParentStatefile(targetDir);
+  if (!sf) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    console.error("Run 'ocmux serve' to create a new server.");
+    process.exit(1);
+  }
+
+  const serverDir = path.dirname(sf);
+  const state = readState(sf);
+
+  console.error(`Resurrecting server for ${serverDir}...`);
+
+  // Kill old tmux window if it exists
+  if (state && state.window_index != null) {
+    let winIdx = state.window_index;
+    const sessionR = tmux(['has-session', '-t', SESSION]);
+    if (sessionR.status === 0) {
+      const actualName = windowNameByIndex(winIdx);
+      if (actualName !== serverDir) {
+        const found = windowByDir(serverDir);
+        if (found != null) winIdx = found;
+      }
+      if (winIdx != null) {
+        tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
+        tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`, 'C-c']);
+        sleep(0.3);
+        tmux(['kill-window', '-t', `${SESSION}:${winIdx}`]);
+        console.error('Old window removed.');
+      } else {
+        console.error('Tmux window not found (stale state file).');
+      }
+    } else {
+      console.error("No tmux session '" + SESSION + "' found (stale state file).");
+    }
+  }
+
+  // Remove old state file so doNew can proceed
+  fs.unlinkSync(sf);
+
+  // Create fresh server + TUI
+  doNew(serverDir, longMode, printLogs);
+}
+
+// ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
 
@@ -490,7 +542,7 @@ function main() {
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list') {
+    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
@@ -538,6 +590,12 @@ function main() {
       process.exit(1);
     }
     cmdKill(sf);
+  } else if (subcommand === 'resurrect') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    cmdResurrect(targetDir, longMode, printLogs);
   } else if (subcommand === 'serve' || subcommand === 'new') {
     if (gitMode) {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';

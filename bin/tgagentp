@@ -15,7 +15,6 @@ const log = {
   debug(msg) { if (this.verbose) process.stderr.write(`${msg}\n`); },
 };
 
-const STARTUP_CHAT_FILE = '/tmp/tgagentp-startup-chat';
 const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
@@ -95,7 +94,7 @@ function getChatState(chatId, threadId, defaultServer) {
     chatStates[key] = {
       chatId,
       threadId: threadId || null,
-      serverBase: defaultServer || 'http://localhost:4096',
+      serverBase: defaultServer || null,
       recording: { active: false, paused: false, messages: [], bytes: 0 },
       ring: { messages: [], bytes: 0 },
     };
@@ -486,13 +485,17 @@ async function cmdHelp(token, chatId, args, chatState) {
 
 async function cmdServers(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
   if (args.length > 0 && args[0].toLowerCase() === 'switch') {
-    if (args.length < 2) {
+    const forceIdx = args.indexOf('--force');
+    const force = forceIdx !== -1;
+    const switchArgs = args.slice(1).filter(a => a !== '--force');
+    if (switchArgs.length < 1) {
       await sendLongMessage(token, chatState,
-        'Usage: `/servers switch <name>`\n' +
-        '`<name>` can be a full directory path or a basename.');
+        'Usage: `/servers switch <name> [--force]`\n' +
+        '`<name>` can be a full directory path or a basename.\n' +
+        '`--force` takes over a server already connected to another chat.');
       return;
     }
-    const name = args.slice(1).join(' ');
+    const name = switchArgs.join(' ');
     const servers = listServers();
     if (servers.length === 0) {
       await sendLongMessage(token, chatState, 'No servers running.');
@@ -516,8 +519,25 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
       return;
     }
     const target = matches[0];
-        const pending = await setServerForChat(chatState, target.url);
-        serverOwners[target.url] = { chatId: chatState.chatId, threadId: chatState.threadId };
+    const existing = serverOwners[target.url];
+    if (existing && existing.chatId !== chatState.chatId && !force) {
+      await sendLongMessage(token, chatState,
+        `⚠️ Server \`${target.url}\` is already connected to another chat.\n\n` +
+        `Use \`--force\` to take over (the other chat will be disconnected).`);
+      return;
+    }
+    if (existing && existing.chatId === chatState.chatId) {
+      // Already connected — re-run setup to refresh state
+    }
+    if (force && existing && existing.chatId !== chatState.chatId) {
+      // Reset the old owner's server and notify them
+      const oldState = getChatState(existing.chatId, existing.threadId);
+      oldState.serverBase = null;
+      sendLongMessage(token, oldState,
+        `⚠️ Server \`${target.url}\` has been taken over by another chat.\n\n` +
+        `Use \`/servers\` to see available servers and reconnect.`).catch(() => {});
+    }
+    const pending = await setServerForChat(chatState, target.url);
     activateServer(target.dir, target.index, target.url);
     let msg = `Switched to server: ${target.url} → ${target.dir}`;
     if (pending && pending.trim()) {
@@ -535,12 +555,13 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
     await sendLongMessage(token, chatState, 'No servers running.');
     return;
   }
-  const activeUrl = normalizeUrl(chatState.serverBase);
+  const activeUrl = chatState.serverBase ? normalizeUrl(chatState.serverBase) : null;
   const lines = servers.map(s => {
-    const bullet = normalizeUrl(s.url) === activeUrl ? '▶ ' : ' · ';
+    const bullet = activeUrl && normalizeUrl(s.url) === activeUrl ? '▶ ' : ' · ';
     return bullet + `${s.url} → ${s.dir} (${s.status})`;
   });
-  await sendLongMessage(token, chatState, 'Active servers:\n' + lines.join('\n'));
+  const prefix = chatState.serverBase ? 'Active servers:' : 'Available servers:';
+  await sendLongMessage(token, chatState, prefix + '\n' + lines.join('\n'));
 }
 
 function sessionName(s) {
@@ -866,7 +887,7 @@ const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the c
 // Agentp gateway ─ tiny HTTP server for agentp --tg
 // ---------------------------------------------------------------------------
 
-function startAgentpGateway(token, chatIdResolver, serverBaseResolver) {
+function startAgentpGateway(token, serverBaseResolver) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       try {
@@ -1295,21 +1316,23 @@ async function main() {
     log.info(`  → agent: ${defaultAgent.name}`);
   }
 
-  // Restore server owner from startup chat file so agentp gateway can forward messages
-  // immediately after restart, without waiting for a chat message.
-  try {
-    const savedChatId = fs.readFileSync(STARTUP_CHAT_FILE, 'utf8').trim();
-    if (savedChatId) {
-      serverOwners[serverBase] = { chatId: Number(savedChatId), threadId: null };
-      log.info(`  → restored server owner: chat ${savedChatId}`);
-    }
-  } catch (_) {}
-
   log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
 
   // Chat-aware server/session mutation callbacks (defined here for token access)
   const setServerForChat = async (chatState, url) => {
     const cs = chatState;
+
+    // Disconnect any other chat still connected to this server (one server → one chat)
+    const normalizedUrl = normalizeUrl(url);
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (state === cs) continue;
+      if (state.serverBase && normalizeUrl(state.serverBase) === normalizedUrl) {
+        state.serverBase = null;
+        log.info(`[chat ${state.chatId}] Disconnected from server: ${url} (taken over by chat ${cs.chatId})`);
+      }
+    }
+
     cs.serverBase = url;
     serverOwners[url] = { chatId: cs.chatId, threadId: cs.threadId };
     getState(url);
@@ -1356,18 +1379,13 @@ async function main() {
   };
 
   // Start agentp gateway (tiny HTTP server for agentp --tg)
-  const chatIdResolver = () => {
-    // Return the first chat that owns some server, or null
-    const entries = Object.entries(serverOwners);
-    return entries.length > 0 ? entries[0][1] : null;
-  };
   const serverBaseResolver = () => {
     const entries = Object.entries(serverOwners);
     if (entries.length === 0) return serverBase;
-    const cs = getChatState(entries[0][1]);
+    const cs = getChatState(entries[0][1].chatId, entries[0][1].threadId);
     return cs.serverBase;
   };
-  startAgentpGateway(token, chatIdResolver, serverBaseResolver);
+  startAgentpGateway(token, serverBaseResolver);
 
   async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId, replyTo, threadId) {
     const st = getState(url);
@@ -1562,9 +1580,6 @@ async function main() {
     }
     const status = st.busy ? '⏳ busy (forced)' : '✅ idle';
     await sendLongMessage(token, cs, `👋 Shutting down (state: ${status})...`);
-    try {
-      fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId));
-    } catch (_) {}
     try { await getUpdates(token, offset, 1); } catch (_) {}
     log.debug('/shutdown received, exiting...');
     process.exit(0);
@@ -1574,22 +1589,6 @@ async function main() {
   if (DEV_MODE) cmds.shutdown = cmdShutdown;
 
   let offset = 0;
-
-  // Startup greeting to last-known chat
-  const savedChatId = (() => { try { return fs.readFileSync(STARTUP_CHAT_FILE, 'utf8').trim(); } catch { return null; } })();
-  if (savedChatId) {
-    const cs = getChatState(savedChatId, null, serverBase);
-    const st = getState(cs.serverBase);
-    const dir = serverDir(cs.serverBase);
-    const lines = ['✅ Bot started.', '**Server:**'];
-    if (dir) lines.push('  • **Path:** `' + dir + '`');
-    lines.push('  • **URL:** `' + cs.serverBase + '`');
-    lines.push('  • **Status:** ✅ idle');
-    lines.push('**Session:** ' + sessionLabel(st));
-    lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
-    try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
-    try { fs.unlinkSync(STARTUP_CHAT_FILE); } catch (_) {}
-  }
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
   while (true) {
@@ -1631,24 +1630,9 @@ async function main() {
       }
 
       // Per-chat state: get or create for this chat (thread-aware)
-      const cs = getChatState(chatId, threadId, serverBase);
-
-      // Ensure this chat is registered as the owner of its server so agentp gateway
-      // can forward messages to it.
-      if (!serverOwners[cs.serverBase]) {
-        serverOwners[cs.serverBase] = { chatId, threadId };
-      }
+      const cs = getChatState(chatId, threadId);
 
       log.debug(`[chat ${chatId}] ${from}: ${text}`);
-      try { fs.writeFileSync(STARTUP_CHAT_FILE, String(chatId)); } catch (_) {}
-
-      // Auto-activate this chat's server in the tmux session
-      const servers = listServers();
-      const normalized = normalizeUrl(cs.serverBase);
-      const match = servers.find(s => normalizeUrl(s.url) === normalized);
-      if (match) {
-        activateServer(match.dir, match.index, match.url);
-      }
 
       // Build reply context if this message is a Telegram reply
       const replyContext = quoteReply(msg);
@@ -1660,6 +1644,13 @@ async function main() {
         const cmdArgs = parts.slice(1);
         const handler = cmds[cmd];
         if (handler) {
+          // Disconnected guard: only /help, /servers, and /start work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'start') {
+            await sendLongMessage(token, cs,
+              '🔌 Not connected to any server.\n\n' +
+              'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
+            continue;
+          }
           try {
             await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat);
           } catch (err) {
@@ -1670,6 +1661,14 @@ async function main() {
           await sendLongMessage(token, cs,
             `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note`);
         }
+        continue;
+      }
+
+      // Disconnected guard for non-command messages
+      if (!cs.serverBase) {
+        await sendLongMessage(token, cs,
+          '🔌 Not connected to any server.\n\n' +
+          'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
         continue;
       }
 

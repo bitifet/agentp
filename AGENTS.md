@@ -114,6 +114,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 | `ocmux new [dir]` | alias for `serve` (backwards compat, to be removed in 1.0) |
 | `ocmux kill [dir]` | kill server + tmux window |
 | `ocmux list [-l]` | list running servers |
+| `ocmux resurrect [--print-logs] [dir]` | recover dead server: kill old window, remove state file, create fresh server + TUI |
 | `ocmux [dir]` | switch to existing opencode tmux window |
 
 ## TODO
@@ -124,7 +125,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### In Progress
 
-*(none)*
+- `ocmux resurrect` — new command to recover from dead/crashed opencode servers by reading `.ocmux.json` and re-creating server + TUI — 0.12.0
 
 ### Done
 
