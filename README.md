@@ -163,6 +163,7 @@ Subcommands:
   - `--GIT` resolves `dir` to the nearest parent with a `.git` directory only; errors if none is found.
   - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr in the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
+- **`resurrect [--print-logs] [dir]`** — Recover a dead/crashed server: reads `.ocmux.json`, kills old tmux window, removes state file, then creates a fresh server + TUI in the same directory. Works even if no tmux window exists (stale state file).
 - **`list`** — List all running servers with their directories, URLs, and status.
 
 Options:
@@ -239,11 +240,27 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/cancel` | Cancel the current AI response for the active server |
 | `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
 | `/record [stop]` | Toggle recording of Telegram conversation for agentp context; `/record stop` clears and stops |
+| `/servers switch <name> [--force]` | Switch to a server; `--force` takes over from another chat |
+| `/sessions` | List recent sessions for the current server (max 50, with date headings) |
+| `/sessions switch <number\|name>` | Switch active session by position or partial name match |
+| `/agents` | List primary agents (▶ marker for the active one) |
+| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
+| `/models` | List connected providers with model counts, context limits, and costs |
+| `/status` | Show current server path, URL, busy status, and active session |
+| `/cancel` | Cancel the current AI response for the active server |
+| `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
+| `/record [stop]` | Toggle recording of Telegram conversation for agentp context; `/record stop` clears and stops |
 | `/queue <message>` | Queue a message when the server is busy; auto-sent when current task finishes |
+| `/flush` | Clear all queued messages (manual and auto-queued) |
+| `/resurrect` | Recover a dead server — restart processes in the same directory, reconnect chat |
 | `/allow` | Approve a permission request once |
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |
-| `/shutdown [force]` | (requires `--dev`) Stop tgagentp; refuses if busy unless `force` is given |
+| `/shutdown [force\|clear]` | (requires `--dev`) Stop tgagentp; `clear` also wipes saved connections |
+
+### Chat-server ownership
+
+Each server can be owned by at most one chat at a time. New chats start disconnected. Use `/servers switch <name>` to connect; `--force` takes over and notifies the previous owner. Connections are persisted to `/tmp/tgagentp-connections.json` and restored automatically on restart (server URL is re-discovered from `.ocmux.json`).
 
 ### Per-server state
 
@@ -274,9 +291,9 @@ tgagentp starts a tiny HTTP server on `127.0.0.1` that accepts `POST /send` requ
 - Port is randomly assigned by default; overridable via `TGAGENTP_PORT`.
 - Port is written to `/tmp/tgagentp-port` for agentp discovery.
 - Authentication reuses `OPENCODE_SERVER_PASSWORD`.
-- Messages for the active server are delivered immediately.
-- Messages for non-active servers are queued and delivered on `/servers switch`.
-- Debounced Telegram notification on queue (configurable via `TGAGENTP_DEBOUNCE_MS`).
+- Messages for the owning chat's active server are delivered immediately.
+- Messages for non-active servers are queued per-server with debounced notifications (configurable via `TGAGENTP_DEBOUNCE_MS`); delivered on `/servers switch`.
+- Server health detection pre-sends: if a server is unreachable, messages are auto-queued and delivered when it comes back. `/flush` clears all queues.
 - When [/record](#tgagentp) is active, the gateway response includes the recorded conversation buffer. `agentp --qa` prepends this buffer (with rulers) to its stdout so the full Telegram context is available to OpenCode. Use `agentp --qa --flush` to flush the buffer without prepending.
 
 ### Logging
@@ -296,9 +313,9 @@ To capture everything (info + errors) to a log file:
 tgagentp 2>/var/log/tgagentp.log
 ```
 
-### Telemetry
+### State persistence
 
-A startup greeting is sent to the last known chat on boot — includes /status-style server info. The chat ID is persisted at `/tmp/tgagentp-startup-chat`.
+Chat-to-server directory mappings are saved to `/tmp/tgagentp-connections.json` on every connection. On restart, tgagentp reads this file, discovers the server URL from each directory's `.ocmux.json`, and reconnects automatically with a welcome message. Use `/shutdown clear` (requires `--dev`) to wipe the saved state for a clean start.
 
 ### Environment variables
 

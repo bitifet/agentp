@@ -1,12 +1,17 @@
 {
   "name": "agentp",
-  "version": "0.10.0",
+  "version": "0.12.0",
   "description": "Pipe prompts into a running OpenCode TUI session and stream the final answer",
   "bin": {
     "agentp": "bin/agentp",
     "ocmux": "bin/ocmux",
     "tgagentp": "bin/tgagentp"
   },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
   "keywords": [
     "ai",
     "cli",

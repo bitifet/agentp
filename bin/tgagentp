@@ -18,7 +18,32 @@ const log = {
 const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
-const { listServers, activateServer, resurrectServer } = require('../lib/ocmux.js');
+const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
+const { listServers, activateServer, resurrectServer, statefileFor, readState } = require('../lib/ocmux.js');
+
+// Persist chat↔server directory mappings across restarts
+function saveConnection(chatId, threadId, dir) {
+  let data = { connections: [] };
+  try { data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const key = convKey(chatId, threadId);
+  const idx = data.connections.findIndex(c => convKey(c.chatId, c.threadId) === key);
+  const entry = { chatId, threadId: threadId || null, dir };
+  if (idx !== -1) data.connections[idx] = entry;
+  else data.connections.push(entry);
+  try { fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2)); } catch {}
+}
+
+function removeConnection(chatId, threadId) {
+  let data = { connections: [] };
+  try { data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const key = convKey(chatId, threadId);
+  data.connections = data.connections.filter(c => convKey(c.chatId, c.threadId) !== key);
+  try { fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2)); } catch {}
+}
+
+function clearConnections() {
+  try { fs.unlinkSync(CONNECTIONS_FILE); } catch {}
+}
 
 // Agentp gateway message queue, keyed by server URL
 const agentpQueues = {};
@@ -1385,6 +1410,7 @@ async function main() {
       if (state === cs) continue;
       if (state.serverBase && normalizeUrl(state.serverBase) === normalizedUrl) {
         state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
         log.info(`[chat ${state.chatId}] Disconnected from server: ${url} (taken over by chat ${cs.chatId})`);
       }
     }
@@ -1399,6 +1425,7 @@ async function main() {
     const match = servers.find(s => normalizeUrl(s.url) === normalized);
     if (match) {
       activateServer(match.dir, match.index, match.url);
+      saveConnection(cs.chatId, cs.threadId, match.dir);
     }
 
     log.info(`[chat ${cs.chatId}] Switched to server: ${url}`);
@@ -1627,6 +1654,16 @@ async function main() {
   const cmdShutdown = async (token, chatId, args) => {
     const cs = getChatState(chatId);
     const st = getState(cs.serverBase);
+
+    // Handle /shutdown clear — wipe saved connections before exiting
+    if (args && args.length > 0 && args[0].toLowerCase() === 'clear') {
+      clearConnections();
+      await sendLongMessage(token, cs, '🧹 Connection state cleared.');
+      log.debug('/shutdown clear received, exiting...');
+      try { await getUpdates(token, offset, 1); } catch (_) {}
+      process.exit(0);
+    }
+
     const isForce = args && args.length > 0 && args[0].toLowerCase() === 'force';
     if (st.busy && !isForce) {
       await sendLongMessage(token, cs,
@@ -1645,6 +1682,31 @@ async function main() {
   if (DEV_MODE) cmds.shutdown = cmdShutdown;
 
   let offset = 0;
+
+  // Restore chat↔server connections from persistent state
+  let savedData;
+  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  if (savedData && Array.isArray(savedData.connections)) {
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
+        cs.serverBase = state.url;
+        serverOwners[state.url] = { chatId, threadId };
+        const lines = [
+          '✅ Bot started.',
+          '**Server:**',
+          '  • **Path:** `' + dir + '`',
+          '  • **URL:** `' + state.url + '`',
+          '  • **Status:** ✅ restored',
+        ];
+        try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
+        log.info(`Restored connection: chat ${chatId} → ${dir}`);
+      }
+    }
+  }
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
   while (true) {

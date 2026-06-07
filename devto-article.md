@@ -47,6 +47,8 @@ ocmux kill                          # same as ocmux $(pwd)
 
 `ocmux` also supports `--git` and `--GIT` flags for git base directory resolution: `--git` matches with either worktrees or repository roots, while `--GIT` requires an actual repository root (not a worktree).
 
+When an opencode server crashes, `ocmux resurrect` reads `.ocmux.json`, kills the stale tmux window, and starts a fresh server + TUI in the same directory. Works even with a dead tmux window (stale state file).
+
 ### `tgagentp` — The Telegram Bridge
 
 A Telegram bot that routes messages to your OpenCode servers. Multi-chat, multi-server, slash-commands for everything.
@@ -78,6 +80,7 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/note <text>` | Save a note (not forwarded to agent — context via reply quoting) |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
+| `/resurrect` | Restart a crashed server and reconnect the chat to the new instance |
 
 Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
 
@@ -117,10 +120,13 @@ The killer integration: `agentp` and `tgagentp` talk to each other through a tin
 - **`/record`** — buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context. Retroactively buffer past messages with `/record N`.
 - **`agentp --flush`** — clears the buffer without prepending.
 - **`agentp --getLast 5`** — retrieves the last 5 assistant answers from session history (or QA pairs with `--getLast 5 --qa`).
+- **Exclusive ownership** — each server belongs to at most one chat. New chats start disconnected. `/servers switch <name> --force` takes over and notifies the previous owner.
 - **Auto-queue** — when a server is unreachable, messages are automatically queued and delivered when it comes back. `/flush` clears the queue.
 - **Server health detection** — tgagentp periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
 - **Multi-chat** — each Telegram chat or forum thread has independent server, session, and recorder state. Perfect for teams sharing one bot.
 - **Message splitting** — long answers are split at 4096 characters (respecting newlines) to stay within Telegram limits.
+- **State persistence** — chat-to-server directory mappings survive restarts via `/tmp/tgagentp-connections.json`. On reboot, tgagentp re-discovers the live server URL from `.ocmux.json` and reconnects automatically. `/shutdown clear` wipes the saved state.
+- **Remote resurrect** — `/resurrect` restarts a crashed server from Telegram: calls `resurrectServer()` from the library, then transfers session state (`serverOwners`, active session/agent) to the new URL.
 
 ```vim
 :'<,'>!agentp --qa --tg          " answer in editor + Telegram (hard error if no tgagentp)
