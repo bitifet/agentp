@@ -18,7 +18,7 @@ const log = {
 const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
-const { listServers, activateServer } = require('../lib/ocmux.js');
+const { listServers, activateServer, resurrectServer } = require('../lib/ocmux.js');
 
 // Agentp gateway message queue, keyed by server URL
 const agentpQueues = {};
@@ -1182,6 +1182,61 @@ async function cmdNote(token, chatId, args, chatState) {
   // Replying to a note with a non-/note message includes it via the quote mechanism.
 }
 
+async function cmdResurrect(token, chatId, args, chatState) {
+  const url = chatState.serverBase;
+  if (!url) {
+    await sendLongMessage(token, chatState, '🔌 Not connected to any server. Nothing to resurrect.');
+    return;
+  }
+
+  const dir = serverDir(url);
+  if (!dir) {
+    await sendLongMessage(token, chatState,
+      'Could not find the directory for this server.\n' +
+      'The tmux window may have been removed.\n' +
+      'Use `ocmux resurrect` from the terminal to recover it.');
+    return;
+  }
+
+  await sendLongMessage(token, chatState,
+    `♻️ Resurrecting server \`${dir}\`...\n` +
+    `The old server at \`${url}\` will be replaced with a new one.`);
+
+  try {
+    const { url: newUrl } = resurrectServer(dir, false);
+
+    // Update chat state to new URL
+    chatState.serverBase = newUrl;
+
+    // Transfer relevant state from old URL to new URL
+    const oldSt = getState(url);
+    const newSt = getState(newUrl);
+    newSt.activeSessionId = oldSt.activeSessionId;
+    newSt.activeSessionName = oldSt.activeSessionName;
+    newSt.activeAgentName = oldSt.activeAgentName;
+    newSt.thinkingEnabled = oldSt.thinkingEnabled;
+
+    // Update serverOwners to point to the new URL
+    const normOld = normalizeUrl(url);
+    for (const [sfUrl, owner] of Object.entries(serverOwners)) {
+      if (normalizeUrl(sfUrl) === normOld) {
+        serverOwners[newUrl] = owner;
+        delete serverOwners[sfUrl];
+        break;
+      }
+    }
+
+    await sendLongMessage(token, chatState,
+      `✅ Server resurrected.\n` +
+      `New URL: \`${newUrl}\`\n\n` +
+      `Use \`/status\` to check the session.`);
+  } catch (err) {
+    await sendLongMessage(token, chatState,
+      `❌ Resurrection failed: ${err.message}\n` +
+      `Try \`ocmux resurrect\` from the terminal.`);
+  }
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -1191,6 +1246,7 @@ const COMMANDS = {
   'models': cmdModels,
   'think': cmdThink,
   'record': cmdRecord,
+  'resurrect': cmdResurrect,
   'queue': cmdQueue,
   'flush': cmdFlush,
   'note': cmdNote,

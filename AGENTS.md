@@ -125,9 +125,12 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ### In Progress
 
-- `ocmux resurrect` — new command to recover from dead/crashed opencode servers by reading `.ocmux.json` and re-creating server + TUI — 0.12.0
+*(none)*
 
 ### Done
+
+- `ocmux resurrect` — new command (and `lib/ocmux.js` `resurrectServer()` function) to recover from dead/crashed opencode servers by reading `.ocmux.json` and re-creating server + TUI — 0.12.0
+- `tgagentp /resurrect` — invokes `resurrectServer()` from the library, transfers session state to the new server URL — 0.12.0
 
 - `/record` refactor: `/record N` (retrofill from ring), `/record pause [N]`, `/record continue`, `/record flush`, `/record stop`, always-on ring buffer (50 msgs), state transitions (active/paused/inactive) — 0.11.0
 - `/note` — no-op command: ignores message (not forwarded to agent); reply-to quoting handles context — 0.11.0

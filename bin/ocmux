@@ -2,11 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const crypto = require('crypto');
 const readline = require('readline');
-const { spawnSync, execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 const os = require('os');
 const {
+  SESSION,
   readState,
   statefileFor,
   tuiPaneId,
@@ -15,6 +15,13 @@ const {
   activeWindowIndex,
   paneCount,
   listServers,
+  ensureSession,
+  pinWindowName,
+  sleep,
+  hashDir,
+  logfileFor,
+  URL_RE,
+  resurrectServer,
 } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
@@ -23,10 +30,8 @@ const {
 
 const { version } = require('../package.json');
 
-const SESSION = 'Opencode';
 const SCRIPT = path.basename(process.argv[1] || 'ocmux');
 const HOME = os.homedir();
-const URL_RE = /opencode server listening on (http:\/\/[^\s]*)/;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,18 +44,6 @@ function tmux(args) {
     process.exit(1);
   }
   return result;
-}
-
-function sleep(seconds) {
-  execSync(`sleep ${seconds}`, { stdio: 'ignore' });
-}
-
-function hashDir(dir) {
-  return crypto.createHash('md5').update(dir).digest('hex').slice(0, 12);
-}
-
-function logfileFor(dir) {
-  return `/tmp/opencode-serve-${hashDir(dir)}.log`;
 }
 
 function findParentStatefile(startDir) {
@@ -150,20 +143,7 @@ function ensureTuiZoomed(windowIndex) {
   if (paneId) tmux(['resize-pane', '-Z', '-t', paneId]);
 }
 
-function pinWindowName(windowIndex) {
-  tmux(['set-window-option', '-t', `${SESSION}:${windowIndex}`, 'automatic-rename', 'off']);
-}
 
-function ensureSession() {
-  const r = tmux(['has-session', '-t', SESSION]);
-  if (r.status !== 0) {
-    const rc = tmux(['new-session', '-d', '-s', SESSION]);
-    if (rc.status !== 0) {
-      console.error('Error: failed to create tmux session');
-      process.exit(1);
-    }
-  }
-}
 
 function outputUrl(url, dir, longMode) {
   if (longMode) {
@@ -446,39 +426,15 @@ function cmdResurrect(targetDir, longMode, printLogs) {
   }
 
   const serverDir = path.dirname(sf);
-  const state = readState(sf);
-
   console.error(`Resurrecting server for ${serverDir}...`);
 
-  // Kill old tmux window if it exists
-  if (state && state.window_index != null) {
-    let winIdx = state.window_index;
-    const sessionR = tmux(['has-session', '-t', SESSION]);
-    if (sessionR.status === 0) {
-      const actualName = windowNameByIndex(winIdx);
-      if (actualName !== serverDir) {
-        const found = windowByDir(serverDir);
-        if (found != null) winIdx = found;
-      }
-      if (winIdx != null) {
-        tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
-        tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`, 'C-c']);
-        sleep(0.3);
-        tmux(['kill-window', '-t', `${SESSION}:${winIdx}`]);
-        console.error('Old window removed.');
-      } else {
-        console.error('Tmux window not found (stale state file).');
-      }
-    } else {
-      console.error("No tmux session '" + SESSION + "' found (stale state file).");
-    }
+  try {
+    const { url } = resurrectServer(serverDir, printLogs);
+    outputUrl(url, serverDir, longMode);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
   }
-
-  // Remove old state file so doNew can proceed
-  fs.unlinkSync(sf);
-
-  // Create fresh server + TUI
-  doNew(serverDir, longMode, printLogs);
 }
 
 // ---------------------------------------------------------------------------
