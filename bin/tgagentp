@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders } = require('../lib/opencode.js');
+const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
 
 // Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
 const log = {
@@ -77,27 +77,6 @@ function flushAgentpQueue(server, token, chatId, threadId) {
 // Check if an opencode server is reachable by hitting its /session endpoint.
 // Uses a short 5s timeout; returns true for any HTTP response (even 4xx/5xx)
 // and false only for connection-level failures (dead server, DNS, timeout).
-function isServerAlive(url) {
-  return new Promise((resolve) => {
-    const mod = url.startsWith('https') ? https : http;
-    const parsed = new URL(url + '/session');
-    const opts = {
-      hostname: parsed.hostname,
-      port: parsed.port,
-      path: parsed.pathname,
-      method: 'GET',
-      headers: { ...getAuthHeaders() },
-    };
-    const req = mod.request(opts, (res) => {
-      res.resume();
-      resolve(true);
-    });
-    req.on('error', () => resolve(false));
-    req.setTimeout(5000, () => { req.destroy(); resolve(false); });
-    req.end();
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Per-chat state
 // ---------------------------------------------------------------------------
@@ -356,7 +335,9 @@ async function cmdHelp(token, chatId, args, chatState) {
     if (topic === 'servers') {
       await sendLongMessage(token, chatState,
         '`/servers` ─ list all opencode servers (ocmux sessions)\n' +
-        '`/servers switch <name>` ─ switch target server\n\n' +
+        '`/servers switch <name>` ─ switch target server\n' +
+        '`/force-switch <name>` ─ take over a server from another chat\n\n' +
+        'Name matching: case-insensitive first, then case-sensitive. ' +
         '`<name>` can be a full path or basename of the project directory.');
       return;
     }
@@ -490,6 +471,7 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/cancel` ─ cancel the running prompt\n' +
     '`/servers` ─ list running opencode servers\n' +
     '`/servers switch <name>` ─ switch to a different server\n' +
+    '`/force-switch <name>` ─ take over a server from another chat\n' +
     '`/sessions` ─ list/create/switch/rename sessions\n' +
     '`/sessions switch <number-or-name>` ─ switch to a session\n' +
     '`/sessions new [name]` ─ create a new session\n' +
@@ -508,16 +490,21 @@ async function cmdHelp(token, chatId, args, chatState) {
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
+async function cmdForceSwitch(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  return cmdServers(token, chatId, ['switch', '--force', ...args], chatState, setServerForChat, setActiveSessionForChat);
+}
+
 async function cmdServers(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
-  if (args.length > 0 && args[0].toLowerCase() === 'switch') {
+  const isForce = args.length > 0 && args[0].toLowerCase() === 'force-switch';
+  if (args.length > 0 && (args[0].toLowerCase() === 'switch' || isForce)) {
     const forceIdx = args.indexOf('--force');
-    const force = forceIdx !== -1;
+    const force = forceIdx !== -1 || isForce;
     const switchArgs = args.slice(1).filter(a => a !== '--force');
     if (switchArgs.length < 1) {
       await sendLongMessage(token, chatState,
-        'Usage: `/servers switch <name> [--force]`\n' +
-        '`<name>` can be a full directory path or a basename.\n' +
-        '`--force` takes over a server already connected to another chat.');
+        'Usage: `/servers switch <name>`\n' +
+        'To force-switch (take over a server from another chat), use `/force-switch <name>`.\n' +
+        '`<name>` can be a full directory path or a basename.');
       return;
     }
     const name = switchArgs.join(' ');
@@ -526,29 +513,44 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
       await sendLongMessage(token, chatState, 'No servers running.');
       return;
     }
-    let matches = servers.filter(s => s.dir === name);
+
+    // Phase 1: case-insensitive exact match on dir or basename
+    let matches = servers.filter(s => s.dir.toLowerCase() === name.toLowerCase());
     if (matches.length === 0) {
-      matches = servers.filter(s => path.basename(s.dir) === name);
+      matches = servers.filter(s => path.basename(s.dir).toLowerCase() === name.toLowerCase());
     }
+    // Fallback: case-insensitive substring match
     if (matches.length === 0) {
-      matches = servers.filter(s => s.dir.includes(name) || path.basename(s.dir).includes(name));
+      const lowerName = name.toLowerCase();
+      matches = servers.filter(s => s.dir.toLowerCase().includes(lowerName) || path.basename(s.dir).toLowerCase().includes(lowerName));
     }
-    if (matches.length === 0) {
+
+    if (matches.length === 1) {
+      // Phase 1 found a single match — use it directly
+    } else if (matches.length === 0) {
       await sendLongMessage(token, chatState, `No server found matching "${name}".`);
       return;
-    }
-    if (matches.length > 1) {
-      const list = matches.map(s => `  ${s.url} → ${s.dir}`).join('\n');
-      await sendLongMessage(token, chatState,
-        `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
-      return;
+    } else {
+      // Phase 2: case-sensitive exact match to disambiguate
+      let exact = servers.filter(s => s.dir === name);
+      if (exact.length === 0) {
+        exact = servers.filter(s => path.basename(s.dir) === name);
+      }
+      if (exact.length === 1) {
+        matches = exact;
+      } else {
+        const list = matches.map(s => `  ${s.url} → ${s.dir}`).join('\n');
+        await sendLongMessage(token, chatState,
+          `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
+        return;
+      }
     }
     const target = matches[0];
     const existing = serverOwners[target.url];
     if (existing && existing.chatId !== chatState.chatId && !force) {
       await sendLongMessage(token, chatState,
         `⚠️ Server \`${target.url}\` is already connected to another chat.\n\n` +
-        `Use \`--force\` to take over (the other chat will be disconnected).`);
+        `Use \`/servers force-switch ${name}\` to take over (the other chat will be disconnected).`);
       return;
     }
     if (existing && existing.chatId === chatState.chatId) {
@@ -1205,6 +1207,9 @@ async function cmdFlush(token, chatId, args, chatState) {
 async function cmdNote(token, chatId, args, chatState) {
   // No-op: the message is already in the chat. /note prevents forwarding to the agent.
   // Replying to a note with a non-/note message includes it via the quote mechanism.
+  log.info(`[NOTE] chat=${chatId} text: ${(args || []).join(' ')}`);
+  // In dev mode, also log to msgLog through the polling loop's msgLog call
+  // (handled there since /note is processed before reaching cmdNote)
 }
 
 async function cmdResurrect(token, chatId, args, chatState) {
@@ -1214,7 +1219,19 @@ async function cmdResurrect(token, chatId, args, chatState) {
     return;
   }
 
-  const dir = serverDir(url);
+  let dir = serverDir(url);
+  if (!dir) {
+    // Fallback: look up directory from saved connections
+    try {
+      const savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+      if (savedData && Array.isArray(savedData.connections)) {
+        const match = savedData.connections.find(c =>
+          String(c.chatId) === String(chatId) && (c.threadId || null) === (chatState.threadId || null)
+        );
+        if (match && match.dir) dir = match.dir;
+      }
+    } catch {}
+  }
   if (!dir) {
     await sendLongMessage(token, chatState,
       'Could not find the directory for this server.\n' +
@@ -1265,6 +1282,7 @@ async function cmdResurrect(token, chatId, args, chatState) {
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
+  'force-switch': cmdForceSwitch,
   'sessions': cmdSessions,
   'session': cmdSessions,
   'agents': cmdAgents,
@@ -1311,6 +1329,7 @@ async function main() {
       process.exit(0);
     } else if (args[i] === '--dev') {
       DEV_MODE = true;
+      log.verbose = true;
     } else if (args[i] === '--verbose') {
       log.verbose = true;
     } else if (args[i] === '--think') {
@@ -1368,6 +1387,26 @@ async function main() {
 
   log.info(`tgagentp v${version} started. OpenCode server: ${serverBase}`);
 
+  // When --dev is active, log all message traffic to stderr
+  let msgLogStream = null;
+  if (DEV_MODE) {
+    try {
+      msgLogStream = fs.createWriteStream('/tmp/tgagentp-msg.log', { flags: 'a' });
+      const hdr = JSON.stringify({ ts: new Date().toISOString(), type: 'startup', version });
+      msgLogStream.write(hdr + '\n');
+    } catch (_) { msgLogStream = null; }
+  }
+  const msgLog = (type, chatId, from, text) => {
+    if (!msgLogStream) return;
+    try {
+      const entry = JSON.stringify({
+        ts: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+        type, chatId, from: from || '', text: text || '',
+      });
+      msgLogStream.write(entry + '\n');
+    } catch (_) {}
+  };
+
   if (!process.env.OPENCODE_SERVER_PASSWORD) {
     log.error('🔓  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.');
   }
@@ -1415,7 +1454,15 @@ async function main() {
       }
     }
 
+    // Clear old server ownership when switching away from a server
+    const oldUrl = cs.serverBase;
     cs.serverBase = url;
+    if (oldUrl && oldUrl !== url) {
+      if (serverOwners[oldUrl] &&
+          String(serverOwners[oldUrl].chatId) === String(cs.chatId)) {
+        delete serverOwners[oldUrl];
+      }
+    }
     serverOwners[url] = { chatId: cs.chatId, threadId: cs.threadId };
     getState(url);
 
@@ -1552,11 +1599,13 @@ async function main() {
       if (url === chatServer) {
         if (answer && answer.trim()) {
           const trimmed = answer.trim();
+          msgLog('out', chatId, '', trimmed);
           await sendLongMessage(token, chatState, trimmed, replyTo, threadId);
           bufferMessage(chatId, threadId, 'assistant', trimmed);
         }
       } else {
         getState(url).pendingResponse = answer;
+        msgLog('out', chatId, '(switch)', (answer || '').trim());
         await sendLongMessage(token, chatState, `✅ Server \`${url}\` finished processing. Switch back to see the response.`, replyTo, threadId);
         if (answer && answer.trim()) bufferMessage(chatId, threadId, 'assistant', answer.trim());
       }
@@ -1685,8 +1734,12 @@ async function main() {
 
   // Restore chat↔server connections from persistent state
   let savedData;
+  let connByOldId = {};
   try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
   if (savedData && Array.isArray(savedData.connections)) {
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      connByOldId[String(chatId)] = { chatId, threadId, dir };
+    }
     for (const { chatId, threadId, dir } of savedData.connections) {
       if (!dir) continue;
       const cs = getChatState(chatId, threadId);
@@ -1695,17 +1748,67 @@ async function main() {
       if (state && state.url) {
         cs.serverBase = state.url;
         serverOwners[state.url] = { chatId, threadId };
-        const lines = [
-          '✅ Bot started.',
-          '**Server:**',
-          '  • **Path:** `' + dir + '`',
-          '  • **URL:** `' + state.url + '`',
-          '  • **Status:** ✅ restored',
-        ];
-        try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
-        log.info(`Restored connection: chat ${chatId} → ${dir}`);
+        const alive = await isServerAlive(state.url);
+        if (alive) {
+          const lines = [
+            '✅ Bot started.',
+            '**Server:**',
+            '  • **Path:** `' + dir + '`',
+            '  • **URL:** `' + state.url + '`',
+            '  • **Status:** ✅ restored',
+          ];
+          try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
+          log.info(`Restored connection: chat ${chatId} → ${dir}`);
+        } else {
+          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.url} is unreachable`);
+          try {
+            await sendLongMessage(token, cs,
+              '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
+              '⚠️ The server at `' + state.url + '` is not reachable.\n' +
+              'Options: start the server with `ocmux serve`, or switch with `/servers switch <name>`.');
+          } catch (_) {}
+        }
       }
     }
+  }
+
+  // ── Group migration handler ──────────────────────────────────────
+  // When a regular group is promoted to a supergroup (or topics enabled),
+  // Telegram changes the chat ID. This function updates the stored
+  // connections and allowlist so the bot continues to work transparently.
+  async function handleGroupMigration(oldId, newId) {
+    if (oldId === newId) return;
+    log.info(`Group migration detected: chat ${oldId} → ${newId}`);
+
+    // Update allowlist if the old ID is in it
+    if (allowedChatIds) {
+      const idx = allowedChatIds.indexOf(oldId);
+      if (idx !== -1) {
+        allowedChatIds[idx] = newId;
+        log.info(`Updated allowlist: ${oldId} → ${newId}`);
+      }
+    }
+
+    // Update connections.json: replace all references to oldId with newId
+    try {
+      const data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+      if (Array.isArray(data.connections)) {
+        let changed = false;
+        for (const conn of data.connections) {
+          if (String(conn.chatId) === oldId) {
+            conn.chatId = newId;
+            changed = true;
+          }
+        }
+        if (changed) {
+          fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2));
+          log.info(`Updated connection: ${oldId} → ${newId}`);
+        }
+      }
+    } catch (_) {}
+
+    // Update in-memory chat state key (the existing state remains, just
+    // the key changes — new messages from newId will hit a new state)    
   }
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
@@ -1729,9 +1832,19 @@ async function main() {
       offset = update.update_id + 1;
 
       const msg = update.message;
-      if (!msg || typeof msg.text !== 'string') {
+      if (!msg) continue;
+
+      // Handle group → supergroup migration (e.g., when topics are enabled)
+      if (msg.migrate_to_chat_id) {
+        await handleGroupMigration(String(msg.chat.id), String(msg.migrate_to_chat_id));
         continue;
       }
+      if (msg.migrate_from_chat_id) {
+        await handleGroupMigration(String(msg.migrate_from_chat_id), String(msg.chat.id));
+        continue;
+      }
+
+      if (typeof msg.text !== 'string') continue;
 
       const chatId = String(msg.chat.id);
       const threadId = msg.message_thread_id || null;
@@ -1743,7 +1856,14 @@ async function main() {
 
       // Enforce chat allowlist if configured
       if (allowedChatIds && !allowedChatIds.includes(chatId)) {
-        log.debug(`[chat ${chatId}] ${from}: blocked (not in allowlist)`);
+        const chatLabel = msg.chat?.title ? ` (${msg.chat.title})` : '';
+        log.debug(`[chat ${chatId}]${chatLabel} ${from}: blocked (not in allowlist)`);
+        // Log a hint if the old chat ID is known in connections.json
+        const blockedDebug = `[chat ${chatId}]${chatLabel} ${from}: blocked (not in allowlist)`;
+        const known = Object.keys(connByOldId);
+        if (known.length > 0) {
+          log.debug(`  Known connections: ${known.join(', ')}. Chat may have been migrated (enable topics → supergroup changes chat ID).`);
+        }
         continue;
       }
 
@@ -1751,6 +1871,7 @@ async function main() {
       const cs = getChatState(chatId, threadId);
 
       log.debug(`[chat ${chatId}] ${from}: ${text}`);
+      msgLog('in', chatId, from, text);
 
       // Build reply context if this message is a Telegram reply
       const replyContext = quoteReply(msg);
@@ -1763,7 +1884,7 @@ async function main() {
         const handler = cmds[cmd];
         if (handler) {
           // Disconnected guard: only /help, /servers, and /start work without a server
-          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'start') {
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start') {
             await sendLongMessage(token, cs,
               '🔌 Not connected to any server.\n\n' +
               'Use `/servers` to see available servers and `/servers switch <name>` to connect.');

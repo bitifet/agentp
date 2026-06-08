@@ -44,6 +44,7 @@ Extracted from `bin/agentp`; used by both `agentp` and `tgagentp`:
 - `selectSession(server, sessionId)` — `POST /session/:id/select`; tells the TUI to navigate to the given session (silently ignores 404 if the endpoint isn't available in older opencode versions)
 - `listAgents(server)` — `GET /agent`; returns parsed JSON array of agent objects
 - `listProviders(server)` — `GET /provider`; returns parsed JSON array of provider objects
+- `isServerAlive(url)` — health check: `GET /session` with 5s timeout; resolves `true` (any response) or `false` (error/timeout)
 - `listenForSessionEvents(server, sessionId, callbacks, cancelRef?)` — SSE listener for session events (text parts, permissions, thinking, session.idle)
 
 ## Shared `lib/ocmux.js`
@@ -107,7 +108,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 | `npm install -g .` | alternative local install |
 | `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API). `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n answers (or QA pairs with `--qa`). URL via `ocmux` or explicit. |
 | `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); multi-chat/thread support, each with independent server/session/recorder |
-| `tgagentp --dev` | enable `/shutdown` command for remote restart |
+| `tgagentp --dev` | enable `/shutdown` command, verbose logging, and structured message traffic log to `/tmp/tgagentp-msg.log` (JSON lines with timestamps, chat IDs, directions) |
 | `tgagentp --think` | start with thinking message forwarding enabled |
 | `tgagentp --verbose` | detailed logs (errors, trace, debug) on stderr |
 | `ocmux serve [--print-logs] [dir]` | start opencode serve in a tmux window (primary verb) |
@@ -119,13 +120,27 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ## TODO
 
-### Pending
+### Pending — Test Suite
 
-*(none)*
+Multi-phase plan using `node:test` (built-in, zero deps). Each phase mocks its external boundary by replacing module functions.
+
+| Phase | Module | Boundary to mock | Scope |
+|---|---|---|---|
+| **1a** | `lib/opencode.js` | `http.request` | Every API function: URL/method/headers, parse responses, error handling |
+| **1b** | `lib/ocmux.js` | `spawnSync`, `execSync`, `fs` | `readState`, `statefileFor`, `hashDir`, `tuiPaneId`, `windowByDir`, `listServers`, `activateServer`, `resurrectServer` |
+| **2** | `bin/agentp` | `lib/opencode.js` functions | Stdin pipe, `--qa` formatting, `--getLast N`, `--flush`, `--tg` gateway forwarding |
+| **3** | `bin/ocmux` | `lib/ocmux.js` + `tmux` + `fs` | `serve`, `kill`, `resurrect`, `list`, `switch`, `--git`/`--GIT` resolution |
+| **4** | `bin/tgagentp` | Telegram API + `lib/opencode.js` + `lib/ocmux.js` + `fs` | Extract `processUpdate()` from event loop; test all slash commands, ownership model (disconnected guard, `--force`, takeover notification), gateway routing, state persistence |
+
+Key refactors needed before Phase 4:
+- Extract per-update logic into `processUpdate(update, context)` function (pure-ish, testable without running the loop)
+- Make polling loop stoppable (`while (running)` + `stop()` callback)
+- Make dependencies injectable (`getChatState`, `cmds`, etc.)
 
 ### In Progress
 
-*(none)*
+- **Phase 1a:** `lib/opencode.js` unit tests
+- **Phase 1b:** `lib/ocmux.js` unit tests
 
 ### Done
 
@@ -175,7 +190,10 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Fix: SSE log lines in `listenForSessionEvents` missing timestamps — added optional `logFn` parameter with timestamped default — 0.11.0
 - Fix: agentp gateway drops messages after restart (`serverOwners` empty) — restore from `STARTUP_CHAT_FILE` + populate on first message — 0.11.0
 - Fix: `flushRecorded(owningChatId)` passes object as `chatId` — destructure to `owningChatId.chatId, owningChatId.threadId` so `getChatState` key matches — 0.11.0
-- docs: sync devto article with current features (permission commands, env vars, --no-tg, ocmux flags, multi-chat) — 0.11.0
+- `isServerAlive()` extracted from `bin/tgagentp` into `lib/opencode.js` (moved into shared lib + test coverage) — 0.12.1
+- `--dev` mode: comprehensive message traffic log to `/tmp/tgagentp-msg.log` (JSON lines with timestamps, chat IDs, direction, from); also enables verbose logging — 0.12.1
+- Startup restoration health check: verify `isServerAlive` before showing "✅ restored" — prevents false-positive restore when server is already dead — 0.12.1
+- `/resurrect` fallback: when tmux window is gone and `listServers` returns empty, attempt to derive directory from `connections.json` — 0.12.1
 
 ### Verified
 
