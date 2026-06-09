@@ -81,6 +81,8 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/comment <text>` | Save a comment in chat (not forwarded to agent — context via reply quoting) |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
+| `/disconnect` | Disconnect from current server, clear ownership and connection file |
+| `/force-switch <server>` | Switch server bypassing ownership check (two-phase matching) |
 | `/resurrect` | Restart a crashed server and reconnect the chat to the new instance |
 
 Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
@@ -125,6 +127,7 @@ The killer integration: `agentp` and `tgagentp` talk to each other through a tin
 - **Auto-queue** — when a server is unreachable, messages are automatically queued and delivered when it comes back. `/flush` clears the queue.
 - **Server health detection** — tgagentp periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
 - **Multi-chat** — each Telegram chat or forum thread has independent server, session, and recorder state. Perfect for teams sharing one bot.
+- **Auto tmux switch** — every message or `/note` from any chat/topic automatically selects and zooms the corresponding server's tmux window, so the TUI follows the conversation across topics.
 - **Message splitting** — long answers are split at 4096 characters (respecting newlines) to stay within Telegram limits.
 - **State persistence** — chat-to-server directory mappings survive restarts via `/tmp/tgagentp-connections.json`. On reboot, tgagentp re-discovers the live server URL from `.ocmux.json` and reconnects automatically. `/shutdown clear` wipes the saved state.
 - **Remote resurrect** — `/resurrect` restarts a crashed server from Telegram: calls `resurrectServer()` from the library, then transfers session state (`serverOwners`, active session/agent) to the new URL.
@@ -154,7 +157,7 @@ All of this with **zero npm dependencies** — just Node.js 18+ stdlib.
 ## Why This Setup Works
 
 1. **Always-visible TUI, hands-free** — The dedicated TUI lives on a spare monitor, a virtual desktop, or a tmux window. You work elsewhere. The TUI shows the full picture without you touching it.
-2. **Multi-project agility** — Each project gets its own server and TUI. Switch projects with a single `ocmux` command (or automatically via `ocmux` with no args), and the displayed TUI follows. Start a task in project A, switch to project B while A runs.
+2. **Multi-project agility** — Each project gets its own server and TUI. Switch projects with a single `ocmux` command (or automatically via `ocmux` with no args), and the displayed TUI follows. The same auto-switch works from Telegram: every message or `/note` selects the right tmux window, so the TUI follows you across topics. Start a task in project A, switch to project B while A runs.
 3. **Editor ↔ terminal ↔ Telegram loop** — Pipe from Vim with `agentp`, get the answer inline. Enable `--tg` (implicit with `--qa`) and the result also lands in Telegram — so even if you moved to another device or context, you know when it's done.
 4. **Remote awareness** — tgagentp monitors progress, forwards permission prompts, and queues follow-ups from anywhere. `/record` recovers Telegram conversation context for your next `agentp` call. Notifications pop the moment a piped task finishes or needs input.
 5. **Graceful degradation** — `--tg` in auto mode silently skips Telegram if tgagentp isn't running. Explicit `--tg` errors pre-send, warns post-send.
