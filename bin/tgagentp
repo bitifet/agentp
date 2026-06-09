@@ -438,6 +438,12 @@ async function cmdHelp(token, chatId, args, chatState) {
         'but the information will inform future responses.');
       return;
     }
+    if (topic === 'disconnect') {
+      await sendLongMessage(token, chatState,
+        '`/disconnect` ─ disconnect this chat from its server\n\n' +
+        'Clears the server connection for this chat. Use `/servers switch <name>` to reconnect.');
+      return;
+    }
     if (topic === 'status') {
       await sendLongMessage(token, chatState,
         '`/status` ─ show current server, session, agent, and queue info\n\n' +
@@ -469,7 +475,7 @@ async function cmdHelp(token, chatId, args, chatState) {
       return;
     }
     await sendLongMessage(token, chatState,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatState,
@@ -494,6 +500,7 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/flush` ─ clear all queued messages\n' +
     '`/note <message>` ─ send context for the agent to acknowledge\n' +
     '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
+    '`/disconnect` ─ disconnect this chat from its server\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
@@ -1286,6 +1293,26 @@ async function cmdResurrect(token, chatId, args, chatState) {
   }
 }
 
+async function cmdDisconnect(token, chatId, args, chatState) {
+  const url = chatState.serverBase;
+  if (!url) {
+    await sendLongMessage(token, chatState, '🔌 Not connected to any server.');
+    return;
+  }
+  // Clear ownership if this chat is the owner
+  const key = convKey(chatId, chatState.threadId);
+  for (const [srvUrl, owner] of Object.entries(serverOwners)) {
+    if (String(owner.chatId) === String(chatId) && owner.threadId === chatState.threadId) {
+      delete serverOwners[srvUrl];
+      break;
+    }
+  }
+  chatState.serverBase = null;
+  removeConnection(chatId, chatState.threadId);
+  await sendLongMessage(token, chatState, '👋 Disconnected from `' + url + '`.');
+  log.info(`[chat ${chatId}] Disconnected from server: ${url}`);
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -1300,6 +1327,7 @@ const COMMANDS = {
   'queue': cmdQueue,
   'flush': cmdFlush,
   'comment': cmdComment,
+  'disconnect': cmdDisconnect,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -1788,6 +1816,7 @@ async function main() {
   let connByOldId = {};
   try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
   if (savedData && Array.isArray(savedData.connections)) {
+    // Phase 1: restore chat states and populate serverOwners
     for (const { chatId, threadId, dir } of savedData.connections) {
       connByOldId[String(chatId)] = { chatId, threadId, dir };
     }
@@ -1799,6 +1828,29 @@ async function main() {
       if (state && state.url) {
         cs.serverBase = state.url;
         serverOwners[state.url] = { chatId, threadId };
+      }
+    }
+    // Phase 2: prune secondary connections per URL (only owner survives)
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (!state.serverBase) continue;
+      const owner = serverOwners[state.serverBase];
+      if (!owner) continue;
+      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
+        const url = state.serverBase;
+        state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
+        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
+      }
+    }
+    // Phase 3: send startup notifications only to surviving connections
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      if (!cs.serverBase) continue;
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
         const alive = await isServerAlive(state.url);
         if (alive) {
           const lines = [
@@ -1949,7 +2001,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect`);
         }
         continue;
       }
