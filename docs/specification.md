@@ -16,7 +16,7 @@ All tools share `lib/opencode.js` (HTTP session API client) and `lib/ocmux.js` (
 
 ### `package.json`
 
-**Version:** 0.12.0
+**Version:** 0.13.0
 
 Fields:
 - `"bin"` — registers `agentp`, `ocmux`, `tgagentp`
@@ -85,7 +85,7 @@ Long-polling Telegram bot that routes messages to OpenCode servers.
 
 | Flag | Effect |
 |---|---|
-| `--dev` | Enable `/shutdown` for remote restart |
+| `--dev` | Enable `/shutdown` for remote restart, verbose logging, and structured message traffic log to `/tmp/tgagentp-msg.log` |
 | `--think` | Start with thinking forwarding enabled |
 | `--verbose` | Detailed logs on stderr |
 
@@ -120,6 +120,7 @@ Shared by `bin/agentp` and `bin/tgagentp`. Functions:
 | `selectSession(server, id)` | POST /session/:id/select | TUI navigation |
 | `listAgents(server)` | GET /agent | Returns parsed array |
 | `listProviders(server)` | GET /provider | Returns parsed array |
+| `isServerAlive(url)` | GET /session (5s timeout) | Health check, resolves true/false |
 | `listenForSessionEvents(server, id, callbacks, cancelRef?)` | GET /event | SSE with structured events |
 
 ### `lib/ocmux.js` — Tmux management library
@@ -204,7 +205,9 @@ On restart, tgagentp reads this file, reads `.ocmux.json` from each `dir` to dis
 **Lifecycle:**
 - Written on every `/servers switch` (via `setServerForChat`)
 - Removed for displaced chats on force-takeover (via `removeConnection`)
+- Removed for pruned chats on restart (secondary per URL)
 - Cleared on `/shutdown clear` (via `clearConnections`)
+- Updated on group migration (regular group → supergroup, e.g. enabling topics): all `chatId` references in the file are replaced with the new ID
 
 ### `/tmp/opencode-serve-<hashDir(dir)>.log`
 
@@ -322,14 +325,19 @@ Keyed by `convKey(chatId, threadId)` → `${chatId}:t${threadId}` (or just `chat
      - Saves connection to `/tmp/tgagentp-connections.json`
      - Activates tmux window
      - Flushes agentp queue for this server
-3. **Restart** → reads `/tmp/tgagentp-connections.json`, restores each connection
-4. **Force takeover** → previous owner notified, connection removed from file
+3. **Restart** → reads `/tmp/tgagentp-connections.json`, restores each connection:
+   - Phase 1: restores all chat states (`cs.serverBase`) and populates `serverOwners`
+   - `serverOwners` picks non-thread (private chat) over topic threads as owner per URL
+   - Phase 2: prunes secondary connections — only the owner per URL survives, others have `serverBase` cleared and connection removed from file
+   - Phase 3: "Bot started" notification sent only to owner per URL (first-to-notify wins)
+4. **`/force-switch <name>`** → same as `/servers switch --force <name>`: bypasses ownership check, takes over server, notifies previous owner
+5. **`/disconnect`** → clears `serverBase`, removes ownership, deletes connection from file
 
 ### Disconnected Guard
 
 Both command and non-command paths in the message loop check `cs.serverBase`:
 
-- Commands: only `/help`, `/servers`, `/start` pass through without a server
+- Commands: only `/help`, `/servers`, `/force-switch`, `/start`, `/comment`, `/shutdown` pass through without a server
 - Non-commands: `🔌 Not connected. Use /servers to see available servers.`
 
 ---
@@ -339,6 +347,17 @@ Both command and non-command paths in the message loop check `cs.serverBase`:
 - **stdout** — informational messages (startup, discovery, session switches)
 - **stderr** — errors (always shown) + trace/debug (only `--verbose` flag)
 - Default usage: `tgagentp 2>/dev/null`
+
+### Dev Mode Message Log
+
+When `--dev` is active, tgagentp writes a structured JSON-lines message traffic log to `/tmp/tgagentp-msg.log`:
+
+```
+{"ts":"2026-06-09 06:25:01","type":"in","chatId":-1004291964025,"from":"user","text":"/status"}
+{"ts":"2026-06-09 06:25:01","type":"out","chatId":-1004291964025,"from":"assistant","text":"**Server:** ..."}
+```
+
+Each line contains a timestamp, direction (`in`/`out`), chat ID, sender, and text content.
 
 ---
 

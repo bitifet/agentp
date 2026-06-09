@@ -120,30 +120,36 @@ These endpoints are consumed but not documented elsewhere in the repo:
 
 ## TODO
 
-### Pending — Test Suite
+### Test Suite Roadmap
 
-Multi-phase plan using `node:test` (built-in, zero deps). Each phase mocks its external boundary by replacing module functions.
-
-| Phase | Module | Boundary to mock | Scope |
-|---|---|---|---|
-| **1a** | `lib/opencode.js` | `http.request` | Every API function: URL/method/headers, parse responses, error handling |
-| **1b** | `lib/ocmux.js` | `spawnSync`, `execSync`, `fs` | `readState`, `statefileFor`, `hashDir`, `tuiPaneId`, `windowByDir`, `listServers`, `activateServer`, `resurrectServer` |
-| **2** | `bin/agentp` | `lib/opencode.js` functions | Stdin pipe, `--qa` formatting, `--getLast N`, `--flush`, `--tg` gateway forwarding |
-| **3** | `bin/ocmux` | `lib/ocmux.js` + `tmux` + `fs` | `serve`, `kill`, `resurrect`, `list`, `switch`, `--git`/`--GIT` resolution |
-| **4** | `bin/tgagentp` | Telegram API + `lib/opencode.js` + `lib/ocmux.js` + `fs` | Extract `processUpdate()` from event loop; test all slash commands, ownership model (disconnected guard, `--force`, takeover notification), gateway routing, state persistence |
+| Phase | Module | Boundary to mock | Scope | Status |
+|---|---|---|---|---|---|
+| **1a** | `lib/opencode.js` | `http.request` | Every API function: URL/method/headers, parse responses, error handling | ✅ Done |
+| **1b** | `lib/ocmux.js` | `spawnSync`, `execSync`, `fs` | `readState`, `statefileFor`, `hashDir`, `tuiPaneId`, `windowByDir`, `listServers`, `activateServer`, `resurrectServer` | ✅ Done |
+| **2** | `bin/agentp` | `lib/opencode.js` functions | Stdin pipe, `--qa` formatting, `--getLast N`, `--flush`, `--tg` gateway forwarding | ⏳ Pending |
+| **3** | `bin/ocmux` | `lib/ocmux.js` + `tmux` + `fs` | `serve`, `kill`, `resurrect`, `list`, `switch`, `--git`/`--GIT` resolution | ⏳ Pending |
+| **4** | `bin/tgagentp` | Telegram API + `lib/opencode.js` + `lib/ocmux.js` + `fs` | Extract `processUpdate()` from event loop; test all slash commands, ownership model (disconnected guard, `--force`, takeover notification), gateway routing, state persistence | ⏳ Pending |
 
 Key refactors needed before Phase 4:
 - Extract per-update logic into `processUpdate(update, context)` function (pure-ish, testable without running the loop)
 - Make polling loop stoppable (`while (running)` + `stop()` callback)
 - Make dependencies injectable (`getChatState`, `cmds`, etc.)
 
-### In Progress
-
-- **Phase 1a:** `lib/opencode.js` unit tests
-- **Phase 1b:** `lib/ocmux.js` unit tests
-
 ### Done
 
+- **Phase 1a+1b:** `lib/opencode.js` + `lib/ocmux.js` unit tests — 86 tests, all passing — 0.13.0
+- `/disconnect` command — clears `serverBase`, removes ownership, deletes connection from file — 0.13.0
+- Startup pruning (Phase 2): only owner per URL survives on restart; non-thread chats prioritized over topics — 0.13.0
+- Stale SSE listener fix: destroy previous `_cancelRef`/`_sessionReq` before starting new ones — prevents forwarding to old chats — 0.13.0
+- `/shutdown` works without a server connection — 0.13.0
+- `/status`, `/cancel`, `/shutdown` no longer crash with `null.replace` from topic threads — 0.13.0
+- `--dev` mode: structured message traffic log to `/tmp/tgagentp-msg.log` (JSON lines) — 0.12.1
+- Startup restoration health check: verify `isServerAlive` before showing "✅ restored" — prevents false-positive — 0.12.1
+- `/resurrect` fallback: when tmux window is gone and `listServers` returns empty, derive directory from `connections.json` — 0.12.1
+- `isServerAlive()` extracted from `bin/tgagentp` into `lib/opencode.js` (+ test coverage) — 0.12.1
+- Group migration handler (`migrate_to_chat_id` / `migrate_from_chat_id`) — auto-updates connections + allowlist when topics enabled — 0.12.1
+- `/force-switch` command (top-level + `/servers force-switch`) — two-phase matching, bypasses ownership check — 0.12.1
+- Stale `serverOwners` entries cleared when switching away from a server — 0.12.1
 - `ocmux resurrect` — new command (and `lib/ocmux.js` `resurrectServer()` function) to recover from dead/crashed opencode servers by reading `.ocmux.json` and re-creating server + TUI — 0.12.0
 - `tgagentp /resurrect` — invokes `resurrectServer()` from the library, transfers session state to the new server URL — 0.12.0
 
