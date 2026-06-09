@@ -49,7 +49,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 ## `//command` TUI passthrough (tgagentp)
 
-`//init` in Telegram → strips `/` → `/init` → appends space → `/init ` → tmux `send-keys` (C-u, type with space, Enter). SSE listener connects before Enter to catch AI responses (15s timeout). Falls back to `tmux capture-pane` diff for commands that produce TUI-only output (no AI response).
+`//init` in Telegram → strips `/` → `/init` → appends space → `/init ` → tmux `send-keys` (C-u, type with space, Enter). SSE listener connects before Enter to catch AI responses (15s timeout). On timeout sends confirmation (`✅ /init submitted.`).
 
 ## Logging (tgagentp)
 
