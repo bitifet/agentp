@@ -422,12 +422,20 @@ async function cmdHelp(token, chatId, args, chatState) {
         'Messages are queued automatically when the server is unreachable or busy.');
       return;
     }
+    if (topic === 'comment') {
+      await sendLongMessage(token, chatState,
+        '`/comment <text>` ─ save a comment in the chat\n\n' +
+        'Comments are NOT forwarded to the agent. They are stored as a regular message\n' +
+        'in the chat. If you reply to a comment with a message that doesn\'t start with\n' +
+        '`/comment`, the comment text is included as context (via the reply-to quoting mechanism).');
+      return;
+    }
     if (topic === 'note') {
       await sendLongMessage(token, chatState,
-        '`/note <text>` ─ save a note in the chat\n\n' +
-        'Notes are NOT forwarded to the agent. They are stored as a regular message\n' +
-        'in the chat. If you reply to a note with a message that doesn\'t start with\n' +
-        '`/note`, the note text is included as context (via the reply-to quoting mechanism).');
+        '`/note <message>` ─ send context for the agent to acknowledge\n\n' +
+        'The message is forwarded to the agent with an awareness prefix. ' +
+        'The agent will reply with "Ack" and take no action, ' +
+        'but the information will inform future responses.');
       return;
     }
     if (topic === 'status') {
@@ -461,7 +469,7 @@ async function cmdHelp(token, chatId, args, chatState) {
       return;
     }
     await sendLongMessage(token, chatState,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatState,
@@ -484,7 +492,8 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/record` ─ record Telegram conversation for agentp context\n' +
     '`/queue <message>` ─ queue a message when server is busy\n' +
     '`/flush` ─ clear all queued messages\n' +
-    '`/note <text>` ─ save a note in the chat (not forwarded to the agent)\n' +
+    '`/note <message>` ─ send context for the agent to acknowledge\n' +
+    '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
@@ -1204,12 +1213,10 @@ async function cmdFlush(token, chatId, args, chatState) {
       : '🧹 No queued messages to flush.');
 }
 
-async function cmdNote(token, chatId, args, chatState) {
-  // No-op: the message is already in the chat. /note prevents forwarding to the agent.
-  // Replying to a note with a non-/note message includes it via the quote mechanism.
-  log.info(`[NOTE] chat=${chatId} text: ${(args || []).join(' ')}`);
-  // In dev mode, also log to msgLog through the polling loop's msgLog call
-  // (handled there since /note is processed before reaching cmdNote)
+async function cmdComment(token, chatId, args, chatState) {
+  // No-op: the message is already in the chat. /comment prevents forwarding to the agent.
+  // Replying to a comment with a non-/comment message includes it via the quote mechanism.
+  log.info(`[COMMENT] chat=${chatId} text: ${(args || []).join(' ')}`);
 }
 
 async function cmdResurrect(token, chatId, args, chatState) {
@@ -1292,7 +1299,7 @@ const COMMANDS = {
   'resurrect': cmdResurrect,
   'queue': cmdQueue,
   'flush': cmdFlush,
-  'note': cmdNote,
+  'comment': cmdComment,
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
@@ -1735,7 +1742,40 @@ async function main() {
     process.exit(0);
   };
 
-  const cmds = { ...COMMANDS, status: cmdStatus, cancel: cmdCancel };
+  const cmdNote = async (token, chatId, cmdArgs, chatState) => {
+    const text = cmdArgs.join(' ');
+    if (!text) {
+      await sendLongMessage(token, chatState, 'Usage: `/note <message>` — sends a note for the agent to acknowledge.');
+      return;
+    }
+    const url = chatState.serverBase;
+    if (!url) {
+      await sendLongMessage(token, chatState, '🔌 Not connected to any server.');
+      return;
+    }
+    const st = getState(url);
+    if (st.serverDead) {
+      const alive = await isServerAlive(url);
+      if (!alive) {
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.push({ text: '📝 **Note:** ' + text, replyTo: null });
+        await sendLongMessage(token, chatState, `⚠️ Server unreachable. Note queued (#${st.messageQueue.length}).`);
+        return;
+      }
+      st.serverDead = false;
+    }
+    if (st.busy) {
+      await sendLongMessage(token, chatState, '⏳ Server is busy. Use `/cancel` to cancel or note again later.');
+      return;
+    }
+    const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
+    st.busy = true;
+    const myTaskId = ++st.taskId;
+    log.debug(`  → /note: starting background processing (task ${myTaskId})`);
+    processMessageAsync(chatId, intro + '\n\n' + text, url, !!st.activeSessionId, st.activeSessionId, myTaskId, null, chatState.threadId);
+  };
+
+  const cmds = { ...COMMANDS, status: cmdStatus, cancel: cmdCancel, note: cmdNote };
   if (DEV_MODE) cmds.shutdown = cmdShutdown;
 
   let offset = 0;
@@ -1891,8 +1931,8 @@ async function main() {
         const cmdArgs = parts.slice(1);
         const handler = cmds[cmd];
         if (handler) {
-          // Disconnected guard: only /help, /servers, and /start work without a server
-          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start') {
+          // Disconnected guard: only /help, /servers, /force-switch, /start, and /comment work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment') {
             await sendLongMessage(token, cs,
               '🔌 Not connected to any server.\n\n' +
               'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
@@ -1906,7 +1946,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment`);
         }
         continue;
       }
