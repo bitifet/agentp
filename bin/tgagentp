@@ -1827,10 +1827,27 @@ async function main() {
       const state = readState(sf);
       if (state && state.url) {
         cs.serverBase = state.url;
-        serverOwners[state.url] = { chatId, threadId };
+        // Prefer non-thread (private chat) as owner over topic threads
+        const existing = serverOwners[state.url];
+        if (!existing || (!threadId && existing.threadId)) {
+          serverOwners[state.url] = { chatId, threadId };
+        }
       }
     }
-    // Phase 2: send startup notification only to first restored connection per URL
+    // Phase 2: prune secondary connections per URL (only owner survives)
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (!state.serverBase) continue;
+      const owner = serverOwners[state.serverBase];
+      if (!owner) continue;
+      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
+        const url = state.serverBase;
+        state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
+        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
+      }
+    }
+    // Phase 3: send startup notification only to the surviving owner per URL
     const notifiedUrls = new Set();
     for (const { chatId, threadId, dir } of savedData.connections) {
       if (!dir) continue;
