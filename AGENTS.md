@@ -148,7 +148,8 @@ Key refactors needed before Phase 4:
 - `tgagentp /resurrect` — invokes `resurrectServer()` from the library, transfers session state to the new server URL — 0.12.0
 
 - `/record` refactor: `/record N` (retrofill from ring), `/record pause [N]`, `/record continue`, `/record flush`, `/record stop`, always-on ring buffer (50 msgs), state transitions (active/paused/inactive) — 0.11.0
-- `/note` — no-op command: ignores message (not forwarded to agent); reply-to quoting handles context — 0.11.0
+- `/comment` — no-op command (renamed from `/note`): ignores message (not forwarded to agent); reply-to quoting handles context — 0.11.0 / renamed 0.13.0
+- `/note` — forwards message to agent prepended with awareness paragraph ("reply with only 'Ack' and do not take any action") — 0.13.0
 - `/flush` — clears both message queue and agentp gateway queue — 0.11.0
 - `isServerAlive()` health check (5s timeout GET /session) — 0.11.0
 - Pre-send health check: auto-queues messages when server is unreachable, reconnection detection flushes queue — 0.11.0

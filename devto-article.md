@@ -77,7 +77,8 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/queue <msg>` | Queue message when busy — auto-sent after current task finishes (replies chain!) |
 | `/record` | Record / pause / retrofill conversation for `agentp` context |
 | `/flush` | Clear all queued messages (manual or auto-queued) |
-| `/note <text>` | Save a note (not forwarded to agent — context via reply quoting) |
+| `/note <text>` | Forward context for agent awareness (agent replies "Ack", info informs future responses) |
+| `/comment <text>` | Save a comment in chat (not forwarded to agent — context via reply quoting) |
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
 | `/resurrect` | Restart a crashed server and reconnect the chat to the new instance |
