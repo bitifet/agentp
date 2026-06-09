@@ -5,7 +5,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
+const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
 
 // Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
 const log = {
@@ -384,14 +384,17 @@ async function cmdHelp(token, chatId, args, chatState) {
         'with status, context limit, and input/output costs.');
       return;
     }
-    if (topic === 'allow' || topic === 'reject' || topic === 'always') {
+    if (topic === 'allow' || topic === 'reject' || topic === 'always' || topic === 'answer') {
       await sendLongMessage(token, chatState,
         '`/allow` ─ approve a permission request once\n' +
         '`/reject` ─ deny a permission request\n' +
-        '`/always` ─ approve and remember for the session\n\n' +
-        'These commands respond to OpenCode permission prompts forwarded by tgagentp.\n' +
+        '`/always` ─ approve and remember for the session\n' +
+        '`/answer <number>` ─ respond to a question from the AI\n\n' +
+        'These commands respond to OpenCode prompts forwarded by tgagentp.\n' +
         'When OpenCode needs approval (e.g. to run a shell command), tgagentp sends a\n' +
-        '🔐 notification to the chat. Use one of these commands to answer.');
+        '🔐 notification to the chat. Use one of these commands to answer.\n' +
+        'When the AI asks a multiple-choice question, tgagentp sends a ❓ notification\n' +
+        'with numbered options. Use `/answer <number>` to respond.');
       return;
     }
     if (topic === 'think') {
@@ -1062,6 +1065,24 @@ async function cmdAlways(token, chatId, args, chatState, setServerForChat, setAc
   }
 }
 
+async function cmdAnswer(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  if (!st.pendingQuestion) {
+    await sendLongMessage(token, chatState, 'No pending question. Use `/status` to check the current state.');
+    return;
+  }
+  const q = st.pendingQuestion;
+  const n = parseInt(args[0], 10);
+  if (isNaN(n) || n < 1 || n > q.options.length) {
+    await sendLongMessage(token, chatState, `Invalid answer. Use a number between 1 and ${q.options.length}.`);
+    return;
+  }
+  const answer = q.options[n - 1].text || q.options[n - 1];
+  await respondToQuestion(q.server, q.sessionId, q.questionId, answer);
+  await sendLongMessage(token, chatState, `✅ Answered: ${answer}`);
+  st.pendingQuestion = null;
+}
+
 async function cmdThink(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
   const st = getState(chatState.serverBase);
   const sub = args && args.length > 0 ? args[0].toLowerCase() : 'switch';
@@ -1332,6 +1353,7 @@ const COMMANDS = {
   'allow': cmdAllow,
   'reject': cmdReject,
   'always': cmdAlways,
+  'answer': cmdAnswer,
 };
 
 // --------------------------------------------------------------------------
@@ -1340,7 +1362,7 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, thinkingEnabled: false, messageQueue: [] };
+  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, messageQueue: [] };
 }
 
 function sessionLabel(st) {
@@ -1614,6 +1636,21 @@ async function main() {
           onPermissionReplied: () => {
             log.debug(`  → permission_replied: clearing pendingPermission`);
             getState(url).pendingPermission = null;
+          },
+          onQuestion: (q) => {
+            const st2 = getState(url);
+            const qDump = JSON.stringify(q);
+            log.debug(`  → question_asked callback: ${qDump}`);
+            st2.pendingQuestion = { server: url, sessionId, questionId: q.id, question: q.question || 'Unknown question', options: q.options || [] };
+            const options = (q.options || []).map((opt, i) => `${i + 1}. ${opt.text || opt}`).join('\n');
+            const msg = '❓ **Question from the AI**\n\n'
+              + (q.question || 'Choose an option:') + '\n\n'
+              + (options ? options + '\n\n' : '')
+              + 'Use `/answer <number>` to respond.';
+            log.debug(`  → sending question notification to chat ${chatId}`);
+            sendLongMessage(token, chatState, msg, replyTo, threadId)
+              .then(() => log.debug(`  → question notification sent OK`))
+              .catch((err) => log.debug(`  → question notification failed: ${err.message}`));
           },
         }, cancelRef).catch(() => {});
         await onConnected;
