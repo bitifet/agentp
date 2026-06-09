@@ -1830,20 +1830,8 @@ async function main() {
         serverOwners[state.url] = { chatId, threadId };
       }
     }
-    // Phase 2: prune secondary connections per URL (only owner survives)
-    for (const key of Object.keys(chatStates)) {
-      const state = chatStates[key];
-      if (!state.serverBase) continue;
-      const owner = serverOwners[state.serverBase];
-      if (!owner) continue;
-      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
-        const url = state.serverBase;
-        state.serverBase = null;
-        removeConnection(state.chatId, state.threadId);
-        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
-      }
-    }
-    // Phase 3: send startup notifications only to surviving connections
+    // Phase 2: send startup notification only to first restored connection per URL
+    const notifiedUrls = new Set();
     for (const { chatId, threadId, dir } of savedData.connections) {
       if (!dir) continue;
       const cs = getChatState(chatId, threadId);
@@ -1851,6 +1839,11 @@ async function main() {
       const sf = statefileFor(dir);
       const state = readState(sf);
       if (state && state.url) {
+        if (notifiedUrls.has(state.url)) {
+          log.info(`[chat ${chatId}] Skipping startup notification for ${dir} (already notified for this URL)`);
+          continue;
+        }
+        notifiedUrls.add(state.url);
         const alive = await isServerAlive(state.url);
         if (alive) {
           const lines = [
@@ -1986,8 +1979,8 @@ async function main() {
         const cmdArgs = parts.slice(1);
         const handler = cmds[cmd];
         if (handler) {
-          // Disconnected guard: only /help, /servers, /force-switch, /start, and /comment work without a server
-          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment') {
+          // Disconnected guard: only /help, /servers, /force-switch, /start, /comment, and /shutdown work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown') {
             await sendLongMessage(token, cs,
               '🔌 Not connected to any server.\n\n' +
               'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
