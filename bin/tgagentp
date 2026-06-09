@@ -1664,8 +1664,12 @@ async function main() {
     }
   }
 
-  const cmdCancel = async (token, chatId) => {
-    const cs = getChatState(chatId);
+  const cmdCancel = async (token, chatId, cmdArgs, chatState) => {
+    const cs = chatState || getChatState(chatId);
+    if (!cs.serverBase) {
+      await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+      return;
+    }
     const st = getState(cs.serverBase);
     if (!st.busy) {
       await sendLongMessage(token, cs, 'Nothing to cancel.');
@@ -1685,8 +1689,12 @@ async function main() {
     log.debug(`[chat ${chatId}] /cancel on ${cs.serverBase}`);
   }
 
-  const cmdStatus = async (token, chatId) => {
-    const cs = getChatState(chatId);
+  const cmdStatus = async (token, chatId, cmdArgs, chatState) => {
+    const cs = chatState || getChatState(chatId);
+    if (!cs.serverBase) {
+      await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+      return;
+    }
     const st = getState(cs.serverBase);
     const deadInfo = st.serverDead ? ' ❌ unreachable' : '';
     const busyInfo = st.busy ? '⏳ busy' : '✅ idle';
@@ -1700,8 +1708,8 @@ async function main() {
     await sendLongMessage(token, cs, lines.join('\n'));
   };
 
-  const cmdShutdown = async (token, chatId, args) => {
-    const cs = getChatState(chatId);
+  const cmdShutdown = async (token, chatId, args, chatState) => {
+    const cs = chatState || getChatState(chatId);
     const st = getState(cs.serverBase);
 
     // Handle /shutdown clear — wipe saved connections before exiting
