@@ -9,10 +9,17 @@
 ## Package facts
 
 - **Zero npm dependencies.** All scripts use only Node.js stdlib (`http`, `https`, `readline`, `url`, `child_process`, `fs`, `path`, `crypto`, `os`).
-- **No tests, no CI, no lint, no formatter.** `npm test` is a stub that exits 1.
+- **Tests via `node:test`** — run `npm test` (alias `node --test tests/*.test.js`). All external calls mocked; safe to run alongside live OpenCode.
 - **No lockfile.** Versions resolve at install time.
 - **`"type": "commonjs"`**, requires Node >= 18.
 - **Linux and macOS compatible.** All tools use portable Node.js APIs only.
+
+## Versioning policy
+
+- **Do not bump the version in `package.json` without approval.**
+- When a version bump feels warranted, append a pre-release suffix instead: `0.11.0-pre01`, `0.11.0-pre02`, etc.
+- Update the **`CHANGELOG.md`** with the full summary of changes since the last published version (tagged on npm).
+- The human maintainer reviews pre-releases and decides when to cut a final release (strip the suffix, tag, publish to npm).
 
 ## Logging conventions (tgagentp)
 
