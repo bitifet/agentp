@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.2-pre05] - 2026-06-09
+
+- `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, then presses Enter. Uses pure tmux `send-keys` (no HTTP/SSE). Fire-and-forget with Telegram confirmation.
+
 ## [0.11.1] - 2026-06-09
 
 - Auto-switch tmux window to the active chat's server on every non-command message and `/note`, matching the behavior of direct `agentp` usage. Both the main message dispatch and `/note` handler now call `activateServer()` before processing, so the TUI follows the conversation across topics and chats.

@@ -19,7 +19,8 @@ const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
 const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
-const { listServers, activateServer, resurrectServer, statefileFor, readState } = require('../lib/ocmux.js');
+const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId } = require('../lib/ocmux.js');
+const { executeTuiCommand } = require('../lib/tui-cmd.js');
 
 // Persist chat↔server directory mappings across restarts
 function saveConnection(chatId, threadId, dir) {
@@ -1994,6 +1995,43 @@ async function main() {
 
       // Build reply context if this message is a Telegram reply
       const replyContext = quoteReply(msg);
+
+      // Intercept //commands (raw TUI passthrough via tmux send-keys)
+      if (text.startsWith('//')) {
+        const tuiCmd = text.slice(1);
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+          continue;
+        }
+        const st = getState(cs.serverBase);
+        if (st.busy) {
+          await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel first.');
+          continue;
+        }
+        const srvList = listServers();
+        const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+        if (!srvMatch) {
+          await sendLongMessage(token, cs, '❌ Server not found in tmux.');
+          continue;
+        }
+        activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+        const paneId = tuiPaneId(srvMatch.index);
+        if (!paneId) {
+          await sendLongMessage(token, cs, '❌ TUI pane not found.');
+          continue;
+        }
+        st.busy = true;
+        try {
+          executeTuiCommand(paneId, tuiCmd);
+          await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+        } catch (err) {
+          log.error(`Error executing TUI command ${tuiCmd}: ${err.message}`);
+          try { await sendLongMessage(token, cs, `Error executing \`${tuiCmd}\`: ${err.message}`); } catch (_) {}
+        } finally {
+          st.busy = false;
+        }
+        continue;
+      }
 
       // Intercept /commands
       if (text.startsWith('/')) {

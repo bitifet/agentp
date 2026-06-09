@@ -97,6 +97,12 @@ These endpoints are consumed but not documented elsewhere in the repo:
 - Gateway response includes `{ buffered: [...] }` — recorded conversation messages (see `/record` command) flushed on each POST.
 - agentp `--qa` prepends the buffered context to stdout; `--flush` bypasses prepending but still triggers the flush.
 
+## `lib/tui-cmd.js`
+
+Used by `bin/tgagentp` for `//command` raw TUI passthrough:
+
+- `executeTuiCommand(paneId, command)` — clears prompt (C-u), types `command + ' '` (trailing space selects the TUI as-you-type menu), presses Enter. All via `tmux send-keys`. Fire-and-forget (no SSE, no AI output capture).
+
 ## OpenCode tmux session model (ocmux)
 
 - Single tmux session named `"Opencode"`
@@ -114,7 +120,7 @@ These endpoints are consumed but not documented elsewhere in the repo:
 | `npm link` | local dev install |
 | `npm install -g .` | alternative local install |
 | `agentp [--qa] [--tg|--no-tg] [--flush] [--getLast n] [port]` | pipe stdin → opencode session, stream answer to stdout (uses session API). `--tg` forwards answer to Telegram; `--flush` clears recorded buffer; `--getLast n` retrieves last n answers (or QA pairs with `--qa`). URL via `ocmux` or explicit. |
-| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); multi-chat/thread support, each with independent server/session/recorder |
+| `tgagentp [port]` | bridge Telegram bot ↔ opencode TUI (needs `TELEGRAM_BOT_TOKEN`); multi-chat/thread support, each with independent server/session/recorder. `//command` prefix passes raw TUI commands via tmux send-keys (e.g. `//init` runs `/init` in the TUI). |
 | `tgagentp --dev` | enable `/shutdown` command, verbose logging, and structured message traffic log to `/tmp/tgagentp-msg.log` (JSON lines with timestamps, chat IDs, directions) |
 | `tgagentp --think` | start with thinking message forwarding enabled |
 | `tgagentp --verbose` | detailed logs (errors, trace, debug) on stderr |
@@ -143,6 +149,8 @@ Key refactors needed before Phase 4:
 - Make dependencies injectable (`getChatState`, `cmds`, etc.)
 
 ### Done
+
+- `//command` — raw TUI passthrough via tmux `send-keys`: strips first `/` from `//cmd`, adds trailing space to select the as-you-type menu, then presses Enter — 0.11.2-pre05
 
 - **Phase 1a+1b:** `lib/opencode.js` + `lib/ocmux.js` unit tests — 86 tests, all passing — 0.13.0
 - `/disconnect` command — clears `serverBase`, removes ownership, deletes connection from file — 0.13.0
