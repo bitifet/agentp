@@ -1530,6 +1530,9 @@ async function main() {
     const cancelRef = { current: null };
     const chatState = { chatId, threadId };
     const sessionCancelRef = { current: null };
+    // Destroy any previous SSE listener so stale forwarding to old chats stops
+    if (st._cancelRef && st._cancelRef.current) { st._cancelRef.current.destroy(); st._cancelRef.current = null; }
+    if (st._sessionReq && st._sessionReq.current) { st._sessionReq.current.destroy(); st._sessionReq.current = null; }
     st._cancelRef = cancelRef;
     st._sessionReq = sessionCancelRef;
     try {
