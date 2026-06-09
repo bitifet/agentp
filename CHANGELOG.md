@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## [0.11.2-pre05] - 2026-06-09
 
-- `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, then presses Enter. Uses pure tmux `send-keys` (no HTTP/SSE). Fire-and-forget with Telegram confirmation.
+- `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, sends via tmux `send-keys`. SSE listener catches AI responses (30s timeout); forwards answer to Telegram or sends confirmation.
 
 ## [0.11.1] - 2026-06-09
 

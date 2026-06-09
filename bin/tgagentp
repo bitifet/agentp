@@ -2022,8 +2022,12 @@ async function main() {
         }
         st.busy = true;
         try {
-          executeTuiCommand(paneId, tuiCmd);
-          await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+          const answer = await executeTuiCommand(paneId, cs.serverBase, tuiCmd);
+          if (answer && answer.trim()) {
+            await sendLongMessage(token, cs, answer.trim());
+          } else {
+            await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+          }
         } catch (err) {
           log.error(`Error executing TUI command ${tuiCmd}: ${err.message}`);
           try { await sendLongMessage(token, cs, `Error executing \`${tuiCmd}\`: ${err.message}`); } catch (_) {}
