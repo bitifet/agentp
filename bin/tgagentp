@@ -1799,6 +1799,12 @@ async function main() {
       await sendLongMessage(token, chatState, '⏳ Server is busy. Use `/cancel` to cancel or note again later.');
       return;
     }
+
+    // Auto-switch tmux window to this chat's server
+    const srvList = listServers();
+    const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(url));
+    if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
     const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
     st.busy = true;
     const myTaskId = ++st.taskId;
@@ -2061,6 +2067,12 @@ async function main() {
         await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel or `/queue <message>` to queue your message.');
         continue;
       }
+
+      // Auto-switch tmux window to this chat's server
+      const srvList = listServers();
+      const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+      if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
       st.busy = true;
       const myTaskId = ++st.taskId;
       log.debug(`  → started background processing (task ${myTaskId})`);
