@@ -829,3 +829,80 @@ describe('isServerAlive', () => {
     assert.strictEqual(result, false);
   });
 });
+
+// ── Test question.asked SSE event handling ──
+
+function startQuestionServer(questionPayload) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/event') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        const event = `data: ${JSON.stringify(questionPayload)}\n\n`;
+        res.write(event);
+        setTimeout(() => res.end(), 500);
+      } else if (req.url.startsWith('/session/') && req.url.includes('/questions/')) {
+        let body = '';
+        req.on('data', chunk => body += chunk);
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ received: JSON.parse(body) }));
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+function getServerUrl(server) {
+  const addr = server.address();
+  return `http://${addr.address}:${addr.port}`;
+}
+
+describe('question.asked SSE event', { concurrency: false }, () => {
+  let mockServer;
+
+  before(async () => {
+    mockServer = await startQuestionServer({
+      type: 'question.asked',
+      properties: {
+        id: 'q_test_123',
+        sessionID: 'ses_test',
+        question: 'What would you like to test?',
+        options: [
+          { text: 'Option A', value: 'a' },
+          { text: 'Option B', value: 'b' },
+          { text: 'Option C', value: 'c' }
+        ]
+      }
+    });
+  });
+
+  after(() => mockServer.close());
+
+  it('fires onQuestion callback when question.asked event arrives', async () => {
+    const url = getServerUrl(mockServer);
+    let questionReceived = null;
+
+    await opencode.listenForSessionEvents(url, 'ses_test', {
+      onQuestion: (q) => {
+        questionReceived = q;
+      }
+    });
+
+    assert.ok(questionReceived, 'onQuestion callback should fire');
+    assert.strictEqual(questionReceived.id, 'q_test_123');
+    assert.strictEqual(questionReceived.question, 'What would you like to test?');
+    assert.strictEqual(questionReceived.options.length, 3);
+    assert.strictEqual(questionReceived.options[0].text, 'Option A');
+  });
+
+  it('respondToQuestion sends answer to correct endpoint', async () => {
+    const url = getServerUrl(mockServer);
+    const answer = 'Option A';
+    await opencode.respondToQuestion(url, 'ses_test', 'q_test_123', answer);
+    assert.ok(true);
+  });
+});
