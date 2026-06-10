@@ -74,6 +74,8 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/allow` | Approve a tool permission once |
 | `/reject` | Deny a tool permission |
 | `/always` | Approve a permission and remember the choice |
+| `/answer <number>` | Respond to a structured question from the AI |
+| `//<command>` | Send a raw TUI command (e.g., `//init`, `//clear`) — answer or confirmation forwarded |
 | `/queue <msg>` | Queue message when busy — auto-sent after current task finishes (replies chain!) |
 | `/record` | Record / pause / retrofill conversation for `agentp` context |
 | `/flush` | Clear all queued messages (manual or auto-queued) |
@@ -86,6 +88,8 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/resurrect` | Restart a crashed server and reconnect the chat to the new instance |
 
 Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
+
+When the AI asks a structured question (e.g., tool configuration), tgagentp forwards it as a numbered multiple-choice poll — respond with `/answer <number>`. If the command produces a quick answer, it arrives immediately; otherwise a confirmation (`✅ /init submitted.`) is sent.
 
 ---
 

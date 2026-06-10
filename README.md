@@ -230,17 +230,7 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 |---|---|
 | `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`, `record`, `queue`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
-| `/servers switch <name>` | Switch active server; matches by full path, basename, or substring |
-| `/sessions` | List recent sessions for the current server (max 50, with date headings) |
-| `/sessions switch <number\|name>` | Switch active session by position or partial name match |
-| `/agents` | List primary agents (▶ marker for the active one) |
-| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
-| `/models` | List connected providers with model counts, context limits, and costs |
-| `/status` | Show current server path, URL, busy status, and active session |
-| `/cancel` | Cancel the current AI response for the active server |
-| `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
-| `/record [stop]` | Toggle recording of Telegram conversation for agentp context; `/record stop` clears and stops |
-| `/servers switch <name> [--force]` | Switch to a server; `--force` takes over from another chat |
+| `/servers switch <name> [--force]` | Switch active server; matches by full path, basename, or substring; `--force` takes over from another chat |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
 | `/sessions switch <number\|name>` | Switch active session by position or partial name match |
 | `/agents` | List primary agents (▶ marker for the active one) |
@@ -256,7 +246,14 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/allow` | Approve a permission request once |
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |
+| `/answer <number>` | Respond to a question asked by the AI (structured multiple-choice) |
 | `/shutdown [force\|clear]` | (requires `--dev`) Stop tgagentp; `clear` also wipes saved connections |
+
+#### TUI Command Passthrough
+
+Messages starting with `//` are forwarded to the OpenCode TUI as raw keystrokes (not text sent to the AI):
+
+- **`//<command>`** — Sends `/command` directly to the TUI prompt. Useful for TUI-level commands like `/init`, `/clear`, `/history`, etc. The AI response is captured and forwarded to Telegram (or a confirmation is sent if the command is quick).
 
 ### Chat-server ownership
 

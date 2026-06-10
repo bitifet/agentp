@@ -16,7 +16,7 @@ All tools share `lib/opencode.js` (HTTP session API client) and `lib/ocmux.js` (
 
 ### `package.json`
 
-**Version:** 0.13.0
+**Version:** 0.11.2
 
 Fields:
 - `"bin"` — registers `agentp`, `ocmux`, `tgagentp`
@@ -117,6 +117,7 @@ Shared by `bin/agentp` and `bin/tgagentp`. Functions:
 | `sendToSession(server, id, text, agent?, cancelRef?)` | POST /session/:id/message | Synchronous message; optional abort |
 | `sendToSessionAsync(server, id, text, agent?)` | POST /session/:id/prompt_async | Non-blocking (204); answer via SSE |
 | `respondToPermission(server, id, permissionId, response)` | POST /session/:id/permissions/:id | Permission response |
+| `respondToQuestion(server, id, questionId, answer)` | POST /session/:id/questions/:id | Question response |
 | `selectSession(server, id)` | POST /session/:id/select | TUI navigation |
 | `listAgents(server)` | GET /agent | Returns parsed array |
 | `listProviders(server)` | GET /provider | Returns parsed array |
@@ -339,6 +340,50 @@ Both command and non-command paths in the message loop check `cs.serverBase`:
 
 - Commands: only `/help`, `/servers`, `/force-switch`, `/start`, `/comment`, `/shutdown` pass through without a server
 - Non-commands: `🔌 Not connected. Use /servers to see available servers.`
+
+---
+
+## `//command` TUI Passthrough
+
+Messages starting with `//` are forwarded to the TUI as raw keystrokes (not AI text). The `//` prefix is stripped, a trailing space is appended to activate the TUI as-you-type menu, and `tmux send-keys` sends the keys to the TUI pane. An SSE listener connects before the Enter key to catch the AI response.
+
+**Flow:**
+1. Chat message: `//init`
+2. Strips `//` → `init`
+3. Prepends `/` → `/init`
+4. Appends space → `/init ` (selects TUI menu item)
+5. `tmux send-keys` to TUI pane: `C-u` (clear line), type `/init `, Enter
+6. SSE listener starts before Enter (15s timeout)
+7. If AI responds: forwards full answer to Telegram
+8. If timeout: sends `✅ /init submitted.` confirmation
+
+**Busy guard:** `//command` is blocked when `st.busy` is true (same "use /cancel" message as regular messages).
+
+**Commands that trigger AI responses:** `//init`, `//clear`, `//history` (and any other TUI command that produces an AI answer). Quick commands like `/exit` timeout without an answer.
+
+---
+
+## Question Handling
+
+When the AI asks a structured multiple-choice question (via `question.asked` SSE event), tgagentp forwards the question to Telegram with numbered options.
+
+**Notification format:**
+```
+❓ **Question from the AI**
+
+What would you like to test?
+
+1. Option A
+2. Option B
+3. Option C
+
+Use /answer <number> to respond.
+```
+
+**Response:**
+- `/answer <number>` → `POST /session/:id/questions/:id` with the selected option's value
+- Only one question can be pending at a time per server
+- The question is stored per-server in `chatStates.pendingQuestion`
 
 ---
 

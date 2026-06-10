@@ -2,9 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.2-pre05] - 2026-06-09
+## [0.11.2] - 2026-06-10
 
-- `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, sends via tmux `send-keys`. SSE listener catches AI responses (30s timeout); forwards answer to Telegram or sends confirmation.
+- `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, sends via tmux `send-keys`. SSE listener catches AI responses (15s timeout); forwards answer to Telegram or sends confirmation.
+- `/answer` command to respond to structured questions from the AI (multiple-choice via `question.asked` SSE event). Forwards question with numbered options to Telegram; `POST /session/:id/questions/:id` on response.
 
 ## [0.11.1] - 2026-06-09
 
