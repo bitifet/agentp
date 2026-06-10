@@ -9,6 +9,7 @@ bin/tgagentp        — Telegram bot ↔ opencode TUI (2134 lines)
 lib/opencode.js     — HTTP session API client (shared by agentp + tgagentp)
 lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
 lib/tui-cmd.js      — tmux send-keys for TUI command passthrough (used by tgagentp)
+lib/file-share.js   — telegram-shared directory + file upload/download helpers
 tests/              — node:test, all external calls mocked, safe to run live
 ```
 
@@ -25,9 +26,10 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 97 tests (62 + 35)
+npm test              # node --test tests/*.test.js — 107 tests (64 + 35 + 8)
 node --test tests/opencode.test.js   # mock http.request
 node --test tests/ocmux.test.js      # mock child_process + fs.*
+node --test tests/file-share.test.js # mock fs for telegram-shared dir ops
 ```
 
 All tests run fully in-process. Mock boundaries are in `before()`/`after()` (opencode) or `beforeEach()`/`afterEach()` (ocmux) hooks. Tests within a describe block are serial (`concurrency: false`) when sharing mocked state.
@@ -56,6 +58,12 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 - stdout: info messages (startup, discovery, session switches)
 - stderr: errors (always) + trace/debug (`--verbose`)
 - Default: `tgagentp 2>/dev/null`
+
+## File sharing (tgagentp)
+
+Upload: Telegram file/photo → saved to `<project>/telegram-shared/uploads/` with timestamp prefix + sanitized name. Auto-creates `telegram-shared/{uploads,downloads}/` and appends `telegram-shared/` to `.gitignore` on first upload. Notification sent to agent (respects busy/idle queue).
+
+Download: `POST /send-file` gateway endpoint. Agent writes file to `telegram-shared/downloads/` and POSTs `{ filePath, server, message }` to gateway. tgagentp sends via `sendDocument` (multipart/form-data) and cleans up after successful send.
 
 ## Key integration patterns
 

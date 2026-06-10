@@ -310,6 +310,8 @@ async function sendLongMessage(token, chatIdOrState, text, replyTo, threadId) {
 // Returns empty string if the message isn't a reply or has no text.
 // Uses a dynamic code-fence length (max consecutive backticks + 1)
 // so nested backticks never break the structure.
+const { ensureSharedDir, saveUploadedFile, formatFileSize } = require('../lib/file-share.js');
+
 function quoteReply(msg) {
   const rm = msg.reply_to_message;
   if (!rm || !rm.text) return '';
@@ -324,6 +326,58 @@ function quoteReply(msg) {
   }
   const fence = '`'.repeat(Math.max(3, maxBackticks + 1));
   return `In response to ${replyFrom} (${senderType}):\n\n${fence}\n${rm.text}\n${fence}\n\n`;
+}
+
+// ---------------------------------------------------------------------------
+// File upload helpers
+// ---------------------------------------------------------------------------
+
+// Download a file from Telegram's file storage.
+// Returns a Buffer of the file contents.
+async function downloadTelegramFile(token, fileId) {
+  const fileInfo = await telegramRequest(token, 'getFile', { file_id: fileId });
+  if (!fileInfo.ok || !fileInfo.result?.file_path) {
+    throw new Error('Failed to get file info from Telegram');
+  }
+  const filePath = fileInfo.result.file_path;
+  return new Promise((resolve, reject) => {
+    const req = https.get(`https://api.telegram.org/file/bot${token}/${filePath}`, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+    });
+    req.on('error', reject);
+  });
+}
+
+// Handle an uploaded file from Telegram.
+// Downloads the file, saves it, and returns a notification message.
+async function handleFileUpload(token, msg, projectDir) {
+  const doc = msg.document;
+  const photo = msg.photo;
+  if (!doc && !photo) return null;
+
+  let fileId;
+  let fileName;
+  let fileSize;
+
+  if (doc) {
+    fileId = doc.file_id;
+    fileName = doc.file_name || 'upload.bin';
+    fileSize = doc.file_size || 0;
+  } else if (photo) {
+    // Use the largest photo
+    const largest = photo[photo.length - 1];
+    fileId = largest.file_id;
+    fileName = 'photo.jpg';
+    fileSize = largest.file_size || 0;
+  }
+
+  const fileData = await downloadTelegramFile(token, fileId);
+  ensureSharedDir(projectDir);
+  const relativePath = saveUploadedFile(projectDir, fileName, fileData);
+  const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
+  return `📎 File uploaded: \`${relativePath}\`${sizeStr}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -938,7 +992,7 @@ function startAgentpGateway(token, serverBaseResolver) {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
       try {
-        if (req.method !== 'POST' || req.url !== '/send') {
+        if (req.method !== 'POST') {
           res.writeHead(405);
           res.end('Method Not Allowed');
           return;
@@ -948,59 +1002,14 @@ function startAgentpGateway(token, serverBaseResolver) {
           res.end('Unauthorized');
           return;
         }
-        let body = '';
-        req.on('data', (chunk) => { body += chunk; });
-        req.on('end', () => {
-          try {
-            let data;
-            try { data = JSON.parse(body); } catch {
-              res.writeHead(400);
-              res.end('Bad Request');
-              return;
-            }
-            const { text, server } = data;
-            if (typeof text !== 'string' || typeof server !== 'string') {
-              res.writeHead(400);
-              res.end('Bad Request: text and server are required');
-              return;
-            }
-
-            // Find the chat that owns this server
-            const targetUrl = normalizeUrl(server);
-            const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
-
-            // Return recorded conversation buffer for the owning chat
-            const buffered = owningChatId ? flushRecorded(owningChatId.chatId, owningChatId.threadId) : [];
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ buffered }));
-
-            if (!owningChatId) return;
-            const activeUrl = normalizeUrl(serverBaseResolver());
-
-            if (targetUrl === activeUrl) {
-              sendLongMessage(token, owningChatId, text.trim()).catch(() => {});
-            } else {
-              if (!agentpQueues[server]) {
-                agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
-              }
-              const q = agentpQueues[server];
-              q.messages.push(text);
-              if (!q.notifyTimer) {
-                q.notifyTimer = setTimeout(() => {
-                  q.notifyTimer = null;
-                  if (q.messages.length > 0 && !q.notified) {
-                    q.notified = true;
-                    sendLongMessage(token, owningChatId,
-                      `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
-                      .catch(() => {});
-                  }
-                }, TGAGENTP_DEBOUNCE_MS);
-              }
-            }
-          } catch (err) {
-            log.error(`Agentp gateway handler error: ${err.message}`);
-          }
-        });
+        if (req.url === '/send') {
+          handleSendRequest(req, res, token, serverBaseResolver);
+        } else if (req.url === '/send-file') {
+          handleSendFileRequest(req, res, token, serverBaseResolver);
+        } else {
+          res.writeHead(404);
+          res.end('Not Found');
+        }
       } catch (err) {
         log.error(`Agentp gateway handler error: ${err.message}`);
       }
@@ -1014,6 +1023,189 @@ function startAgentpGateway(token, serverBaseResolver) {
       log.info(`Agentp gateway listening on port ${port}`);
       resolve(port);
     });
+  });
+}
+
+function handleSendRequest(req, res, token, serverBaseResolver) {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    try {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+      }
+      const { text, server } = data;
+      if (typeof text !== 'string' || typeof server !== 'string') {
+        res.writeHead(400);
+        res.end('Bad Request: text and server are required');
+        return;
+      }
+
+      // Find the chat that owns this server
+      const targetUrl = normalizeUrl(server);
+      const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
+
+      // Return recorded conversation buffer for the owning chat
+      const buffered = owningChatId ? flushRecorded(owningChatId.chatId, owningChatId.threadId) : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ buffered }));
+
+      if (!owningChatId) return;
+      const activeUrl = normalizeUrl(serverBaseResolver());
+
+      if (targetUrl === activeUrl) {
+        sendLongMessage(token, owningChatId, text.trim()).catch(() => {});
+      } else {
+        if (!agentpQueues[server]) {
+          agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
+        }
+        const q = agentpQueues[server];
+        q.messages.push(text);
+        if (!q.notifyTimer) {
+          q.notifyTimer = setTimeout(() => {
+            q.notifyTimer = null;
+            if (q.messages.length > 0 && !q.notified) {
+              q.notified = true;
+              sendLongMessage(token, owningChatId,
+                `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
+                .catch(() => {});
+            }
+          }, TGAGENTP_DEBOUNCE_MS);
+        }
+      }
+    } catch (err) {
+      log.error(`Agentp gateway handler error: ${err.message}`);
+    }
+  });
+}
+
+function handleSendFileRequest(req, res, token, serverBaseResolver) {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    try {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+      }
+      const { filePath, server, message } = data;
+      if (typeof filePath !== 'string' || typeof server !== 'string') {
+        res.writeHead(400);
+        res.end('Bad Request: filePath and server are required');
+        return;
+      }
+
+      // Find the chat that owns this server
+      const targetUrl = normalizeUrl(server);
+      const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
+
+      if (!owningChatId) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sent: false, reason: 'no owner' }));
+        return;
+      }
+
+      // Resolve the file path relative to the server directory
+      const serverDir = serverDir(server);
+      if (!serverDir) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sent: false, reason: 'no server dir' }));
+        return;
+      }
+      const fullPath = path.resolve(serverDir, filePath);
+      if (!fs.existsSync(fullPath)) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sent: false, reason: 'file not found' }));
+        return;
+      }
+
+      const fileData = fs.readFileSync(fullPath);
+      const fileName = path.basename(fullPath);
+
+      // Send file to Telegram
+      sendTelegramDocument(token, owningChatId, fileData, fileName, message).then(() => {
+        // Clean up after successful send
+        try { fs.unlinkSync(fullPath); } catch (_) {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sent: true }));
+      }).catch((err) => {
+        log.error(`Failed to send file: ${err.message}`);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ sent: false, reason: err.message }));
+      });
+    } catch (err) {
+      log.error(`Agentp gateway handler error: ${err.message}`);
+      res.writeHead(500);
+      res.end('Internal Server Error');
+    }
+  });
+}
+
+// Send a document to Telegram using multipart/form-data.
+async function sendTelegramDocument(token, chatIdOrState, fileData, fileName, caption) {
+  const chatId = typeof chatIdOrState === 'object' && chatIdOrState.chatId != null
+    ? chatIdOrState.chatId : chatIdOrState;
+  const threadId = typeof chatIdOrState === 'object' ? chatIdOrState.threadId : undefined;
+
+  const boundary = '----tgagentpBoundary' + Math.random().toString(36).slice(2);
+  const parts = [];
+
+  // chat_id field
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`));
+
+  // message_thread_id field (if present)
+  if (threadId) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="message_thread_id"\r\n\r\n${threadId}\r\n`));
+  }
+
+  // document field (the file)
+  const mimeType = 'application/octet-stream';
+  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`));
+  parts.push(fileData);
+  parts.push(Buffer.from('\r\n'));
+
+  // caption field (optional)
+  if (caption) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
+  }
+
+  // closing boundary
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+
+  const body = Buffer.concat(parts);
+
+  return new Promise((resolve, reject) => {
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${token}/sendDocument`,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const result = JSON.parse(data);
+          if (result.ok) resolve(result);
+          else reject(new Error(result.description || 'Telegram API error'));
+        } catch (e) {
+          reject(new Error(`Failed to parse Telegram response: ${data}`));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
   });
 }
 
@@ -2001,12 +2193,9 @@ async function main() {
         continue;
       }
 
-      if (typeof msg.text !== 'string') continue;
-
       const chatId = String(msg.chat.id);
       const threadId = msg.message_thread_id || null;
       const replyTo = msg.message_id;
-      const text = msg.text;
       const from = msg.from?.username
         ? `@${msg.from.username}`
         : [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'unknown';
@@ -2026,6 +2215,73 @@ async function main() {
 
       // Per-chat state: get or create for this chat (thread-aware)
       const cs = getChatState(chatId, threadId);
+
+      // Handle file uploads (documents and photos)
+      if (msg.document || msg.photo) {
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server. Upload ignored.');
+          continue;
+        }
+        const projectDir = serverDir(cs.serverBase);
+        if (!projectDir) {
+          await sendLongMessage(token, cs, '❌ Could not find project directory for this server.');
+          continue;
+        }
+        try {
+          const notification = await handleFileUpload(token, msg, projectDir);
+          const userText = msg.caption || msg.text || '';
+          const fullMessage = notification + (userText ? '\n\nUser message: ' + userText : '');
+          log.debug(`[chat ${chatId}] ${from}: [file upload]`);
+          msgLog('in', chatId, from, '[file upload]');
+
+          // Buffer the upload notification for /record
+          bufferMessage(chatId, threadId, 'user', fullMessage);
+
+          const st = getState(cs.serverBase);
+          if (st.serverDead) {
+            const alive = await isServerAlive(cs.serverBase);
+            if (alive) st.serverDead = false;
+          }
+          if (st.serverDead) {
+            if (!st.messageQueue) st.messageQueue = [];
+            st.messageQueue.push({ text: fullMessage, replyTo });
+            const qlen = st.messageQueue.length;
+            await sendLongMessage(token, cs,
+              `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
+              `Your file upload has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
+              `**Options:**\n` +
+              `• Start the server: \`ocmux serve\`\n` +
+              `• Switch to another server: \`/servers switch <name>\`\n` +
+              `• Flush the queue: \`/flush\``);
+            continue;
+          }
+
+          if (st.busy) {
+            if (!st.messageQueue) st.messageQueue = [];
+            st.messageQueue.push({ text: fullMessage, replyTo });
+            await sendLongMessage(token, cs, `⏳ Server is busy. File upload queued (#${st.messageQueue.length}).`);
+            continue;
+          }
+
+          // Auto-switch tmux window
+          const srvList = listServers();
+          const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+          if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
+          st.busy = true;
+          const myTaskId = ++st.taskId;
+          log.debug(`  → processing file upload notification (task ${myTaskId})`);
+          processMessageAsync(chatId, fullMessage, cs.serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId, replyTo, threadId);
+        } catch (err) {
+          log.error(`File upload error: ${err.message}`);
+          await sendLongMessage(token, cs, `❌ File upload failed: ${err.message}`);
+        }
+        continue;
+      }
+
+      if (typeof msg.text !== 'string') continue;
+
+      const text = msg.text;
 
       log.debug(`[chat ${chatId}] ${from}: ${text}`);
       msgLog('in', chatId, from, text);

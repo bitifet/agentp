@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file.
 
 - `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, sends via tmux `send-keys`. SSE listener catches AI responses (15s timeout); forwards answer to Telegram or sends confirmation.
 - `/answer` command to respond to structured questions from the AI (multiple-choice via `question.asked` SSE event). Forwards question with numbered options to Telegram; `POST /session/:id/questions/:id` on response.
+- File sharing: upload files from Telegram to `telegram-shared/uploads/` (auto-creates directory, adds to `.gitignore`, sends notification to agent). Download files via `POST /send-file` gateway endpoint (agent writes to `telegram-shared/downloads/`, tgagentp sends via Telegram `sendDocument` and cleans up).
 
 ## [0.11.1] - 2026-06-09
 
