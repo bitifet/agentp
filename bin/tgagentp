@@ -2229,6 +2229,21 @@ async function main() {
         }
         try {
           const notification = await handleFileUpload(token, msg, projectDir);
+          // Verify the file is actually on disk before notifying
+          const relativePath = notification.match(/`([^`]+)`/)?.[1];
+          if (relativePath) {
+            const fullPath = path.join(projectDir, relativePath);
+            let retries = 5;
+            while (!fs.existsSync(fullPath) && retries > 0) {
+              await new Promise(r => setTimeout(r, 100));
+              retries--;
+            }
+            if (!fs.existsSync(fullPath)) {
+              log.error(`File not found after upload: ${fullPath}`);
+              await sendLongMessage(token, cs, `❌ File upload failed: file not saved to disk.`);
+              continue;
+            }
+          }
           const userText = msg.caption || msg.text || '';
           const fullMessage = notification + (userText ? '\n\nUser message: ' + userText : '');
           log.debug(`[chat ${chatId}] ${from}: [file upload]`);

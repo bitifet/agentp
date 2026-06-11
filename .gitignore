@@ -8,3 +8,4 @@ pnpm-debug.log*
 wt/
 debugging_tg_integration.md
 tgagentp.log
+telegram-shared/
