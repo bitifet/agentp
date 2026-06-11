@@ -2084,13 +2084,67 @@ async function main() {
 
       if (typeof msg.text !== 'string') continue;
 
-      const text = msg.text;
+      let text = msg.text;
+
+      // !! wildcard: replace with the previous user message text
+      if (text.includes('!!')) {
+        const prevMsg = msg.reply_to_message;
+        if (prevMsg && prevMsg.text) {
+          text = text.replace(/!!/g, prevMsg.text);
+        } else {
+          // Fallback: look up the last user message from the ring buffer
+          const ring = getChatState(chatId, threadId).ring;
+          const lastUserMsg = ring.messages.slice().reverse().find(m => m.role === 'user');
+          if (lastUserMsg) {
+            text = text.replace(/!!/g, lastUserMsg.text);
+          } else {
+            await sendLongMessage(token, cs, '⚠️ No previous message found to replace !!');
+            continue;
+          }
+        }
+      }
 
       log.debug(`[chat ${chatId}] ${from}: ${text}`);
       msgLog('in', chatId, from, text);
 
       // Build reply context if this message is a Telegram reply
       const replyContext = quoteReply(msg);
+
+      // Download on reply: if the user replies to a file message, download it
+      if (msg.reply_to_message && (msg.reply_to_message.document || msg.reply_to_message.photo)) {
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server. Cannot download file.');
+        } else {
+          const projectDir = serverDir(cs.serverBase);
+          if (!projectDir) {
+            await sendLongMessage(token, cs, '❌ Could not find project directory for this server.');
+          } else {
+            try {
+              const replyMsg = msg.reply_to_message;
+              let fileId, fileName, fileSize;
+              if (replyMsg.document) {
+                fileId = replyMsg.document.file_id;
+                fileName = replyMsg.document.file_name || 'download.bin';
+                fileSize = replyMsg.document.file_size || 0;
+              } else if (replyMsg.photo) {
+                const largest = replyMsg.photo[replyMsg.photo.length - 1];
+                fileId = largest.file_id;
+                fileName = 'photo.jpg';
+                fileSize = largest.file_size || 0;
+              }
+              const fileData = await downloadTelegramFile(token, fileId);
+              ensureSharedDir(projectDir);
+              const relativePath = saveUploadedFile(projectDir, fileName, fileData);
+              const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
+              await sendLongMessage(token, cs, `📎 File downloaded: \`${relativePath}\`${sizeStr}`);
+            } catch (err) {
+              log.error(`Download on reply error: ${err.message}`);
+              await sendLongMessage(token, cs, `❌ File download failed: ${err.message}`);
+            }
+          }
+        }
+        continue;
+      }
 
       // Intercept //commands (raw TUI passthrough via tmux send-keys)
       if (text.startsWith('//')) {
