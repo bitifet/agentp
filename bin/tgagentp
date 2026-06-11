@@ -1813,6 +1813,18 @@ async function main() {
     const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
     const noteText = intro + '\n\n' + text;
     if (st.busy) {
+      // Experimental: try async injection instead of queuing
+      if (st.activeSessionId) {
+        try {
+          log.debug(`  → /note: attempting async injection into session ${st.activeSessionId}`);
+          await sendToSessionAsync(url, st.activeSessionId, noteText, st.activeAgentName);
+          await sendLongMessage(token, chatState, '💉 Note injected into ongoing session.');
+          log.debug(`  → /note: async injection succeeded`);
+          return;
+        } catch (err) {
+          log.debug(`  → /note: async injection failed (${err.message}), falling back to queue`);
+        }
+      }
       if (!st.messageQueue) st.messageQueue = [];
       st.messageQueue.push({ text: noteText, replyTo: null });
       await sendLongMessage(token, chatState, `⏳ Server is busy. Note queued (#${st.messageQueue.length}).`);
