@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.4] - 2026-06-11
+
+### New Features
+
+- `agentp --session <name>` — target a specific session by exact or partial name match.
+- `agentp --new` — create a new session with the given title (requires `--session`).
+
+### Bug Fixes
+
+- Fix session detection after TUI `/new`: use `time.created` as fallback when `time.updated` is missing (newly created sessions with no messages yet have `time.updated === 0`). Previously `agentp` would filter these out and create a new "agentp" session instead of using the TUI's active session.
+
 ## [0.11.3] - 2026-06-11
 
 ### File Sharing (New Feature)
