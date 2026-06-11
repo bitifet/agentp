@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 const http = require('http');
-const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
@@ -21,6 +20,8 @@ const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000'
 const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
 const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId } = require('../lib/ocmux.js');
 const { executeTuiCommand } = require('../lib/tui-cmd.js');
+const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../lib/telegram-api.js');
+const { sendLongMessage } = require('../lib/telegram-format.js');
 
 // Persist chat↔server directory mappings across restarts
 function saveConnection(chatId, threadId, dir) {
@@ -144,166 +145,13 @@ function flushRecorded(chatId, threadId) {
 // Telegram Bot API helpers
 // ---------------------------------------------------------------------------
 
-function telegramRequest(token, method, params) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(params || {});
-    const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
-      path: `/bot${token}/${method}`,
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(body),
-      },
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch (e) {
-          reject(new Error(`Failed to parse Telegram response: ${data}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-function getUpdates(token, offset, timeout) {
-  return telegramRequest(token, 'getUpdates', {
-    offset,
-    timeout: timeout != null ? timeout : 30,
-    allowed_updates: ['message'],
-  });
-}
-
-function sendTelegramMessage(token, chatId, text, parseMode, replyTo, threadId) {
-  const params = { chat_id: chatId, text };
-  if (parseMode) params.parse_mode = parseMode;
-  if (replyTo) params.reply_to_message_id = replyTo;
-  if (threadId) params.message_thread_id = threadId;
-  return telegramRequest(token, 'sendMessage', params);
-}
-
 // Lightweight Markdown to Telegram HTML conversion.
-function convertMarkdownToHtml(text) {
-  const parts = text.split('```');
-
-  return parts.map((part, i) => {
-    if (i % 2 === 1) {
-      // Code block ─ strip language tag, escape entities, wrap in <pre>
-      const nl = part.indexOf('\n');
-      const inner = nl >= 0 ? part.slice(nl + 1) : part;
-      return '<pre>' + inner
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;') + '</pre>';
-    }
-
-    // Text segment
-
-    // Phase 1: extract table blocks into placeholders
-    const placeholders = [];
-    let processed = '';
-    const lines = part.split('\n');
-    let li = 0;
-    while (li < lines.length) {
-      if (/^\|/.test(lines[li])) {
-        const table = [];
-        while (li < lines.length && /^\|/.test(lines[li])) {
-          table.push(lines[li]);
-          li++;
-        }
-        const hasSep = table.some(l => /^\|[-:| ]+\|$/.test(l));
-        if (table.length >= 2 && hasSep) {
-          const cleaned = table
-            .map(l => l.replace(/^\|/, '').replace(/\|$/, ''))
-            .filter(l => !/^\s*[|:\- ]+\s*$/.test(l));
-          if (cleaned.length > 0) {
-            const escaped = cleaned.map(l =>
-              l.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-            );
-            const idx = placeholders.length;
-            placeholders.push('<pre>' + escaped.join('\n') + '</pre>');
-            processed += '\0T' + idx + '\0\n';
-            continue;
-          }
-        }
-        for (const l of table) { processed += l + '\n'; }
-      } else {
-        processed += lines[li] + '\n';
-        li++;
-      }
-    }
-
-    // Phase 2: escape entities and apply markdown on non-table text
-    let html = processed
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-    html = html.replace(/^#{1,6}\s+(.+)$/gm, '<b>$1</b>');
-    html = html.replace(/^\s*-{3,}\s*$/gm, '────────────────────');
-    html = html.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
-    html = html.replace(/\*(.+?)\*/g, '<i>$1</i>');
-
-    // Phase 3: restore table placeholders
-    for (let j = 0; j < placeholders.length; j++) {
-      html = html.split('\0T' + j + '\0').join(placeholders[j]);
-    }
-
-    return html;
-  }).join('');
-}
-
 // Parse TGAGENTP_ALLOWED_CHAT_IDS env var (comma-separated chat IDs).
 // Returns null when unset (all chats allowed), or an array of IDs to filter.
 function parseAllowlist(raw) {
   if (!raw || !raw.trim()) return null;
   const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
   return ids.length > 0 ? ids : null;
-}
-
-// Split text into chunks of at most maxLength characters,
-// breaking at newlines when possible.
-function splitMessage(text, maxLength = 4096) {
-  if (text.length <= maxLength) return [text];
-  const chunks = [];
-  let start = 0;
-  while (start < text.length) {
-    let end = Math.min(start + maxLength, text.length);
-    if (end < text.length) {
-      const newlinePos = text.lastIndexOf('\n', end);
-      if (newlinePos > start) {
-        end = newlinePos + 1;
-      }
-    }
-    chunks.push(text.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
-
-// Send a text message to a Telegram chat, splitting into multiple
-// messages if it exceeds the 4096-character limit.
-// Converts Markdown to Telegram HTML formatting.
-// Splits the raw text first, then converts each chunk independently
-// to avoid broken HTML tags across messages.
-async function sendLongMessage(token, chatIdOrState, text, replyTo, threadId) {
-  // Accept either (token, chatState, ...) or (token, rawChatId, ...)
-  const chatId = typeof chatIdOrState === 'object' && chatIdOrState.chatId != null
-    ? chatIdOrState.chatId : chatIdOrState;
-  const effectiveThreadId = threadId || (typeof chatIdOrState === 'object' ? chatIdOrState.threadId : undefined);
-  const chunks = splitMessage(text);
-  for (let i = 0; i < chunks.length; i++) {
-    const html = convertMarkdownToHtml(chunks[i]);
-    await sendTelegramMessage(token, chatId, html, 'HTML', i === 0 ? replyTo : undefined, effectiveThreadId);
-  }
 }
 
 // Build a quoted reply context from a Telegram reply_to_message.
@@ -331,24 +179,6 @@ function quoteReply(msg) {
 // ---------------------------------------------------------------------------
 // File upload helpers
 // ---------------------------------------------------------------------------
-
-// Download a file from Telegram's file storage.
-// Returns a Buffer of the file contents.
-async function downloadTelegramFile(token, fileId) {
-  const fileInfo = await telegramRequest(token, 'getFile', { file_id: fileId });
-  if (!fileInfo.ok || !fileInfo.result?.file_path) {
-    throw new Error('Failed to get file info from Telegram');
-  }
-  const filePath = fileInfo.result.file_path;
-  return new Promise((resolve, reject) => {
-    const req = https.get(`https://api.telegram.org/file/bot${token}/${filePath}`, (res) => {
-      const chunks = [];
-      res.on('data', (chunk) => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-    });
-    req.on('error', reject);
-  });
-}
 
 // Handle an uploaded file from Telegram.
 // Downloads the file, saves it, and returns a notification message.
@@ -1160,69 +990,6 @@ function handleSendFileRequest(req, res, token, serverBaseResolver) {
   });
 }
 
-// Send a document to Telegram using multipart/form-data.
-async function sendTelegramDocument(token, chatIdOrState, fileData, fileName, caption) {
-  const chatId = typeof chatIdOrState === 'object' && chatIdOrState.chatId != null
-    ? chatIdOrState.chatId : chatIdOrState;
-  const threadId = typeof chatIdOrState === 'object' ? chatIdOrState.threadId : undefined;
-
-  const boundary = '----tgagentpBoundary' + Math.random().toString(36).slice(2);
-  const parts = [];
-
-  // chat_id field
-  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}\r\n`));
-
-  // message_thread_id field (if present)
-  if (threadId) {
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="message_thread_id"\r\n\r\n${threadId}\r\n`));
-  }
-
-  // document field (the file)
-  const mimeType = 'application/octet-stream';
-  parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="document"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`));
-  parts.push(fileData);
-  parts.push(Buffer.from('\r\n'));
-
-  // caption field (optional)
-  if (caption) {
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}\r\n`));
-  }
-
-  // closing boundary
-  parts.push(Buffer.from(`--${boundary}--\r\n`));
-
-  const body = Buffer.concat(parts);
-
-  return new Promise((resolve, reject) => {
-    const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
-      path: `/bot${token}/sendDocument`,
-      method: 'POST',
-      headers: {
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-        'Content-Length': body.length,
-      },
-    };
-    const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          const result = JSON.parse(data);
-          if (result.ok) resolve(result);
-          else reject(new Error(result.description || 'Telegram API error'));
-        } catch (e) {
-          reject(new Error(`Failed to parse Telegram response: ${data}`));
-        }
-      });
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
 async function cmdAllow(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
   const st = getState(chatState.serverBase);
   if (!st.pendingPermission) {
@@ -1866,7 +1633,8 @@ async function main() {
           sendLongMessage(token, chatState, html, replyTo, threadId).catch(() => {});
           thinkingBuf = '';
         }
-        if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
+        // Keep the SSE listener alive so subsequent permission/question events
+        // that arrive after sendToSession returns are still forwarded to Telegram.
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
@@ -1924,7 +1692,10 @@ async function main() {
       }
     } finally {
       st.pendingPermission = null;
-      if (st._cancelRef === cancelRef) st._cancelRef = null;
+      // Only clear the reference if the SSE listener was destroyed or finished.
+      // If it is still running, keep the reference so the next message call
+      // can destroy it (lines 1557–1559).
+      if (st._cancelRef === cancelRef && !cancelRef.current) st._cancelRef = null;
       if (st._sessionReq === sessionCancelRef) st._sessionReq = null;
       if (!isCancelled()) {
         getState(url).busy = false;
@@ -2039,8 +1810,12 @@ async function main() {
       }
       st.serverDead = false;
     }
+    const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
+    const noteText = intro + '\n\n' + text;
     if (st.busy) {
-      await sendLongMessage(token, chatState, '⏳ Server is busy. Use `/cancel` to cancel or note again later.');
+      if (!st.messageQueue) st.messageQueue = [];
+      st.messageQueue.push({ text: noteText, replyTo: null });
+      await sendLongMessage(token, chatState, `⏳ Server is busy. Note queued (#${st.messageQueue.length}).`);
       return;
     }
 
@@ -2049,11 +1824,10 @@ async function main() {
     const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(url));
     if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
 
-    const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
     st.busy = true;
     const myTaskId = ++st.taskId;
     log.debug(`  → /note: starting background processing (task ${myTaskId})`);
-    processMessageAsync(chatId, intro + '\n\n' + text, url, !!st.activeSessionId, st.activeSessionId, myTaskId, null, chatState.threadId);
+    processMessageAsync(chatId, noteText, url, !!st.activeSessionId, st.activeSessionId, myTaskId, null, chatState.threadId);
   };
 
   const cmds = { ...COMMANDS, status: cmdStatus, cancel: cmdCancel, note: cmdNote };

@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.5] - 2026-06-11
+
+### Bug Fixes
+
+- **Permission requests:** Fix bug where only the first permission request in a processing iteration was forwarded to Telegram. Subsequent permission requests were silently dropped because the SSE listener was destroyed immediately after `sendToSession` returned, before the session had finished processing. The listener is now kept alive until the session goes idle (or the 90-second safety timeout), matching the TUI behavior.
+- **`/note` queue:** `/note` now queues the message when the server is busy, instead of rejecting it with "Server is busy". Previously, only unreachable servers queued notes; busy servers rejected them. Now notes are queued consistently with regular messages.
+- **Telegram read receipts in groups:** Documented as a known Telegram API limitation. Bots cannot send read receipts, and in supergroups the second tick (delivery to all members) may not appear even though the bot is receiving messages.
+
+### Code Quality
+
+- **Extracted Telegram modules:** `lib/telegram-api.js` (5 functions) and `lib/telegram-format.js` (3 functions) extracted from `bin/tgagentp` (235 lines removed). Both modules have full test coverage (12 + 17 tests).
+- **CLI tests:** `tests/agentp.test.js` with 24 tests covering argument parsing, session selection, output formatting, and gateway integration. All 137 tests pass.
+
 ## [0.11.4] - 2026-06-11
 
 ### New Features
