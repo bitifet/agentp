@@ -660,7 +660,7 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
   const lines = servers.map(s => {
     const normalizedUrl = normalizeUrl(s.url);
     const isActive = activeUrl && normalizedUrl === activeUrl;
-    const isOwned = serverOwners[normalizedUrl];
+    const isOwned = Object.keys(serverOwners).some(url => normalizeUrl(url) === normalizedUrl);
     let bullet;
     if (isActive) {
       bullet = '▶ ';
