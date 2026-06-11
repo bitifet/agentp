@@ -16,7 +16,7 @@ All tools share `lib/opencode.js` (HTTP session API client) and `lib/ocmux.js` (
 
 ### `package.json`
 
-**Version:** 0.11.2
+**Version:** 0.11.3
 
 Fields:
 - `"bin"` — registers `agentp`, `ocmux`, `tgagentp`

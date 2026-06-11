@@ -2,11 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.3] - 2026-06-11
+
+### File Sharing (New Feature)
+
+- Upload files from Telegram to `telegram-shared/uploads/` — auto-creates directory, adds to `.gitignore`, sends notification to agent respecting busy/idle queue.
+- Download files via `POST /send-file` gateway endpoint — agent writes to `telegram-shared/downloads/`, tgagentp sends via Telegram `sendDocument` (multipart/form-data) and cleans up.
+- New `lib/file-share.js` module with `ensureSharedDir`, `saveUploadedFile`, `formatFileSize` helpers.
+- 8 tests for file-share module (directory creation, .gitignore, filename sanitization, size formatting).
+
+### Bug Fixes
+
+- Fix file download endpoint variable shadowing (`serverDir` function shadowed by `const serverDir`), causing all file sends to fail with "file not found".
+- Fix dangerous file cleanup: only delete files from `telegram-shared/downloads/` after sending, preventing accidental deletion of project files.
+- Fix race condition on upload: add `fsyncSync` after `writeFileSync` and retry loop (5 retries × 100ms) to verify file exists before notifying agent.
+- Fix `/servers` list: normalize `serverOwners` URLs when checking ownership (handles `127.0.0.1` vs `localhost` mismatch), so connected servers correctly show `·` instead of `🔌`.
+
+### UI Improvements
+
+- `/servers` list: `🔌` for disconnected servers, `·` for connected to other chat, `▶` for your server.
+- `/sessions` list: `🔌` for inactive sessions, `▶` for active session (consistency with `/servers`).
+
 ## [0.11.2] - 2026-06-10
 
 - `//command` raw TUI passthrough for Opencode TUI-level commands (`//init`, `//doctor`, etc.). Strips first `/` from `//cmd`, appends trailing space to select the as-you-type menu, sends via tmux `send-keys`. SSE listener catches AI responses (15s timeout); forwards answer to Telegram or sends confirmation.
 - `/answer` command to respond to structured questions from the AI (multiple-choice via `question.asked` SSE event). Forwards question with numbered options to Telegram; `POST /session/:id/questions/:id` on response.
-- File sharing: upload files from Telegram to `telegram-shared/uploads/` (auto-creates directory, adds to `.gitignore`, sends notification to agent). Download files via `POST /send-file` gateway endpoint (agent writes to `telegram-shared/downloads/`, tgagentp sends via Telegram `sendDocument` and cleans up).
 
 ## [0.11.1] - 2026-06-09
 
