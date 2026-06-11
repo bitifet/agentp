@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.6] - 2026-06-11
+
+### New Features
+
+- **Download on reply:** Reply to a previously sent file in Telegram to automatically download it to the repository. The bot detects the reply to a file message, downloads the file, and saves it to the project directory.
+- **`!!` wildcard:** Use `!!` in any command to reference the previous user message. For example: `/queue !!` queues the previous message, `/note !!` sends it as a note. The wildcard is resolved before command processing, so it works with all commands.
+
 ## [0.11.5] - 2026-06-11
 
 ### Bug Fixes
