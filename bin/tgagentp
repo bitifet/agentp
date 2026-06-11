@@ -658,7 +658,17 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
   }
   const activeUrl = chatState.serverBase ? normalizeUrl(chatState.serverBase) : null;
   const lines = servers.map(s => {
-    const bullet = activeUrl && normalizeUrl(s.url) === activeUrl ? '▶ ' : ' · ';
+    const normalizedUrl = normalizeUrl(s.url);
+    const isActive = activeUrl && normalizedUrl === activeUrl;
+    const isOwned = serverOwners[normalizedUrl];
+    let bullet;
+    if (isActive) {
+      bullet = '▶ ';
+    } else if (isOwned) {
+      bullet = ' · ';
+    } else {
+      bullet = '🔌 ';
+    }
     return bullet + `${s.url} → ${s.dir} (${s.status})`;
   });
   const prefix = chatState.serverBase ? 'Active servers:' : 'Available servers:';
@@ -863,7 +873,7 @@ async function cmdSessions(token, chatId, args, chatState, setServerForChat, set
 
       const name = sessionName(s);
       const pos = idx + 1;
-      const bullet = s.id === activeId ? '▶ ' : ' · ';
+      const bullet = s.id === activeId ? '▶ ' : '🔌 ';
       lines.push('`' + bullet + pos + ' ' + timeLabel + ' – ' + name.replace(/`/g, "'") + '`');
     });
 
@@ -1111,13 +1121,13 @@ function handleSendFileRequest(req, res, token, serverBaseResolver) {
       }
 
       // Resolve the file path relative to the server directory
-      const serverDir = serverDir(server);
-      if (!serverDir) {
+      const dir = serverDir(server);
+      if (!dir) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ sent: false, reason: 'no server dir' }));
         return;
       }
-      const fullPath = path.resolve(serverDir, filePath);
+      const fullPath = path.resolve(dir, filePath);
       if (!fs.existsSync(fullPath)) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ sent: false, reason: 'file not found' }));
@@ -1129,8 +1139,12 @@ function handleSendFileRequest(req, res, token, serverBaseResolver) {
 
       // Send file to Telegram
       sendTelegramDocument(token, owningChatId, fileData, fileName, message).then(() => {
-        // Clean up after successful send
-        try { fs.unlinkSync(fullPath); } catch (_) {}
+        // Clean up: only delete files from telegram-shared/downloads/
+        // to prevent accidental deletion of project files
+        const downloadsDir = path.join(dir, 'telegram-shared', 'downloads');
+        if (fullPath.startsWith(downloadsDir + path.sep)) {
+          try { fs.unlinkSync(fullPath); } catch (_) {}
+        }
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ sent: true }));
       }).catch((err) => {
