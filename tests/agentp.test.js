@@ -197,7 +197,7 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(logs.length, 1);
-      assert.ok(logs[0].includes('0.11.6'));
+      assert.ok(logs[0].includes('0.11.7'));
     });
 
     it('--help prints help and exits', async () => {

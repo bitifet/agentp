@@ -22,6 +22,7 @@ const {
   logfileFor,
   URL_RE,
   resurrectServer,
+  getActiveServer,
 } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,7 @@ function printHelp() {
   console.error('');
   console.error('Options:');
   console.error('  -l       Long output: append " → <dir>" after the URL (serve/default).');
+  console.error('  --last   Print the URL of the active tmux window (last used server).');
   console.error('  --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
   console.error('  --version  Show version');
   console.error('  -h       Show this help');
@@ -445,12 +447,15 @@ function main() {
   let longMode = false;
   let gitMode = null;
   let printLogs = false;
+  let lastMode = false;
   const positional = [];
   let dirIsForced = false;
 
   for (const arg of process.argv.slice(2)) {
     if (arg === '-l') {
       longMode = true;
+    } else if (arg === '--last') {
+      lastMode = true;
     } else if (arg === '--print-logs') {
       printLogs = true;
     } else if (arg === '--git') {
@@ -516,6 +521,34 @@ function main() {
   if (!targetDir) targetDir = process.cwd();
 
   // Dispatch
+  if (lastMode) {
+    if (gitMode) {
+      console.error("Error: '--last' cannot be combined with '--git' or '--GIT'.");
+      process.exit(1);
+    }
+    if (printLogs) {
+      console.error("Error: '--last' cannot be combined with '--print-logs'.");
+      process.exit(1);
+    }
+    if (subcommand) {
+      console.error(`Error: '--last' cannot be combined with subcommand '${subcommand}'.`);
+      process.exit(1);
+    }
+    if (targetDir !== process.cwd()) {
+      console.error("Error: '--last' does not accept a directory path.");
+      process.exit(1);
+    }
+    ensureSession();
+    const url = getActiveServer();
+    if (!url) {
+      console.error('Error: no active opencode server found in tmux.');
+      console.error("Run 'ocmux serve' to create a server, or switch to an existing one.");
+      process.exit(1);
+    }
+    outputUrl(url, null, longMode);
+    return;
+  }
+
   if (subcommand === 'list') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");

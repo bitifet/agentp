@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.7] - 2026-06-11
+
+### New Features
+
+- **`ocmux --last`:** Print the URL of the active tmux window (the last used server). Useful when you want to send a command from outside the project directory without manually specifying the port. Example: `agentp $(ocmux --last)`
+
 ## [0.11.6] - 2026-06-11
 
 ### New Features
