@@ -2,16 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.7-pre01] - 2026-06-13
+## [0.11.7] - 2026-06-13
 
 ### New Features
 
-- **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOTS`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server. Requires `TGAGENTP_ROOTS` environment variable.
-- **TGAGENTP_ROOTS startup validation:** tgagentp validates `TGAGENTP_ROOTS` at startup (exists, is a directory, is writable) and exits with a clear error if invalid.
+- **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOT`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server. Requires `TGAGENTP_ROOT` environment variable.
+- **`TGAGENTP_ROOT` startup validation:** tgagentp validates `TGAGENTP_ROOT` at startup; if missing or invalid, `/serve` and `/new` are gracefully disabled (no crash). `/help` shows an enablement hint when the root is not configured. `/help serve` and `/help new` show how to enable them.
+- **`/think` immediate effect:** Thinking text is now always buffered in server state (even when disabled). Toggling `/think on` during a request flushes any already-received thinking text immediately, instead of only taking effect on the next request.
 
 ### Bug Fixes
 
-- **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` and `process.stderr.write` broke `node:test`'s suite detection (all 24 tests reported as a single failure with `suites: 0`). Switched to `Writable` streams via `Object.defineProperty` that capture AND pass through, preserving both test output capture and test runner recognition.
+- **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` broke `node:test`'s suite detection (all 24 tests reported as a single failure with `suites: 0`). Switched to `Writable` stream via `Object.defineProperty` for stdout that captures AND passes through, preserving both test output capture and test runner recognition.
 
 ## [0.11.6] - 2026-06-11
 

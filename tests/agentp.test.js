@@ -98,6 +98,7 @@ function setupProcessMocks() {
 
   // Replace stdout with a Writable that captures AND passes through.
   // Object.defineProperty is needed because process.stdout has a getter (no setter).
+  // Direct stdout.write mock breaks node:test's describe/suite detection.
   const rwOut = process.stdout.write.bind(process.stdout);
   const capOut = new Writable({
     write(chunk, encoding, callback) {
@@ -111,19 +112,8 @@ function setupProcessMocks() {
     enumerable: true,
   });
 
-  // Same for stderr (no capture — just passthrough so node:test can report errors)
-  const rwErr = process.stderr.write.bind(process.stderr);
-  const capErr = new Writable({
-    write(chunk, encoding, callback) {
-      stderr.push(typeof chunk === 'string' ? chunk : chunk.toString());
-      rwErr(chunk, encoding, callback);
-    }
-  });
-  Object.defineProperty(process, 'stderr', {
-    get: () => capErr,
-    configurable: true,
-    enumerable: true,
-  });
+  // stderr: simple mock is safe (doesn't break node:test IPC or suite detection)
+  process.stderr.write = (chunk) => { stderr.push(chunk); return true; };
 
   process.exit = (code) => {
     throw new Error(`EXIT:${code}`);
@@ -153,11 +143,7 @@ function tearDownProcessMocks() {
     configurable: true,
     enumerable: true,
   });
-  Object.defineProperty(process, 'stderr', {
-    get: () => originalStderr,
-    configurable: true,
-    enumerable: true,
-  });
+  process.stderr.write = originalStderr.write.bind(originalStderr);
   console.log = originalLog;
   console.error = originalError;
   fs.readFileSync = originalReadFileSync;
@@ -236,7 +222,7 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(logs.length, 1);
-      assert.ok(logs[0].includes('0.11.7-pre01'));
+      assert.ok(logs[0].includes('0.11.7'));
     });
 
     it('--help prints help and exits', async () => {

@@ -18,6 +18,10 @@ It is designed for prompt-driven workflows where you want to do things like:
 - capture output in files or pipe to other tools
 - **drive prompts directly from editors** like Vim/Neovim
 
+## Author's note
+
+These tools are built for my own daily workflow. They are heavily AI-assisted — including the tests — and I review things before shipping, but the real test is using them every day. Bugs happen; I value a working feature more than a flawless one. MIT license, no warranty. Issues, suggestions, and PRs are welcome.
+
 ## Install
 
 From npm:

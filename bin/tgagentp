@@ -24,23 +24,23 @@ const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../l
 const { sendLongMessage } = require('../lib/telegram-format.js');
 const { spawnSync } = require('child_process');
 
-const TGAGENTP_ROOTS = process.env.TGAGENTP_ROOTS;
-if (TGAGENTP_ROOTS) {
+const TGAGENTP_ROOT = process.env.TGAGENTP_ROOT;
+let tgagentpRootValid = false;
+if (TGAGENTP_ROOT) {
   try {
-    const stats = fs.statSync(TGAGENTP_ROOTS);
+    const stats = fs.statSync(TGAGENTP_ROOT);
     if (!stats.isDirectory()) {
-      log.error(`TGAGENTP_ROOTS is not a directory: ${TGAGENTP_ROOTS}`);
-      process.exit(1);
-    }
-    try {
-      fs.accessSync(TGAGENTP_ROOTS, fs.constants.W_OK);
-    } catch {
-      log.error(`TGAGENTP_ROOTS is not writable: ${TGAGENTP_ROOTS}`);
-      process.exit(1);
+      log.error(`TGAGENTP_ROOT is not a directory: ${TGAGENTP_ROOT} — /serve and /new disabled`);
+    } else {
+      try {
+        fs.accessSync(TGAGENTP_ROOT, fs.constants.W_OK);
+        tgagentpRootValid = true;
+      } catch {
+        log.error(`TGAGENTP_ROOT is not writable: ${TGAGENTP_ROOT} — /serve and /new disabled`);
+      }
     }
   } catch {
-    log.error(`TGAGENTP_ROOTS does not exist: ${TGAGENTP_ROOTS}`);
-    process.exit(1);
+    log.error(`TGAGENTP_ROOT does not exist: ${TGAGENTP_ROOT} — /serve and /new disabled`);
   }
 }
 
@@ -384,19 +384,25 @@ async function cmdHelp(token, chatId, args, chatState) {
       return;
     }
     if (topic === 'serve') {
+      const hint = TGAGENTP_ROOT ? '' :
+        '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
       await sendLongMessage(token, chatState,
         '`/serve <path>` ─ start a server in an existing directory\n\n' +
-        'The path is relative to `TGAGENTP_ROOTS`.\n' +
+        'The path is relative to `TGAGENTP_ROOT`.\n' +
         'Example: `/serve projects/my-app`\n\n' +
-        'Requires the `TGAGENTP_ROOTS` environment variable to be set to a writable directory.');
+        'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
+        hint);
       return;
     }
     if (topic === 'new') {
+      const hint = TGAGENTP_ROOT ? '' :
+        '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
       await sendLongMessage(token, chatState,
         '`/new <path>` ─ create a directory, initialize git, and start a server\n\n' +
-        'The path is relative to `TGAGENTP_ROOTS`.\n' +
+        'The path is relative to `TGAGENTP_ROOT`.\n' +
         'Example: `/new projects/my-app`\n\n' +
-        'Requires the `TGAGENTP_ROOTS` environment variable to be set to a writable directory.');
+        'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
+        hint);
       return;
     }
     await sendLongMessage(token, chatState,
@@ -428,8 +434,10 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/disconnect` ─ disconnect this chat from its server\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
-    '`/serve <path>` ─ start a server in an existing directory (requires `TGAGENTP_ROOTS`)\n' +
-    '`/new <path>` ─ create a directory, init git, and start a server (requires `TGAGENTP_ROOTS`)\n\n' +
+    (tgagentpRootValid
+      ? '`/serve <path>` ─ start a server in an existing directory\n' +
+        '`/new <path>` ─ create a directory, init git, and start a server\n\n'
+      : 'ℹ️  Set `TGAGENTP_ROOT` to a writable directory to enable `/serve` and `/new`.\n\n') +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
@@ -1098,6 +1106,7 @@ async function cmdAnswer(token, chatId, args, chatState, setServerForChat, setAc
 async function cmdThink(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
   const st = getState(chatState.serverBase);
   const sub = args && args.length > 0 ? args[0].toLowerCase() : 'switch';
+  const wasOn = st.thinkingEnabled;
   if (sub === 'on') {
     st.thinkingEnabled = true;
     await sendLongMessage(token, chatState, '💭 Thinking messages **on** (forwarded to chat).');
@@ -1110,6 +1119,13 @@ async function cmdThink(token, chatId, args, chatState, setServerForChat, setAct
       `💭 Thinking messages ${st.thinkingEnabled ? '**on**' : '**off**'}.`);
   } else {
     await sendLongMessage(token, chatState, 'Usage: `/think [on|off|switch]` (default: switch).');
+  }
+  // When toggled on, flush any thinking text already buffered by the current request
+  if (!wasOn && st.thinkingEnabled && st._thinkingBuf) {
+    const buf = st._thinkingBuf;
+    st._thinkingBuf = '';
+    const html = '💭 ' + buf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    sendLongMessage(token, chatState, html, null, chatState.threadId).catch(() => {});
   }
 }
 
@@ -1348,24 +1364,25 @@ async function cmdDisconnect(token, chatId, args, chatState) {
 }
 
 async function cmdServe(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
-  if (!TGAGENTP_ROOTS) {
-    await sendLongMessage(token, chatState,
-      '❌ `TGAGENTP_ROOTS` environment variable is not set.\n' +
-      'Set it to a writable directory to enable `/serve` and `/new` commands.');
+  if (!tgagentpRootValid) {
+    const msg = TGAGENTP_ROOT
+      ? '❌ `TGAGENTP_ROOT` is not a valid writable directory.\nCheck the logs for details.'
+      : '❌ `TGAGENTP_ROOT` environment variable is not set.\nSet it to a writable directory to enable `/serve` and `/new` commands.';
+    await sendLongMessage(token, chatState, msg);
     return;
   }
   const relPath = args.join(' ').trim();
   if (!relPath) {
     await sendLongMessage(token, chatState,
       'Usage: `/serve <path>`\n\n' +
-      'Run `ocmux serve` on a directory under `TGAGENTP_ROOTS`.\n' +
-      'The path is relative to the roots directory.');
+      'Run `ocmux serve` on a directory under `TGAGENTP_ROOT`.\n' +
+      'The path is relative to the root directory.');
     return;
   }
-  const targetDir = path.resolve(TGAGENTP_ROOTS, relPath);
-  if (!targetDir.startsWith(TGAGENTP_ROOTS)) {
+  const targetDir = path.resolve(TGAGENTP_ROOT, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOT)) {
     await sendLongMessage(token, chatState,
-      '❌ Path must be within `TGAGENTP_ROOTS`.\n' +
+      '❌ Path must be within `TGAGENTP_ROOT`.\n' +
       `Requested: \`${relPath}\``);
     return;
   }
@@ -1410,24 +1427,25 @@ async function cmdServe(token, chatId, args, chatState, setServerForChat, setAct
 }
 
 async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
-  if (!TGAGENTP_ROOTS) {
-    await sendLongMessage(token, chatState,
-      '❌ `TGAGENTP_ROOTS` environment variable is not set.\n' +
-      'Set it to a writable directory to enable `/serve` and `/new` commands.');
+  if (!tgagentpRootValid) {
+    const msg = TGAGENTP_ROOT
+      ? '❌ `TGAGENTP_ROOT` is not a valid writable directory.\nCheck the logs for details.'
+      : '❌ `TGAGENTP_ROOT` environment variable is not set.\nSet it to a writable directory to enable `/serve` and `/new` commands.';
+    await sendLongMessage(token, chatState, msg);
     return;
   }
   const relPath = args.join(' ').trim();
   if (!relPath) {
     await sendLongMessage(token, chatState,
       'Usage: `/new <path>`\n\n' +
-      'Create a new directory under `TGAGENTP_ROOTS`, initialize git, and start a server.\n' +
-      'The path is relative to the roots directory.');
+      'Create a new directory under `TGAGENTP_ROOT`, initialize git, and start a server.\n' +
+      'The path is relative to the root directory.');
     return;
   }
-  const targetDir = path.resolve(TGAGENTP_ROOTS, relPath);
-  if (!targetDir.startsWith(TGAGENTP_ROOTS)) {
+  const targetDir = path.resolve(TGAGENTP_ROOT, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOT)) {
     await sendLongMessage(token, chatState,
-      '❌ Path must be within `TGAGENTP_ROOTS`.\n' +
+      '❌ Path must be within `TGAGENTP_ROOT`.\n' +
       `Requested: \`${relPath}\``);
     return;
   }
@@ -1501,7 +1519,7 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, messageQueue: [] };
+  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, _thinkingBuf: '', messageQueue: [] };
 }
 
 function sessionLabel(st) {
@@ -1729,7 +1747,6 @@ async function main() {
       let answer;
       if (useSession) {
         const notifiedPerms = new Set();
-        let thinkingBuf = '';
         let sseConnected;
         const onConnected = Promise.race([
           new Promise((resolve) => { sseConnected = resolve; }),
@@ -1739,14 +1756,16 @@ async function main() {
           onText: null,
           onConnected: sseConnected,
           onThinking: (chunk) => {
-            if (!getState(url).thinkingEnabled) { thinkingBuf = ''; return; }
-            thinkingBuf += chunk;
-            if (thinkingBuf.length >= 50 || chunk.endsWith('\n')) {
-              const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            const st2 = getState(url);
+            st2._thinkingBuf += chunk;
+            if (!st2.thinkingEnabled) return;
+            const buf = st2._thinkingBuf;
+            if (buf.length >= 50 || chunk.endsWith('\n')) {
+              st2._thinkingBuf = '';
+              const html = '💭 ' + buf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
               sendLongMessage(token, chatState, html, replyTo, threadId)
                 .then(() => {})
                 .catch(() => {});
-              thinkingBuf = '';
             }
           },
           onPermission: (perm) => {
@@ -1794,10 +1813,10 @@ async function main() {
         }, cancelRef).catch(() => {});
         await onConnected;
         answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName, sessionCancelRef);
-        if (thinkingBuf) {
-          const html = '💭 ' + thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        if (st._thinkingBuf) {
+          const html = '💭 ' + st._thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           sendLongMessage(token, chatState, html, replyTo, threadId).catch(() => {});
-          thinkingBuf = '';
+          st._thinkingBuf = '';
         }
         // Keep the SSE listener alive so subsequent permission/question events
         // that arrive after sendToSession returns are still forwarded to Telegram.
@@ -1857,6 +1876,7 @@ async function main() {
         try { await sendLongMessage(token, chatState, msg, replyTo, threadId); } catch (_) {}
       }
     } finally {
+      st._thinkingBuf = '';
       st.pendingPermission = null;
       // Only clear the reference if the SSE listener was destroyed or finished.
       // If it is still running, keep the reference so the next message call
