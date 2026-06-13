@@ -1,6 +1,6 @@
 {
   "name": "agentp",
-  "version": "0.11.6",
+  "version": "0.11.7-pre01",
   "description": "Pipe prompts into a running OpenCode TUI session and stream the final answer",
   "bin": {
     "agentp": "bin/agentp",

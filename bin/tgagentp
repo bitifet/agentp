@@ -22,6 +22,27 @@ const { listServers, activateServer, resurrectServer, statefileFor, readState, t
 const { executeTuiCommand } = require('../lib/tui-cmd.js');
 const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../lib/telegram-api.js');
 const { sendLongMessage } = require('../lib/telegram-format.js');
+const { spawnSync } = require('child_process');
+
+const TGAGENTP_ROOTS = process.env.TGAGENTP_ROOTS;
+if (TGAGENTP_ROOTS) {
+  try {
+    const stats = fs.statSync(TGAGENTP_ROOTS);
+    if (!stats.isDirectory()) {
+      log.error(`TGAGENTP_ROOTS is not a directory: ${TGAGENTP_ROOTS}`);
+      process.exit(1);
+    }
+    try {
+      fs.accessSync(TGAGENTP_ROOTS, fs.constants.W_OK);
+    } catch {
+      log.error(`TGAGENTP_ROOTS is not writable: ${TGAGENTP_ROOTS}`);
+      process.exit(1);
+    }
+  } catch {
+    log.error(`TGAGENTP_ROOTS does not exist: ${TGAGENTP_ROOTS}`);
+    process.exit(1);
+  }
+}
 
 // Persist chat↔server directory mappings across restarts
 function saveConnection(chatId, threadId, dir) {
@@ -362,8 +383,24 @@ async function cmdHelp(token, chatId, args, chatState) {
         'Max 100 messages / 100KB. Oldest messages are dropped first.');
       return;
     }
+    if (topic === 'serve') {
+      await sendLongMessage(token, chatState,
+        '`/serve <path>` ─ start a server in an existing directory\n\n' +
+        'The path is relative to `TGAGENTP_ROOTS`.\n' +
+        'Example: `/serve projects/my-app`\n\n' +
+        'Requires the `TGAGENTP_ROOTS` environment variable to be set to a writable directory.');
+      return;
+    }
+    if (topic === 'new') {
+      await sendLongMessage(token, chatState,
+        '`/new <path>` ─ create a directory, initialize git, and start a server\n\n' +
+        'The path is relative to `TGAGENTP_ROOTS`.\n' +
+        'Example: `/new projects/my-app`\n\n' +
+        'Requires the `TGAGENTP_ROOTS` environment variable to be set to a writable directory.');
+      return;
+    }
     await sendLongMessage(token, chatState,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, `/help serve`, `/help new`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatState,
@@ -390,7 +427,9 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
     '`/disconnect` ─ disconnect this chat from its server\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
-    '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n\n' +
+    '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
+    '`/serve <path>` ─ start a server in an existing directory (requires `TGAGENTP_ROOTS`)\n' +
+    '`/new <path>` ─ create a directory, init git, and start a server (requires `TGAGENTP_ROOTS`)\n\n' +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
 
@@ -1308,6 +1347,131 @@ async function cmdDisconnect(token, chatId, args, chatState) {
   log.info(`[chat ${chatId}] Disconnected from server: ${url}`);
 }
 
+async function cmdServe(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  if (!TGAGENTP_ROOTS) {
+    await sendLongMessage(token, chatState,
+      '❌ `TGAGENTP_ROOTS` environment variable is not set.\n' +
+      'Set it to a writable directory to enable `/serve` and `/new` commands.');
+    return;
+  }
+  const relPath = args.join(' ').trim();
+  if (!relPath) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/serve <path>`\n\n' +
+      'Run `ocmux serve` on a directory under `TGAGENTP_ROOTS`.\n' +
+      'The path is relative to the roots directory.');
+    return;
+  }
+  const targetDir = path.resolve(TGAGENTP_ROOTS, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOTS)) {
+    await sendLongMessage(token, chatState,
+      '❌ Path must be within `TGAGENTP_ROOTS`.\n' +
+      `Requested: \`${relPath}\``);
+    return;
+  }
+  try {
+    const stats = fs.statSync(targetDir);
+    if (!stats.isDirectory()) {
+      await sendLongMessage(token, chatState,
+        `❌ Not a directory: \`${relPath}\``);
+      return;
+    }
+  } catch {
+    await sendLongMessage(token, chatState,
+      `❌ Directory does not exist: \`${relPath}\``);
+    return;
+  }
+  const sf = statefileFor(targetDir);
+  if (fs.existsSync(sf)) {
+    await sendLongMessage(token, chatState,
+      `⚠️ Server already exists for \`${relPath}\`.\n` +
+      'Use `/servers switch <name>` to connect to it.');
+    return;
+  }
+  await sendLongMessage(token, chatState,
+    `🚀 Starting server for \`${relPath}\`...`);
+  const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
+  if (result.status !== 0) {
+    const err = result.stderr || result.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  const url = (result.stdout || '').trim();
+  if (!url) {
+    await sendLongMessage(token, chatState,
+      '❌ Server started but did not return a URL.');
+    return;
+  }
+  await setServerForChat(chatState, url);
+  await sendLongMessage(token, chatState,
+    `✅ Server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+  log.info(`[chat ${chatId}] Served ${targetDir} → ${url}`);
+}
+
+async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  if (!TGAGENTP_ROOTS) {
+    await sendLongMessage(token, chatState,
+      '❌ `TGAGENTP_ROOTS` environment variable is not set.\n' +
+      'Set it to a writable directory to enable `/serve` and `/new` commands.');
+    return;
+  }
+  const relPath = args.join(' ').trim();
+  if (!relPath) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/new <path>`\n\n' +
+      'Create a new directory under `TGAGENTP_ROOTS`, initialize git, and start a server.\n' +
+      'The path is relative to the roots directory.');
+    return;
+  }
+  const targetDir = path.resolve(TGAGENTP_ROOTS, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOTS)) {
+    await sendLongMessage(token, chatState,
+      '❌ Path must be within `TGAGENTP_ROOTS`.\n' +
+      `Requested: \`${relPath}\``);
+    return;
+  }
+  if (fs.existsSync(targetDir)) {
+    await sendLongMessage(token, chatState,
+      `❌ Directory already exists: \`${relPath}\`.\n` +
+      'Use `/serve` to start a server in an existing directory.');
+    return;
+  }
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+  } catch (err) {
+    await sendLongMessage(token, chatState,
+      `❌ Failed to create directory: ${err.message}`);
+    return;
+  }
+  const gitResult = spawnSync('git', ['init'], { cwd: targetDir, encoding: 'utf8', timeout: 10000 });
+  if (gitResult.status !== 0) {
+    const err = gitResult.stderr || gitResult.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to initialize git:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  await sendLongMessage(token, chatState,
+    `🚀 Starting server for \`${relPath}\`...`);
+  const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
+  if (result.status !== 0) {
+    const err = result.stderr || result.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  const url = (result.stdout || '').trim();
+  if (!url) {
+    await sendLongMessage(token, chatState,
+      '❌ Server started but did not return a URL.');
+    return;
+  }
+  await setServerForChat(chatState, url);
+  await sendLongMessage(token, chatState,
+    `✅ Directory created and server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+  log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -1327,6 +1491,8 @@ const COMMANDS = {
   'reject': cmdReject,
   'always': cmdAlways,
   'answer': cmdAnswer,
+  'serve': cmdServe,
+  'new': cmdNew,
 };
 
 // --------------------------------------------------------------------------
@@ -2206,8 +2372,8 @@ async function main() {
         const cmdArgs = parts.slice(1);
         const handler = cmds[cmd];
         if (handler) {
-          // Disconnected guard: only /help, /servers, /force-switch, /start, /comment, and /shutdown work without a server
-          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown') {
+          // Disconnected guard: only /help, /servers, /force-switch, /start, /comment, /shutdown, /serve, and /new work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown' && cmd !== 'serve' && cmd !== 'new') {
             await sendLongMessage(token, cs,
               '🔌 Not connected to any server.\n\n' +
               'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
@@ -2221,7 +2387,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new`);
         }
         continue;
       }

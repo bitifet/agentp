@@ -4,7 +4,7 @@ const { describe, it, before, after, beforeEach, afterEach, mock: nodeMock } = r
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
-const { Readable } = require('stream');
+const { Readable, Writable } = require('stream');
 
 const opencode = require('../lib/opencode');
 
@@ -76,8 +76,8 @@ let logs = [];
 let errors = [];
 let originalExit;
 let originalStdin;
-let originalStdoutWrite;
-let originalStderrWrite;
+let originalStdout;
+let originalStderr;
 let originalLog;
 let originalError;
 let originalReadFileSync;
@@ -90,17 +90,44 @@ function setupProcessMocks() {
 
   originalExit = process.exit;
   originalStdin = process.stdin;
-  originalStdoutWrite = process.stdout.write;
-  originalStderrWrite = process.stderr.write;
+  originalStdout = process.stdout;
+  originalStderr = process.stderr;
   originalLog = console.log;
   originalError = console.error;
   originalReadFileSync = fs.readFileSync;
 
+  // Replace stdout with a Writable that captures AND passes through.
+  // Object.defineProperty is needed because process.stdout has a getter (no setter).
+  const rwOut = process.stdout.write.bind(process.stdout);
+  const capOut = new Writable({
+    write(chunk, encoding, callback) {
+      stdout.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      rwOut(chunk, encoding, callback);
+    }
+  });
+  Object.defineProperty(process, 'stdout', {
+    get: () => capOut,
+    configurable: true,
+    enumerable: true,
+  });
+
+  // Same for stderr (no capture — just passthrough so node:test can report errors)
+  const rwErr = process.stderr.write.bind(process.stderr);
+  const capErr = new Writable({
+    write(chunk, encoding, callback) {
+      stderr.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      rwErr(chunk, encoding, callback);
+    }
+  });
+  Object.defineProperty(process, 'stderr', {
+    get: () => capErr,
+    configurable: true,
+    enumerable: true,
+  });
+
   process.exit = (code) => {
     throw new Error(`EXIT:${code}`);
   };
-  process.stdout.write = (chunk) => { stdout.push(chunk); return true; };
-  process.stderr.write = (chunk) => { stderr.push(chunk); return true; };
   console.log = (...args) => { logs.push(args.join(' ')); };
   console.error = (...args) => { errors.push(args.join(' ')); };
   fs.readFileSync = (path, encoding) => {
@@ -116,9 +143,21 @@ function setupProcessMocks() {
 
 function tearDownProcessMocks() {
   process.exit = originalExit;
-  process.stdin = originalStdin;
-  process.stdout.write = originalStdoutWrite;
-  process.stderr.write = originalStderrWrite;
+  Object.defineProperty(process, 'stdin', {
+    value: originalStdin,
+    configurable: true,
+    writable: true,
+  });
+  Object.defineProperty(process, 'stdout', {
+    get: () => originalStdout,
+    configurable: true,
+    enumerable: true,
+  });
+  Object.defineProperty(process, 'stderr', {
+    get: () => originalStderr,
+    configurable: true,
+    enumerable: true,
+  });
   console.log = originalLog;
   console.error = originalError;
   fs.readFileSync = originalReadFileSync;
@@ -197,7 +236,7 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(logs.length, 1);
-      assert.ok(logs[0].includes('0.11.7'));
+      assert.ok(logs[0].includes('0.11.7-pre01'));
     });
 
     it('--help prints help and exits', async () => {

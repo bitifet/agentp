@@ -2,11 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.7] - 2026-06-11
+## [0.11.7-pre01] - 2026-06-13
 
 ### New Features
 
-- **`ocmux --last`:** Print the URL of the active tmux window (the last used server). Useful when you want to send a command from outside the project directory without manually specifying the port. Example: `agentp $(ocmux --last)`
+- **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOTS`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server. Requires `TGAGENTP_ROOTS` environment variable.
+- **TGAGENTP_ROOTS startup validation:** tgagentp validates `TGAGENTP_ROOTS` at startup (exists, is a directory, is writable) and exits with a clear error if invalid.
+
+### Bug Fixes
+
+- **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` and `process.stderr.write` broke `node:test`'s suite detection (all 24 tests reported as a single failure with `suites: 0`). Switched to `Writable` streams via `Object.defineProperty` that capture AND pass through, preserving both test output capture and test runner recognition.
 
 ## [0.11.6] - 2026-06-11
 
