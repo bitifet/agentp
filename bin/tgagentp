@@ -891,8 +891,6 @@ function startAgentpGateway(token, serverBaseResolver) {
         }
         if (req.url === '/send') {
           handleSendRequest(req, res, token, serverBaseResolver);
-        } else if (req.url === '/send-file') {
-          handleSendFileRequest(req, res, token, serverBaseResolver);
         } else {
           res.writeHead(404);
           res.end('Not Found');
@@ -969,72 +967,46 @@ function handleSendRequest(req, res, token, serverBaseResolver) {
   });
 }
 
-function handleSendFileRequest(req, res, token, serverBaseResolver) {
-  let body = '';
-  req.on('data', (chunk) => { body += chunk; });
-  req.on('end', () => {
+// Scan response text for /upload <path> commands, send each file via Telegram,
+// and return the text with upload lines removed.
+async function processUploadCommands(text, server, token, chatState) {
+  if (!text) return text;
+  // Match /upload with an optional quoted path or unquoted (no-spaces) path
+  const re = /\/upload\s+(?:"([^"]*)"|(\S+))/g;
+  let match;
+  let updated = text;
+  const filesSent = [];
+  const dir = serverDir(server);
+  while ((match = re.exec(text)) !== null) {
+    const rawPath = match[1] !== undefined ? match[1] : match[2];
+    if (!rawPath) continue;
+    const resolved = dir ? path.resolve(dir, rawPath) : path.resolve(rawPath);
     try {
-      let data;
-      try { data = JSON.parse(body); } catch {
-        res.writeHead(400);
-        res.end('Bad Request');
-        return;
+      if (!fs.existsSync(resolved)) {
+        log.error(`processUploadCommands: file not found: ${resolved}`);
+        continue;
       }
-      const { filePath, server, message } = data;
-      if (typeof filePath !== 'string' || typeof server !== 'string') {
-        res.writeHead(400);
-        res.end('Bad Request: filePath and server are required');
-        return;
-      }
-
-      // Find the chat that owns this server
-      const targetUrl = normalizeUrl(server);
-      const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
-
-      if (!owningChatId) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sent: false, reason: 'no owner' }));
-        return;
-      }
-
-      // Resolve the file path relative to the server directory
-      const dir = serverDir(server);
-      if (!dir) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sent: false, reason: 'no server dir' }));
-        return;
-      }
-      const fullPath = path.resolve(dir, filePath);
-      if (!fs.existsSync(fullPath)) {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sent: false, reason: 'file not found' }));
-        return;
-      }
-
-      const fileData = fs.readFileSync(fullPath);
-      const fileName = path.basename(fullPath);
-
-      // Send file to Telegram
-      sendTelegramDocument(token, owningChatId, fileData, fileName, message).then(() => {
-        // Clean up: only delete files from telegram-shared/downloads/
-        // to prevent accidental deletion of project files
+      const fileData = fs.readFileSync(resolved);
+      const fileName = path.basename(resolved);
+      await sendTelegramDocument(token, chatState, fileData, fileName, null);
+      filesSent.push(fileName);
+      // Clean up only files under telegram-shared/downloads/
+      if (dir) {
         const downloadsDir = path.join(dir, 'telegram-shared', 'downloads');
-        if (fullPath.startsWith(downloadsDir + path.sep)) {
-          try { fs.unlinkSync(fullPath); } catch (_) {}
+        if (resolved.startsWith(downloadsDir + path.sep)) {
+          try { fs.unlinkSync(resolved); } catch (_) {}
         }
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sent: true }));
-      }).catch((err) => {
-        log.error(`Failed to send file: ${err.message}`);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ sent: false, reason: err.message }));
-      });
+      }
     } catch (err) {
-      log.error(`Agentp gateway handler error: ${err.message}`);
-      res.writeHead(500);
-      res.end('Internal Server Error');
+      log.error(`processUploadCommands: failed to send file ${resolved}: ${err.message}`);
     }
-  });
+  }
+  // Strip all /upload lines from the response
+  if (filesSent.length > 0) {
+    updated = updated.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
+    log.info(`processUploadCommands: sent ${filesSent.length} file(s): ${filesSent.join(', ')}`);
+  }
+  return updated;
 }
 
 async function cmdAllow(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
@@ -1834,9 +1806,12 @@ async function main() {
       if (url === chatServer) {
         if (answer && answer.trim()) {
           const trimmed = answer.trim();
-          msgLog('out', chatId, '', trimmed);
-          await sendLongMessage(token, chatState, trimmed, replyTo, threadId);
-          bufferMessage(chatId, threadId, 'assistant', trimmed);
+          const cleaned = await processUploadCommands(trimmed, url, token, chatState);
+          msgLog('out', chatId, '', cleaned);
+          if (cleaned) {
+            await sendLongMessage(token, chatState, cleaned, replyTo, threadId);
+            bufferMessage(chatId, threadId, 'assistant', cleaned);
+          }
         }
       } else {
         getState(url).pendingResponse = answer;
@@ -2372,7 +2347,12 @@ async function main() {
         try {
           const answer = await executeTuiCommand(paneId, cs.serverBase, tuiCmd);
           if (answer && answer.trim()) {
-            await sendLongMessage(token, cs, answer.trim());
+            const cleaned = await processUploadCommands(answer.trim(), cs.serverBase, token, cs);
+            if (cleaned) {
+              await sendLongMessage(token, cs, cleaned);
+            } else {
+              await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+            }
           } else {
             await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
           }

@@ -5,7 +5,7 @@
 ```
 bin/agentp          — stdin → opencode session (350 lines)
 bin/ocmux           — tmux server manager (582 lines)
-bin/tgagentp        — Telegram bot ↔ opencode TUI (2134 lines)
+bin/tgagentp        — Telegram bot ↔ opencode TUI (~2500 lines)
 lib/opencode.js     — HTTP session API client (shared by agentp + tgagentp)
 lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
 lib/tui-cmd.js      — tmux send-keys for TUI command passthrough (used by tgagentp)
@@ -26,7 +26,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 107 tests (64 + 35 + 8)
+npm test              # node --test tests/*.test.js — 160 tests (24 + 64 + 35 + 8 + 17 + 12)
 node --test tests/opencode.test.js   # mock http.request
 node --test tests/ocmux.test.js      # mock child_process + fs.*
 node --test tests/file-share.test.js # mock fs for telegram-shared dir ops
@@ -45,7 +45,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 - `lib/opencode.js` wraps `http.request` — all OpenCode API functions go through `makeRequest()` (handles 401, optional timeout, optional `cancelRef` for req.destroy).
 - `lib/ocmux.js` wraps `child_process.spawnSync` via `_tmux()` helper — all tmux interactions must go through this, never raw spawn.
-- tgagentp is monolithic (~2134 lines). New features: extract into `lib/` when possible.
+- tgagentp is monolithic (~2500 lines). New features: extract into `lib/` when possible.
 - Shared state lives in module-level variables (`chatStates`, `serverOwners`, `agentpQueues`).
 - `activateServer()` is safe to call repeatedly: it checks `activeWindowIndex()` internally and is a no-op on the same window.
 
@@ -63,7 +63,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 Upload: Telegram file/photo → saved to `<project>/telegram-shared/uploads/` with timestamp prefix + sanitized name. Auto-creates `telegram-shared/{uploads,downloads}/` and appends `telegram-shared/` to `.gitignore` on first upload. Notification sent to agent (respects busy/idle queue).
 
-Download: `POST /send-file` gateway endpoint. Agent writes file to `telegram-shared/downloads/` and POSTs `{ filePath, server, message }` to gateway. tgagentp sends via `sendDocument` (multipart/form-data) and cleans up after successful send.
+Download: Agent writes file to `telegram-shared/downloads/` and includes `/upload <path>` in its response text. tgagentp detects `/upload` commands in answers (before sending to Telegram), reads the file, sends it via `sendDocument` (multipart/form-data), and strips the `/upload` line from the visible response. Files under `telegram-shared/downloads/` are cleaned up after successful send. No HTTP endpoint needed — it works through the normal response stream.
 
 ## Key integration patterns
 
