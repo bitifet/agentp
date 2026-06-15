@@ -4,7 +4,9 @@ I've always felt out of step with the prevailing trends.
 
 Before the AI explosion, the mantra was "ship fast" — the Minimum Viable Product. If you weren't first, you were nobody. Quality, testing, documentation? Nice-to-haves. I could never stomach shipping "human slop" just to be first.
 
-Now we're in the AI era, and suddenly everyone is alarmed about "AI slop." And I find myself out of step again — because from where I stand, the AI helps me produce the opposite. My documentation is better. I write more tests. The code is cleaner. Even the worst AI-generated test is harmless: the most it can do is be useless. Unlike buggy production code rushed out to win a race, it won't break anything.
+Now we're in the AI era, and suddenly everyone is alarmed about "AI slop." And I find myself out of step again — because from where I stand, the AI helps me produce the opposite. My documentation is better. I write more tests than I could have imagined before. The code is cleaner. Even the worst AI-generated test is harmless: the most it can do is be useless. Unlike buggy production code rushed out to win a race, it won't break anything.
+
+The same goes for tooling. Every few years — sometimes months — a new IDE becomes the baseline, and if you haven't switched you're suddenly irrelevant. I use Neovim and tmux. Not because they're trendy, but because I spent years evolving a workflow that works across physical terminals, remote servers, and whatever machine I happen to be sitting at. I'm not about to throw that away for a shinier editor.
 
 That's the mindset behind **agentp**. I started building these tools for my own daily workflow — not to ship a product, but to solve real friction I was feeling every day. OpenCode is great, but its TUI locks you in. I wanted to:
 
