@@ -1,13 +1,20 @@
 # Agentp: Turn OpenCode Into a Headless AI Engine for Your Editor, Terminal, and Telegram
-OpenCode is great, but its TUI locks you in. You type in one window, watch it stream, and that's it. What if you could:
 
-- Pipe a prompt straight from Vim and replace your selection with the answer?
-- Queue messages from Telegram while it's busy and get replies threaded?
-- Keep a permanent server per project in tmux and switch between them?
-- Pull the last N answers from session history without sending a new prompt?
-- Record your Telegram conversation and inject it as context into your next `agentp` call?
+I've always felt out of step with the prevailing trends.
 
-That's what **agentp** — a set of three zero-dependency Node.js CLI tools — does.
+Before the AI explosion, the mantra was "ship fast" — the Minimum Viable Product. If you weren't first, you were nobody. Quality, testing, documentation? Nice-to-haves. I could never stomach shipping "human slop" just to be first.
+
+Now we're in the AI era, and suddenly everyone is alarmed about "AI slop." And I find myself out of step again — because from where I stand, the AI helps me produce the opposite. My documentation is better. I write more tests. The code is cleaner. Even the worst AI-generated test is harmless: the most it can do is be useless. Unlike buggy production code rushed out to win a race, it won't break anything.
+
+That's the mindset behind **agentp**. I started building these tools for my own daily workflow — not to ship a product, but to solve real friction I was feeling every day. OpenCode is great, but its TUI locks you in. I wanted to:
+
+- Pipe a prompt straight from Vim and replace my selection with the answer.
+- Talk to my projects from Telegram while away from the keyboard.
+- Queue messages while a server is busy and get threaded replies.
+- Keep a permanent server per project in tmux and switch between them.
+- Record a Telegram conversation and inject it as context into the next prompt.
+
+agentp grew from there — piece by piece, idea by idea — into a set of three zero-dependency Node.js CLI tools. It's heavily AI-assisted, including the tests. I review every stage before shipping, but the real test is using it every day. Bugs happen; I value a working feature more than a flawless one.
 
 ---
 
@@ -20,6 +27,14 @@ Stdin in, answer out. That's the core loop.
 ```bash
 printf "Summarize this file" | agentp
 cat prompt.txt | agentp
+
+# Target a specific session by name (partial match works)
+cat prompt.txt | agentp --session "My Task"
+cat prompt.txt | agentp --session "New Task" --new   # create if not found
+
+# Pull the last N answers without sending a new prompt
+agentp --getLast 5
+agentp --getLast 3 --qa    # full QA pairs with rulers
 ```
 
 From Vim/Neovim:
@@ -47,6 +62,8 @@ ocmux kill                          # same as ocmux $(pwd)
 
 `ocmux` also supports `--git` and `--GIT` flags for git base directory resolution: `--git` matches with either worktrees or repository roots, while `--GIT` requires an actual repository root (not a worktree).
 
+`ocmux --last` prints the URL of the active tmux window — useful when calling `agentp` from outside the project directory.
+
 When an opencode server crashes, `ocmux resurrect` reads `.ocmux.json`, kills the stale tmux window, and starts a fresh server + TUI in the same directory. Works even with a dead tmux window (stale state file).
 
 ### `tgagentp` — The Telegram Bridge
@@ -57,7 +74,7 @@ A Telegram bot that routes messages to your OpenCode servers. Multi-chat, multi-
 tgagentp                                  # default port 4096
 tgagentp --think                          # start with thinking forwarding enabled
 tgagentp --dev                            # enable /shutdown for remote restart
-tgagentp 8080                             # custom port
+TGAGENTP_ROOT=/srv/projects tgagentp      # enable /serve and /new commands
 TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 ```
 
@@ -71,6 +88,8 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/sessions` | List/switch/create/rename sessions |
 | `/agents` | List/switch active agent |
 | `/models` | List providers and models |
+| `/serve <path>` | Start a server in an existing project (requires `TGAGENTP_ROOT`) |
+| `/new <path>` | Create a directory, init git, and start a server (requires `TGAGENTP_ROOT`) |
 | `/allow` | Approve a tool permission once |
 | `/reject` | Deny a tool permission |
 | `/always` | Approve a permission and remember the choice |
@@ -90,6 +109,10 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
 
 When the AI asks a structured question (e.g., tool configuration), tgagentp forwards it as a numbered multiple-choice poll — respond with `/answer <number>`. If the command produces a quick answer, it arrives immediately; otherwise a confirmation (`✅ /init submitted.`) is sent.
+
+**File sharing:** Upload files and photos to Telegram, and they're saved to `telegram-shared/uploads/` in the project directory — automatically created with a `.gitignore`. The agent is notified when idle. Download files back by replying to a file message or by having the agent write to `telegram-shared/downloads/` — tgagentp sends them via `sendDocument` and cleans up after.
+
+**`!!` wildcard:** Use `!!` in any command to reference the previous user message. For example, `/queue !!` queues your last message, `/note !!` sends it as a note.
 
 ---
 
@@ -150,6 +173,7 @@ The killer integration: `agentp` and `tgagentp` talk to each other through a tin
 |---|---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | — | Bot token from @BotFather |
 | `TGAGENTP_ALLOWED_CHAT_IDS` | No | all | Comma-separated chat IDs to allow (e.g. `"123456,-789012"`) |
+| `TGAGENTP_ROOT` | No | — | Root directory for `/serve` and `/new` commands (must be writable) |
 | `TGAGENTP_PORT` | No | random | Port for the agentp gateway (agentp --tg discovers it automatically) |
 | `TGAGENTP_DEBOUNCE_MS` | No | 5000 | Debounce interval for queued-agentp Telegram notifications (ms) |
 | `OPENCODE_SERVER_PASSWORD` | No | — | Password for authenticated OpenCode servers |
