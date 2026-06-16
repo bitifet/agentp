@@ -7,9 +7,9 @@
 
 This package provides three CLI tools:
 
-- **`agentp`** — pipes prompt text into a running OpenCode TUI session and streams the assistant final answer back to stdout
+- **`agentp`** — pipes prompt text into a running OpenCode server and streams the assistant final answer back to stdout
 - **`ocmux`** — manages OpenCode server + TUI sessions in tmux (create, switch, kill, list)
-- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode TUI sessions (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, and remote restart.
+- **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode servers (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, including file sharing from the chat.
 
 It is designed for prompt-driven workflows where you want to do things like:
 

@@ -63,7 +63,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 Upload: Telegram file/photo → saved to `<project>/telegram-shared/uploads/` with timestamp prefix + sanitized name. Auto-creates `telegram-shared/{uploads,downloads}/` and appends `telegram-shared/` to `.gitignore` on first upload. Notification sent to agent (respects busy/idle queue).
 
-Download: Agent writes file to `telegram-shared/downloads/` and includes `/upload <path>` in its response text. tgagentp detects `/upload` commands in answers (before sending to Telegram), reads the file, sends it via `sendDocument` (multipart/form-data), and strips the `/upload` line from the visible response. Files under `telegram-shared/downloads/` are cleaned up after successful send. No HTTP endpoint needed — it works through the normal response stream.
+Download: Agent writes file to `telegram-shared/downloads/` and includes `[Telegram]{"command":"upload","path":"<file>","msg":"<caption>"}` on its own line in the response text. tgagentp detects `[Telegram]{...}` lines in answers (before sending to Telegram), processes the command, and strips the line from the visible response. Files under `telegram-shared/downloads/` are cleaned up after successful send. No HTTP endpoint needed — it works through the normal response stream and also through the agentp gateway (`--tg`).
 
 ## Key integration patterns
 

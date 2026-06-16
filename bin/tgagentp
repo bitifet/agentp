@@ -942,7 +942,9 @@ function handleSendRequest(req, res, token, serverBaseResolver) {
       const activeUrl = normalizeUrl(serverBaseResolver());
 
       if (targetUrl === activeUrl) {
-        sendLongMessage(token, owningChatId, text.trim()).catch(() => {});
+        processUploadCommands(text, server, token, owningChatId).then((cleaned) => {
+          if (cleaned) sendLongMessage(token, owningChatId, cleaned).catch(() => {});
+        });
       } else {
         if (!agentpQueues[server]) {
           agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
@@ -967,46 +969,74 @@ function handleSendRequest(req, res, token, serverBaseResolver) {
   });
 }
 
-// Scan response text for /upload <path> commands, send each file via Telegram,
-// and return the text with upload lines removed.
-async function processUploadCommands(text, server, token, chatState) {
-  if (!text) return text;
-  // Match /upload with an optional quoted path or unquoted (no-spaces) path
-  const re = /\/upload\s+(?:"([^"]*)"|(\S+))/g;
-  let match;
-  let updated = text;
-  const filesSent = [];
-  const dir = serverDir(server);
-  while ((match = re.exec(text)) !== null) {
-    const rawPath = match[1] !== undefined ? match[1] : match[2];
-    if (!rawPath) continue;
-    const resolved = dir ? path.resolve(dir, rawPath) : path.resolve(rawPath);
-    try {
-      if (!fs.existsSync(resolved)) {
-        log.error(`processUploadCommands: file not found: ${resolved}`);
-        continue;
-      }
-      const fileData = fs.readFileSync(resolved);
-      const fileName = path.basename(resolved);
-      await sendTelegramDocument(token, chatState, fileData, fileName, null);
-      filesSent.push(fileName);
-      // Clean up only files under telegram-shared/downloads/
-      if (dir) {
-        const downloadsDir = path.join(dir, 'telegram-shared', 'downloads');
-        if (resolved.startsWith(downloadsDir + path.sep)) {
-          try { fs.unlinkSync(resolved); } catch (_) {}
-        }
-      }
-    } catch (err) {
-      log.error(`processUploadCommands: failed to send file ${resolved}: ${err.message}`);
+// Scan response text for [Telegram]{...} structured messages, process them,
+// and return the text with those lines removed.
+// Supported commands: "upload" — sends a file to the Telegram chat.
+// Format: [Telegram]{"command":"upload","path":"<file>","msg":"<caption>"}
+// The [Telegram]{...} must be the only content on its line.
+
+// Parse a single [Telegram]{...} line. Returns { payload } or null.
+function parseTelegramLine(line) {
+  const m = line.match(/^\[Telegram\](\{.*\})\s*$/);
+  if (!m) return null;
+  let payload;
+  try { payload = JSON.parse(m[1]); } catch { return null; }
+  if (!payload || typeof payload !== 'object') return null;
+  return payload;
+}
+
+// Extract all [Telegram]{...} payloads from a text and return the text with those lines removed.
+// Returns { payloads, text } or null if no [Telegram] lines found.
+function extractTelegramCommands(text) {
+  const lines = text.split('\n');
+  const payloads = [];
+  const kept = [];
+  for (const line of lines) {
+    const payload = parseTelegramLine(line);
+    if (payload) {
+      payloads.push(payload);
+    } else {
+      kept.push(line);
     }
   }
-  // Strip all /upload lines from the response
+  if (payloads.length === 0) return null;
+  return { payloads, text: kept.join('\n').trim() };
+}
+
+async function processUploadCommands(text, server, token, chatState) {
+  if (!text) return text;
+  const extracted = extractTelegramCommands(text);
+  if (!extracted) return text;
+  const filesSent = [];
+  const dir = serverDir(server);
+  for (const payload of extracted.payloads) {
+    if (payload.command === 'upload' && payload.path) {
+      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
+      try {
+        if (!fs.existsSync(resolved)) {
+          log.error(`processUploadCommands: file not found: ${resolved}`);
+          continue;
+        }
+        const fileData = fs.readFileSync(resolved);
+        const fileName = path.basename(resolved);
+        const caption = typeof payload.msg === 'string' ? payload.msg : undefined;
+        await sendTelegramDocument(token, chatState, fileData, fileName, caption);
+        filesSent.push(fileName);
+        if (dir) {
+          const downloadsDir = path.join(dir, 'telegram-shared', 'downloads');
+          if (resolved.startsWith(downloadsDir + path.sep)) {
+            try { fs.unlinkSync(resolved); } catch (_) {}
+          }
+        }
+      } catch (err) {
+        log.error(`processUploadCommands: failed to send file ${resolved}: ${err.message}`);
+      }
+    }
+  }
   if (filesSent.length > 0) {
-    updated = updated.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
     log.info(`processUploadCommands: sent ${filesSent.length} file(s): ${filesSent.join(', ')}`);
   }
-  return updated;
+  return extracted.text || '';
 }
 
 async function cmdAllow(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
@@ -2456,7 +2486,11 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-main().catch((err) => {
-  console.error('Error:', err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Error:', err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { processUploadCommands, parseTelegramLine, extractTelegramCommands };
