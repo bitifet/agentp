@@ -1009,9 +1009,15 @@ async function processUploadCommands(text, server, token, chatState) {
   if (!extracted) return text;
   const filesSent = [];
   const dir = serverDir(server);
+  const sharedDir = dir ? path.join(dir, 'telegram-shared') : null;
   for (const payload of extracted.payloads) {
     if (payload.command === 'upload' && payload.path) {
       const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
+      // Enforce containment: only allow files within telegram-shared/
+      if (sharedDir && !resolved.startsWith(sharedDir + path.sep)) {
+        log.error(`processUploadCommands: path outside telegram-shared/ rejected: ${payload.path}`);
+        continue;
+      }
       try {
         if (!fs.existsSync(resolved)) {
           log.error(`processUploadCommands: file not found: ${resolved}`);
@@ -1022,11 +1028,10 @@ async function processUploadCommands(text, server, token, chatState) {
         const caption = typeof payload.msg === 'string' ? payload.msg : undefined;
         await sendTelegramDocument(token, chatState, fileData, fileName, caption);
         filesSent.push(fileName);
-        if (dir) {
-          const downloadsDir = path.join(dir, 'telegram-shared', 'downloads');
-          if (resolved.startsWith(downloadsDir + path.sep)) {
-            try { fs.unlinkSync(resolved); } catch (_) {}
-          }
+        // Clean up only files under telegram-shared/downloads/
+        const downloadsDir = path.join(sharedDir, 'downloads');
+        if (resolved.startsWith(downloadsDir + path.sep)) {
+          try { fs.unlinkSync(resolved); } catch (_) {}
         }
       } catch (err) {
         log.error(`processUploadCommands: failed to send file ${resolved}: ${err.message}`);
