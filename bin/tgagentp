@@ -1063,6 +1063,8 @@ async function processTelegramCommands(text, server, token, chatState) {
     } else if (payload.command === 'help') {
       const topic = typeof payload.topic === 'string' ? payload.topic : undefined;
       replacements.set(i, getHelpText(topic));
+    } else {
+      toStrip.add(i); // unrecognized command — strip silently
     }
   }
 
