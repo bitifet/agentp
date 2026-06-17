@@ -1731,9 +1731,7 @@ async function main() {
     getState(url);
 
     // Send Telegram bridge awareness note to the new session
-    if (getState(url).activeSessionId) {
-      sendGreeting(cs).catch(() => {});
-    }
+    sendGreeting(cs).catch(() => {});
 
     // Auto-activate tmux window for this server
     const servers = listServers();
@@ -1793,6 +1791,12 @@ async function main() {
 
   async function sendGreeting(chatState) {
     const st = getState(chatState.serverBase);
+    if (!st.activeSessionId) {
+      try {
+        const discovered = await discoverActiveSession(chatState.serverBase);
+        if (discovered) st.activeSessionId = discovered.id;
+      } catch {}
+    }
     if (!st.activeSessionId) return;
     try {
       await sendToSession(chatState.serverBase, st.activeSessionId, TELEGRAM_GREETING);
