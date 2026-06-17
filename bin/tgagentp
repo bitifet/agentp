@@ -672,7 +672,7 @@ async function cmdSessions(token, chatId, args, chatState, setServerForChat, set
           return;
         }
         const target = matches[0];
-        setActiveSessionForChat(chatId, target.id);
+        setActiveSessionForChat(chatState, target.id);
         selectSession(server, target.id);
         await sendLongMessage(token, chatState,
           `Switched to session: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
