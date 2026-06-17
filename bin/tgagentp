@@ -1577,11 +1577,11 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
   log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
 }
 
-async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo) {
+async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId) {
   let entry = null;
   const nStr = args && args.length > 0 ? args[0] : null;
-  if (replyTo) {
-    entry = getResponseByMessageId(chatId, chatState.threadId, replyTo);
+  if (replyToMsgId) {
+    entry = getResponseByMessageId(chatId, chatState.threadId, replyToMsgId);
     if (!entry) {
       await sendLongMessage(token, chatState, '❌ Could not find the original response for this message. It may be too old or was not sent by tgagentp.');
       return;
@@ -2554,7 +2554,8 @@ async function main() {
             continue;
           }
           try {
-            await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat, replyTo);
+            const replyToMsgId = msg.reply_to_message ? msg.reply_to_message.message_id : 0;
+            await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId);
           } catch (err) {
             log.error(`Error handling /${cmd}: ${err.message}`);
             try { await sendLongMessage(token, cs, `Error: ${err.message}`); } catch (_) {}
