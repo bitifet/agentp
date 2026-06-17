@@ -429,8 +429,16 @@ async function cmdHelp(token, chatId, args, chatState) {
         hint);
       return;
     }
+    if (topic === 'markdown') {
+      await sendLongMessage(token, chatState,
+        '`/markdown [n]` ─ send the original markdown of a recent response as a file\n\n' +
+        'Without arguments, sends the most recent response. With a number N, sends the Nth most recent.\n\n' +
+        'Reply to any message to send the original markdown of the response that generated that message ' +
+        '(works even if the response was split into multiple Telegram messages).');
+      return;
+    }
     await sendLongMessage(token, chatState,
-      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, `/help serve`, `/help new`, or just `/help`.');
+      'Unknown topic. Try `/help servers`, `/help sessions`, `/help agents`, `/help models`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, `/help serve`, `/help new`, `/help markdown`, or just `/help`.');
     return;
   }
   await sendLongMessage(token, chatState,

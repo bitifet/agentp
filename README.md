@@ -253,6 +253,7 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |
 | `/answer <number>` | Respond to a question asked by the AI (structured multiple-choice) |
+| `/markdown [n]` | Send the original markdown of a recent response as a `.md` file; reply to a message to get that specific response |
 | `/shutdown [force\|clear]` | (requires `--dev`) Stop tgagentp; `clear` also wipes saved connections |
 
 #### TUI Command Passthrough

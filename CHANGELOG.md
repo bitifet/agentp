@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.8-pre01] - 2026-06-17
+
+### New Features
+
+- **`/markdown` command:** Send the original markdown of a recent response as a `.md` file. Reply to any message to get the markdown that generated that specific response (works even if the response was split into multiple Telegram messages). `/markdown N` sends the Nth most recent. Works entirely in-memory — no disk I/O needed.
+
+### Changed
+
+- **`sendLongMessage` now returns message IDs:** Callers can track which Telegram messages correspond to which responses (used by `/markdown`'s ring buffer).
+
 ## [0.11.7] - 2026-06-17
 
 ### New Features
