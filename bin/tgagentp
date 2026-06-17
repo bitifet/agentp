@@ -702,10 +702,13 @@ async function cmdSessions(token, chatId, args, chatState, setServerForChat, set
       return;
     }
 
-    // Show user sessions (have agent or directory) and always include the active session
+    // Show primary-agent sessions and always include the active session
+    const agents = await listAgents(server).catch(() => []);
+    const primaryAgents = new Set(agents.filter(a => a.mode === 'primary').map(a => a.name));
+    const hasPrimaryAgent = (s) => s.agent && primaryAgents.has(s.agent);
     const activeId = getState(server).activeSessionId;
     const filtered = sessions.filter(s =>
-      (s.agent || s.directory || s.id === activeId) && (!projectDir || s.directory === projectDir));
+      (hasPrimaryAgent(s) || s.id === activeId) && (!projectDir || s.directory === projectDir));
     const sorted = sortedSessions(filtered, 50);
     if (sorted.length === 0) {
       await sendLongMessage(token, chatState, 'No active sessions.');
