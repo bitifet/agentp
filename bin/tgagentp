@@ -1778,15 +1778,16 @@ async function main() {
   };
 
   const TELEGRAM_GREETING =
-    '[Informational] Your responses are being relayed through Telegram.\n' +
-    'The user can talk to you from there (you\'ll see their messages prefixed with [Telegram]).\n\n' +
-    'You can send and receive files using these structured commands:\n\n' +
-    'To send a file to the user:\n' +
+    '[Telegram] Your responses are being relayed through a Telegram bridge.\n' +
+    'The user can talk to you from there (your messages prefixed with [Telegram]).\n\n' +
+    'Available commands:\n\n' +
+    'Upload a file to the user:\n' +
     '  [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
-    'To download a file the user sent:\n' +
+    'Download a file the user sent:\n' +
     '  [Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
-    'For details: [Telegram]{"command":"help","topic":"<command>"}\n' +
-    'For general help: [Telegram]{"command":"help"}';
+    'Get help:\n' +
+    '  [Telegram]{"command":"help","topic":"<command>"}\n' +
+    '  [Telegram]{"command":"help"}';
 
   async function sendGreeting(chatState) {
     const st = getState(chatState.serverBase);
