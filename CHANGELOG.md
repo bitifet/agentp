@@ -2,17 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.7] - 2026-06-13
+## [0.11.7] - 2026-06-17
 
 ### New Features
 
 - **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOT`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server. Requires `TGAGENTP_ROOT` environment variable.
 - **`TGAGENTP_ROOT` startup validation:** tgagentp validates `TGAGENTP_ROOT` at startup; if missing or invalid, `/serve` and `/new` are gracefully disabled (no crash). `/help` shows an enablement hint when the root is not configured. `/help serve` and `/help new` show how to enable them.
 - **`/think` immediate effect:** Thinking text is now always buffered in server state (even when disabled). Toggling `/think on` during a request flushes any already-received thinking text immediately, instead of only taking effect on the next request.
+- **`[Telegram]{...}` agent protocol:** Structured commands in agent responses for file sharing and help. Replaces the old `telegram-shared/` mailbox and `POST /send-file` HTTP endpoint. Commands: `upload` (agent sends file to Telegram), `download` (agent pulls file from Telegram), `help` (agent requests documentation).
+- **Auto-greeting:** tgagentp now sends an awareness note to the session on server connect and session change, informing the agent about the available `[Telegram]{...}` commands.
 
 ### Bug Fixes
 
 - **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` broke `node:test`'s suite detection (all 24 tests reported as a single failure with `suites: 0`). Switched to `Writable` stream via `Object.defineProperty` for stdout that captures AND passes through, preserving both test output capture and test runner recognition.
+- **State key normalization:** `getState()` now normalizes URL keys (trailing slashes, `127.0.0.1` vs `localhost`), preventing session state from being silently lost when URLs differ in format.
+- **Session switch bug:** `setActiveSessionForChat` was being called with `chatId` (number) instead of `chatState` (object), causing session state to be written to a phantom numeric key.
+- **Session filter:** `/sessions` now only shows primary-agent sessions (not subagent sessions), matching what appears in the TUI.
 
 ## [0.11.6] - 2026-06-11
 

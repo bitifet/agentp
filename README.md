@@ -61,6 +61,8 @@ Options:
 - `--no-tg`: do not forward to Telegram
 - `--flush`: flush tgagentp's recorded buffer without prepending it to output
 - `--getLast <n>`: retrieve last n assistant answers from session history
+- `--session <name>`: target a specific session by name (exact or partial match)
+- `--new`: create a new session with the given title (requires `--session`)
 - `--version`: show version
 - `--help`: show help message
 
@@ -150,8 +152,6 @@ Useful to grab recent answers without sending a new prompt.
 
 ## ocmux
 
-## ocmux
-
 Manage OpenCode server + TUI in tmux for project directories.
 
 ```bash
@@ -235,6 +235,8 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`, `record`, `queue`) |
 | `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
 | `/servers switch <name> [--force]` | Switch active server; matches by full path, basename, or substring; `--force` takes over from another chat |
+| `/serve <path>` | Start a server in an existing directory under `TGAGENTP_ROOT` |
+| `/new <path>` | Create a directory, init git, and start a server under `TGAGENTP_ROOT` |
 | `/sessions` | List recent sessions for the current server (max 50, with date headings) |
 | `/sessions switch <number\|name>` | Switch active session by position or partial name match |
 | `/agents` | List primary agents (▶ marker for the active one) |
@@ -328,6 +330,7 @@ Chat-to-server directory mappings are saved to `/tmp/tgagentp-connections.json` 
 | `TGAGENTP_ALLOWED_CHAT_IDS` | Optional. Comma-separated Telegram chat IDs that are allowed to use the bot. |
 | `TGAGENTP_PORT` | Optional. Agentp gateway listen port (default: `0` = random). |
 | `TGAGENTP_DEBOUNCE_MS` | Optional. Debounce interval for queued-message notifications (default: `5000`). |
+| `TGAGENTP_ROOT` | Optional. Root directory for `/serve` and `/new` commands (must be writable). |
 
 ## License
 

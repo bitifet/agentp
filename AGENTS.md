@@ -26,10 +26,11 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 160 tests (24 + 64 + 35 + 8 + 17 + 12)
-node --test tests/opencode.test.js   # mock http.request
-node --test tests/ocmux.test.js      # mock child_process + fs.*
-node --test tests/file-share.test.js # mock fs for telegram-shared dir ops
+npm test              # node --test tests/*.test.js — 174 tests (24 + 64 + 35 + 8 + 17 + 12 + 14)
+node --test tests/opencode.test.js    # mock http.request
+node --test tests/ocmux.test.js       # mock child_process + fs.*
+node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
+node --test tests/telegram-cmd.test.js # [Telegram]{"command":...} parsing
 ```
 
 All tests run fully in-process. Mock boundaries are in `before()`/`after()` (opencode) or `beforeEach()`/`afterEach()` (ocmux) hooks. Tests within a describe block are serial (`concurrency: false`) when sharing mocked state.
@@ -67,7 +68,7 @@ tgagentp detects `[Telegram]{...}` structured messages on their own line in agen
 
 **Download (Telegram → agent):** When the user uploads a file or replies to a file message, tgagentp notifies the agent with the file ID and name. The agent can then request the file with `[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}`. tgagentp downloads the file and saves it to the specified project-relative path.
 
-**Help:** Agent sends `[Telegram]{"command":"help","topic":"<upload|download|help>"}` — tgagentp replaces the line with the help text. Omitting `"topic"` returns general help.
+**Help:** Agent sends `[Telegram]{"command":"help","topic":"<upload|download|help>"}` — tgagentp sends the help text back to the session (agent sees it on the next prompt). Omitting `"topic"` returns general help.
 
 **Auto-greeting:** tgagentp automatically sends an awareness note to the session when the chat connects to a server or switches sessions, explaining the available commands.
 
