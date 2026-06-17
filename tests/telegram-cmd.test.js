@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { parseTelegramLine, getHelpText } = require('../bin/tgagentp');
+const { parseTelegramLine, getHelpText, normalizeUrl } = require('../bin/tgagentp');
 
 describe('parseTelegramLine', () => {
   it('parses a valid [Telegram] JSON line', () => {
@@ -83,5 +83,40 @@ describe('getHelpText', () => {
   it('falls back to general help for unknown topic', () => {
     const text = getHelpText('unknown');
     assert.ok(text.includes('Available commands'));
+  });
+});
+
+describe('normalizeUrl', () => {
+  it('removes trailing slash', () => {
+    assert.strictEqual(normalizeUrl('http://localhost:4096/'), 'http://localhost:4096');
+  });
+
+  it('removes multiple trailing slashes', () => {
+    assert.strictEqual(normalizeUrl('http://localhost:4096///'), 'http://localhost:4096');
+  });
+
+  it('replaces 127.0.0.1 with localhost', () => {
+    assert.strictEqual(normalizeUrl('http://127.0.0.1:4096'), 'http://localhost:4096');
+  });
+
+  it('handles 127.0.0.1 with trailing slash', () => {
+    assert.strictEqual(normalizeUrl('http://127.0.0.1:4096/'), 'http://localhost:4096');
+  });
+
+  it('normalizes 127.0.0.1 with port only (matches :pattern)', () => {
+    assert.strictEqual(normalizeUrl('http://127.0.0.1:8080'), 'http://localhost:8080');
+  });
+
+  it('preserves already normalized URL', () => {
+    assert.strictEqual(normalizeUrl('http://localhost:4096'), 'http://localhost:4096');
+  });
+
+  it('handles non-http URLs unchanged', () => {
+    assert.strictEqual(normalizeUrl('https://example.com/api/'), 'https://example.com/api');
+  });
+
+  it('returns null/undefined unchanged', () => {
+    assert.strictEqual(normalizeUrl(null), null);
+    assert.strictEqual(normalizeUrl(undefined), undefined);
   });
 });

@@ -2563,4 +2563,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { processTelegramCommands, parseTelegramLine, getHelpText };
+module.exports = { processTelegramCommands, parseTelegramLine, getHelpText, normalizeUrl };
