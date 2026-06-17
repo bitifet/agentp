@@ -4,19 +4,32 @@ I've always felt out of step with the prevailing trends.
 
 Before the AI explosion, the mantra was "ship fast" — the Minimum Viable Product. If you weren't first, you were nobody. Quality, testing, documentation? Nice-to-haves. I could never stomach shipping "human slop" just to be first.
 
-Now we're in the AI era, and suddenly everyone is alarmed about "AI slop." And I find myself out of step again — because from where I stand, the AI helps me produce the opposite. My documentation is better. I write more tests than I could have imagined before. The code is cleaner. Even the worst AI-generated test is harmless: the most it can do is be useless. Unlike buggy production code rushed out to win a race, it won't break anything.
+Now we're in the AI era, and suddenly everyone is alarmed about "AI slop." And I find myself out of step again — because from where I stand, the AI helps me produce the opposite.
 
-The same goes for tooling. Every few years — sometimes months — a new IDE becomes the baseline, and if you haven't switched you're suddenly irrelevant. I use Neovim and tmux. Not because they're trendy, but because I spent years evolving a workflow that works across physical terminals, remote servers, and whatever machine I happen to be sitting at. I'm not about to throw that away for a shinier editor.
+Just as an example, I have a personal side project called *[SmarkForm](https://smarkform.bitifet.net)* and very little time to invest in it (but I keep pushing). Before AI it had a few "not-to-break-again" tests and a bare "just-the-docs" Jekyll site on GitHub Pages with often outdated code snippets and only a separate *Examples* section (which [still exists](https://smarkform.bitifet.net/resources/examples)) as the sole real demo.
 
-That's the mindset behind **agentp**. I started building these tools for my own daily workflow — not to ship a product, but to solve real friction I was feeling every day. OpenCode is great, but its TUI locks you in. I wanted to:
+Nowadays almost every code snippet in the documentation is a working example of a *SmarkForm-powered* form whose source code can be edited in place. The test suite has been fully migrated to Playwright, covering up to 5 platforms and including a suite of co-located tests that ensure every example in the documentation keeps working. Moreover, the most recent inline examples are AI-authored (in Copilot's words: "SmarkForm's clean, declarative API makes it a natural fit for AI-assisted development"). The last "AI-free" bastion in the repository was the actual source code of the library, but nowadays I use AI there too — just with a more thorough review and a test-first approach.
 
-- Pipe a prompt straight from Vim and replace my selection with the answer.
-- Talk to my projects from Telegram while away from the keyboard.
-- Queue messages while a server is busy and get threaded replies.
-- Keep a permanent server per project in tmux and switch between them.
-- Record a Telegram conversation and inject it as context into the next prompt.
+Put simply: my documentation is better. I write more tests than I could have imagined before. The code is cleaner. Even the worst AI-generated test is harmless: the most it can do is be useless. Unlike buggy production code rushed out to win a race, it won't break anything — an occasional garbage-collection pass is all you need.
 
-agentp grew from there — piece by piece, idea by idea — into a set of three zero-dependency Node.js CLI tools. It's heavily AI-assisted, including the tests. I review every stage before shipping, but the real test is using it every day. Bugs happen; I value a working feature more than a flawless one.
+The same goes for tooling. Every few years — sometimes months — a new IDE becomes the baseline, and if you haven't switched you're suddenly irrelevant. I use Neovim and tmux. Not because they're trendy, but because I spent years evolving a workflow that works across physical terminals, remote servers, and whatever machine I happen to be sitting at. And, more importantly, it lets me focus on what I'm doing rather than how to do it. I'm not about to throw that away for a shinier editor.
+
+That's the mindset behind the *agentp trio*. It started with just **agentp**, a simple CLI tool that pipes a prompt to an OpenCode server and returns the final answer while you see what's going on in a spare monitor (when you have it). Then came **ocmux**, a project manager that manages a tmux session labeled as "Opencode" and keeps a dedicated OpenCode server and TUI for each project in a separate window. Finally, **tgagentp** is a Telegram bot that lets me talk to my projects (and even send and receive files) while away from the keyboard — and so much more.
+
+Agentp grew from there — piece by piece, idea by idea — into a set of three zero-dependency Node.js CLI tools. It's heavily AI-assisted, including the tests. I review every stage before shipping, but the real test is using it every day. Bugs happen; I value a working feature more than a flawless one.
+
+> In summary, now I can:
+> 
+> - Pipe a prompt straight from Vim and replace my selection with the answer.
+> - See what's going on in an Opencode TUI that automatically switches to the right project.
+> - Get notified in Telegram when the answer is ready.
+> - Talk to my projects from Telegram while away from the keyboard.
+> - Handle multiple projects and servers simultaneously from a Telegram group with topics.
+> - Queue messages while a server is busy and get threaded replies.
+> - Leave private comments and notes for the ML awareness in my telegram conversation.
+> - Send files to the agent and ask the agent to send files to me through Telegram.
+> - Record a Telegram conversation and inject it as context into the next prompt.
+> - Threaded replies, permission request handling, and more...
 
 ---
 
@@ -24,7 +37,13 @@ agentp grew from there — piece by piece, idea by idea — into a set of three 
 
 ### `agentp` — The Pipe
 
-Stdin in, answer out. That's the core loop.
+> Stdin in, answer out. That's the core loop.
+
+When you get used to writing text in Vim, all other text input methods feel clunky — and OpenCode TUI's editor [is no exception](https://github.com/anomalyco/opencode/issues/9836). Its `/editor` command lets you edit prompts in an external editor, but the whole TUI screen blanks out during the edit, which means a complete loss of context.
+
+My solution: I open the OpenCode TUI in a dedicated tmux session that I can maximize on a spare vertical monitor or just switch back and forth when working from a laptop. Then I write my prompts directly in Vim, visually select them, and send them to OpenCode by *filtering* them through `agentp`. I can either ask for a code snippet and get the answer in place, or use the `--qa` modifier to keep my prompt together with the answer. The latter lets me maintain a kind of logbook of prompts and answers so I can go back to review, copy chunks of code (or former prompts), etc.
+
+**Basic usage:**
 
 ```bash
 printf "Summarize this file" | agentp
@@ -39,17 +58,38 @@ agentp --getLast 5
 agentp --getLast 3 --qa    # full QA pairs with rulers
 ```
 
-From Vim/Neovim:
+**Real magic from Vim/Neovim:**
 
 ```vim
 :'<,'>!agentp --qa
 ```
 
-This replaces your visual selection with the answer. `--qa` preserves the prompt + answer with labels, so you keep the full context.
+This replaces your visual selection with the answer. The optional `--qa` modifier preserves the prompt + answer with labels, so you keep the full context.
+
+> 🚀 **Spoiler:**
+> 
+> Passing the output of `ocmux` (without arguments) ensures the prompt goes to the right server and automatically switches the TUI in your spare monitor (or wherever) to the right project, instantly.
+> ```vim
+> :'<,'>!agentp --qa $(ocmux)
+> ```
+
 
 ### `ocmux` — The Project Manager
 
-Each project gets its own tmux window with a dedicated `opencode serve` + TUI pane. Auto-restarts dead panes, pins window names, stores state in `.ocmux.json` (discovered upward like `.git`).
+> Each project gets its own tmux window with a dedicated `opencode serve` + TUI pane. Auto-restarts dead panes, pins window names, stores state in `.ocmux.json` (discovered upward like `.git`).
+
+Having the OpenCode TUI aside while you send work to it and receive answers in place is great. But what if you want to switch to another project while the agent is processing?
+
+- Open another OpenCode Server + TUI in a new tmux window.
+- Remember the port of each server.
+- Manually switch to the right TUI pane and zoom it.
+- Pass the correct port to `agentp` every time you call it from a different directory…
+
+None of this is a big deal on its own. But by the time you finish working on the second project, the first one has probably finished — and you'd want to switch back.
+
+*Ocmux* handles all of that. With no arguments, it switches the tmux session to the window for the current project (based on the working directory) and prints the server URL.
+
+Combine it with `agentp` as `agentp $(ocmux)` or `agentp --qa $(ocmux)` and you not only send the prompt to the right server and get the answer back — at the same time, OpenCode automatically switches to the right TUI window for that project. It feels like magic when you're juggling multiple projects.
 
 ```bash
 ocmux serve ~/projects/myapp        # create (new window)
@@ -70,7 +110,11 @@ When an opencode server crashes, `ocmux resurrect` reads `.ocmux.json`, kills th
 
 ### `tgagentp` — The Telegram Bridge
 
-A Telegram bot that routes messages to your OpenCode servers. Multi-chat, multi-server, slash-commands for everything.
+> A Telegram bot that routes messages to your OpenCode servers. Multi-chat, multi-server, slash-commands for everything.
+
+Ever wanted to work on a project while away from the keyboard? Writing notes is fine, but you get no feedback — you can't see or explore the project environment. What if you could send a prompt to an agent handling your project and get the answer back in Telegram? Queue messages while the server is busy and get threaded replies? Send files to the agent, or — even better — ask the agent to send files to you?
+
+That's *tgagentp*. And way more: handle multiple servers simultaneously (with a Telegram group using topics), "record" your messages so the next `agentp --qa` prepends the conversation as context… And vice versa: get prompts and responses from `agentp --qa` delivered to Telegram so you can follow the conversation from anywhere — or just go grab a coffee and get notified when the agent finishes.
 
 ```bash
 tgagentp                                  # default port 4096
@@ -112,7 +156,7 @@ Permission prompts from OpenCode (tool access requests) are forwarded automatica
 
 When the AI asks a structured question (e.g., tool configuration), tgagentp forwards it as a numbered multiple-choice poll — respond with `/answer <number>`. If the command produces a quick answer, it arrives immediately; otherwise a confirmation (`✅ /init submitted.`) is sent.
 
-**File sharing:** Upload files and photos to Telegram, and they're saved to `telegram-shared/uploads/` in the project directory — automatically created with a `.gitignore`. The agent is notified when idle. Download files back by replying to a file message or by having the agent write to `telegram-shared/downloads/` — tgagentp sends them via `sendDocument` and cleans up after.
+**File sharing:** Ask the agent to send you a file and it will know how. Send a file to the chat and the agent will be notified and can download it on demand.
 
 **`!!` wildcard:** Use `!!` in any command to reference the previous user message. For example, `/queue !!` queues your last message, `/note !!` sends it as a note.
 
@@ -120,25 +164,17 @@ When the AI asks a structured question (e.g., tool configuration), tgagentp forw
 
 ### `agentp` and `ocmux` together
 
-- `agentp` defaults to http://localhost:4096 (the opencode default). But it accepts a port or a full URL as a parameter.
-
-- `ocmux` with no arguments switches the Opencode tmux session to the window of the current project (based on current directory) and prints the server URL.
-
-- Both combined let you talk to the right OpenCode server without bothering with ports or URLs. Just `agentp $(ocmux)` or `agentp --qa $(ocmux)` if you want to get the full QA pair with rulers and you are done.
-
-
-Now we can auto-switch to the right OpenCode server every time we use it no matter where we are in the filesystem, and even from Vim:
+Combine both tools and you never need to think about ports or URLs again. `agentp $(ocmux)` sends your prompt to the right server for the current project AND switches the TUI to show that project — all in one command. From Vim:
 
 ```vim
 :'<,'>!agentp --qa $(ocmux)
 ```
 
-> **Note:** You may think you can just run `ocmux` and pass the URL as a
-> literal to `agentp`: Anyway the command will be recorded in your vim's
-> command history.
-> 
-> But calling `ocmux` every time **it automatically switches the right TUI
-> instance in the "Opencode" tmux session!!**.
+> **Note:** You may think you can just run `ocmux` once and pass the URL as a
+> literal to `agentp` — the command is recorded in your Vim command history, after all.
+>
+> But calling `ocmux` every time also **automatically switches the TUI to the
+> right project in the "Opencode" tmux session.** That's the real value.
 
 ---
 
