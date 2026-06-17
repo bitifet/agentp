@@ -23,12 +23,12 @@ Agentp grew from there — piece by piece, idea by idea — into a set of three 
 > - Pipe a prompt straight from Vim and replace my selection with the answer.
 > - See what's going on in an Opencode TUI that automatically switches to the right project.
 > - Get notified in Telegram when the answer is ready.
-> - Talk to my projects from Telegram while away from the keyboard.
+> - Talk to the agent in charge of my project from Telegram while away from the keyboard.
 > - Handle multiple projects and servers simultaneously from a Telegram group with topics.
 > - Queue messages while a server is busy and get threaded replies.
-> - Leave private comments and notes for the ML awareness in my telegram conversation.
+> - Leave private comments and public (for the agent awareness) notes in my telegram conversation.
 > - Send files to the agent and ask the agent to send files to me through Telegram.
-> - Record a Telegram conversation and inject it as context into the next prompt.
+> - Record a Telegram conversation and inject it as context into the next agentp response.
 > - Threaded replies, permission request handling, and more...
 
 ---
@@ -87,7 +87,7 @@ Having the OpenCode TUI aside while you send work to it and receive answers in p
 
 None of this is a big deal on its own. But by the time you finish working on the second project, the first one has probably finished — and you'd want to switch back.
 
-*Ocmux* handles all of that. With no arguments, it switches the tmux session to the window for the current project (based on the working directory) and prints the server URL.
+*Ocmux* handles all of that. With no arguments, it switches the Opencode tmux session to the window for the current project (based on the working directory) and prints the server URL.
 
 Combine it with `agentp` as `agentp $(ocmux)` or `agentp --qa $(ocmux)` and you not only send the prompt to the right server and get the answer back — at the same time, OpenCode automatically switches to the right TUI window for that project. It feels like magic when you're juggling multiple projects.
 
