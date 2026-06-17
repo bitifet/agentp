@@ -554,6 +554,7 @@ function sessionName(s) {
 }
 
 function normalizeUrl(url) {
+  if (!url) return url;
   return url.replace(/\/+$/, '').replace(/^http:\/\/127\.0\.0\.1:/, 'http://localhost:');
 }
 
@@ -1566,7 +1567,8 @@ const COMMANDS = {
 
 const serverState = {};
 function getState(url) {
-  return serverState[url] = serverState[url] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, _thinkingBuf: '', messageQueue: [] };
+  const key = normalizeUrl(url);
+  return serverState[key] = serverState[key] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, _thinkingBuf: '', messageQueue: [] };
 }
 
 function sessionLabel(st) {
