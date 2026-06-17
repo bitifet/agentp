@@ -598,7 +598,7 @@ async function cmdSessions(token, chatId, args, chatState, setServerForChat, set
       try {
         const session = await createSession(server, title);
         const name = session.title || session.slug || session.id;
-        setActiveSessionForChat(chatState, session.id);
+        setActiveSessionForChat(chatState, session.id, name);
         selectSession(server, session.id);
         await sendLongMessage(token, chatState,
           `Created session: \`${name}\`\nIt is now the active session.`);
@@ -650,7 +650,7 @@ async function cmdSessions(token, chatId, args, chatState, setServerForChat, set
         const num = parseInt(query, 10);
         if (/^\d+$/.test(query) && num >= 1 && num <= sorted.length) {
           const target = sorted[num - 1];
-          setActiveSessionForChat(chatState, target.id);
+          setActiveSessionForChat(chatState, target.id, sessionName(target));
           selectSession(server, target.id);
           await sendLongMessage(token, chatState,
             `Switched to session #${num}: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
@@ -1772,11 +1772,12 @@ async function main() {
     return null;
   };
 
-  const setActiveSessionForChat = (chatState, id) => {
+  const setActiveSessionForChat = (chatState, id, name) => {
     const server = chatState.serverBase;
     const prevId = getState(server).activeSessionId;
     getState(server).activeSessionId = id;
-    log.info(`[chat ${chatState.chatId}] Switched to session: ${id}`);
+    if (name) getState(server).activeSessionName = name;
+    log.info(`[chat ${chatState.chatId}] Switched to session: ${name || id}`);
     if (id !== prevId) sendGreeting(chatState);
   };
 
