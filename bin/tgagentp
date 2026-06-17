@@ -1016,8 +1016,7 @@ function getHelpText(topic) {
 async function processTelegramCommands(text, server, token, chatState) {
   if (!text) return text;
   const lines = text.split('\n');
-  const replacements = new Map(); // lineIndex → replacement text (for help)
-  const toStrip = new Set();      // lineIndex → strip (for upload/download)
+  const toStrip = new Set();
   const filesSent = [];
   const dir = serverDir(server);
 
@@ -1061,14 +1060,18 @@ async function processTelegramCommands(text, server, token, chatState) {
         log.error(`processTelegramCommands: failed to download file: ${err.message}`);
       }
     } else if (payload.command === 'help') {
+      toStrip.add(i);
       const topic = typeof payload.topic === 'string' ? payload.topic : undefined;
-      replacements.set(i, getHelpText(topic));
+      const st = getState(server);
+      if (st.activeSessionId) {
+        sendToSession(server, st.activeSessionId, getHelpText(topic)).catch(() => {});
+      }
     } else {
       toStrip.add(i); // unrecognized command — strip silently
     }
   }
 
-  if (toStrip.size === 0 && replacements.size === 0) return text;
+  if (toStrip.size === 0) return text;
 
   if (filesSent.length > 0) {
     log.info(`processTelegramCommands: processed ${filesSent.length} file(s): ${filesSent.join(', ')}`);
@@ -1076,12 +1079,7 @@ async function processTelegramCommands(text, server, token, chatState) {
 
   const out = [];
   for (let i = 0; i < lines.length; i++) {
-    if (toStrip.has(i)) continue;
-    if (replacements.has(i)) {
-      out.push(replacements.get(i));
-    } else {
-      out.push(lines[i]);
-    }
+    if (!toStrip.has(i)) out.push(lines[i]);
   }
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
@@ -1778,16 +1776,19 @@ async function main() {
   };
 
   const TELEGRAM_GREETING =
-    '[Telegram] Your responses are being relayed through a Telegram bridge.\n' +
-    'The user can talk to you from there (your messages prefixed with [Telegram]).\n\n' +
-    'Available commands:\n\n' +
-    'Upload a file to the user:\n' +
-    '  [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
-    'Download a file the user sent:\n' +
-    '  [Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
-    'Get help:\n' +
-    '  [Telegram]{"command":"help","topic":"<command>"}\n' +
-    '  [Telegram]{"command":"help"}';
+    '[Telegram] The following information is for your awareness. Reply with only "Ack" and do not take any action:\n\n' +
+    'Your responses are being relayed through a Telegram bridge. ' +
+    'The user sees your messages and can reply from there. ' +
+    'Their messages appear here prefixed with [Telegram].\n\n' +
+    'You can use these structured commands in your own response text ' +
+    '(on their own line, with no other content on that line). ' +
+    'Do NOT use CLI tools to generate them — just include them directly in your response:\n\n' +
+    'To send a file to the user:\n' +
+    '[Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    'To download a file the user sent:\n' +
+    '[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
+    'For more details about a command:\n' +
+    '[Telegram]{"command":"help","topic":"<upload|download|help>"}';
 
   async function sendGreeting(chatState) {
     const st = getState(chatState.serverBase);
