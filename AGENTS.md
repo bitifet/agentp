@@ -61,9 +61,15 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 ## File sharing (tgagentp)
 
-Upload: Telegram file/photo → saved to `<project>/telegram-shared/uploads/` with timestamp prefix + sanitized name. Auto-creates `telegram-shared/{uploads,downloads}/` and appends `telegram-shared/` to `.gitignore` on first upload. Notification sent to agent (respects busy/idle queue).
+tgagentp detects `[Telegram]{...}` structured messages on their own line in agent responses and processes them before forwarding the response to the user.
 
-Download: Agent writes file to `telegram-shared/downloads/` and includes `[Telegram]{"command":"upload","path":"<file>","msg":"<caption>"}` on its own line in the response text. tgagentp detects `[Telegram]{...}` lines in answers (before sending to Telegram), processes the command, and strips the line from the visible response. Paths are resolved relative to the project root and MUST be within `telegram-shared/` — tgagentp rejects paths outside this boundary. Files under `telegram-shared/downloads/` are cleaned up after successful send. No HTTP endpoint needed — it works through the normal response stream and also through the agentp gateway (`--tg`).
+**Upload (agent → Telegram):** Agent includes `[Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}` in its response. tgagentp reads the file from the project directory, sends it via `sendDocument`, and strips the line from the visible response. Paths are project-relative and must stay within the project root.
+
+**Download (Telegram → agent):** When the user uploads a file or replies to a file message, tgagentp notifies the agent with the file ID and name. The agent can then request the file with `[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}`. tgagentp downloads the file and saves it to the specified project-relative path.
+
+**Help:** Agent sends `[Telegram]{"command":"help","topic":"<upload|download|help>"}` — tgagentp replaces the line with the help text. Omitting `"topic"` returns general help.
+
+**Auto-greeting:** tgagentp automatically sends an awareness note to the session when the chat connects to a server or switches sessions, explaining the available commands.
 
 ## Key integration patterns
 

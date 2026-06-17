@@ -3,7 +3,7 @@
 const { describe, it } = require('node:test');
 const assert = require('node:assert');
 
-const { parseTelegramLine, extractTelegramCommands } = require('../bin/tgagentp');
+const { parseTelegramLine, getHelpText } = require('../bin/tgagentp');
 
 describe('parseTelegramLine', () => {
   it('parses a valid [Telegram] JSON line', () => {
@@ -11,9 +11,14 @@ describe('parseTelegramLine', () => {
     assert.deepStrictEqual(result, { command: 'upload', path: 'file.txt' });
   });
 
-  it('parses with msg field', () => {
-    const result = parseTelegramLine('[Telegram]{"command":"upload","path":"f.txt","msg":"here"}');
-    assert.deepStrictEqual(result, { command: 'upload', path: 'f.txt', msg: 'here' });
+  it('parses with all fields', () => {
+    const result = parseTelegramLine('[Telegram]{"command":"download","fileId":"abc","path":"f.txt"}');
+    assert.deepStrictEqual(result, { command: 'download', fileId: 'abc', path: 'f.txt' });
+  });
+
+  it('parses help command', () => {
+    const result = parseTelegramLine('[Telegram]{"command":"help"}');
+    assert.deepStrictEqual(result, { command: 'help' });
   });
 
   it('handles trailing whitespace', () => {
@@ -40,47 +45,43 @@ describe('parseTelegramLine', () => {
     assert.strictEqual(parseTelegramLine(''), null);
     assert.strictEqual(parseTelegramLine('[Telegram]'), null);
   });
+
+  it('parses msg field in upload', () => {
+    const result = parseTelegramLine('[Telegram]{"command":"upload","path":"f.txt","msg":"here it is"}');
+    assert.deepStrictEqual(result, { command: 'upload', path: 'f.txt', msg: 'here it is' });
+  });
 });
 
-describe('extractTelegramCommands', () => {
-  it('returns null when no [Telegram] lines present', () => {
-    assert.strictEqual(extractTelegramCommands('hello\nworld'), null);
+describe('getHelpText', () => {
+  it('returns general help for no topic', () => {
+    const text = getHelpText();
+    assert.ok(text.includes('upload'));
+    assert.ok(text.includes('download'));
+    assert.ok(text.includes('help'));
   });
 
-  it('extracts single payload and strips line', () => {
-    const { payloads, text } = extractTelegramCommands(
-      'hello\n[Telegram]{"command":"upload","path":"f.txt"}\nworld'
-    );
-    assert.strictEqual(payloads.length, 1);
-    assert.deepStrictEqual(payloads[0], { command: 'upload', path: 'f.txt' });
-    assert.strictEqual(text, 'hello\nworld');
+  it('returns upload help', () => {
+    const text = getHelpText('upload');
+    assert.ok(text.includes('upload'));
+    assert.ok(text.includes('path'));
+    assert.ok(text.includes('msg'));
   });
 
-  it('extracts multiple payloads', () => {
-    const { payloads, text } = extractTelegramCommands(
-      '[Telegram]{"command":"a"}\nsome text\n[Telegram]{"command":"b"}'
-    );
-    assert.strictEqual(payloads.length, 2);
-    assert.strictEqual(payloads[0].command, 'a');
-    assert.strictEqual(payloads[1].command, 'b');
-    assert.strictEqual(text, 'some text');
+  it('returns download help', () => {
+    const text = getHelpText('download');
+    assert.ok(text.includes('download'));
+    assert.ok(text.includes('fileId'));
+    assert.ok(text.includes('path'));
   });
 
-  it('handles payload with unknown command', () => {
-    const { payloads, text } = extractTelegramCommands(
-      'hello\n[Telegram]{"command":"future-feature","data":42}\nworld'
-    );
-    assert.strictEqual(payloads.length, 1);
-    assert.deepStrictEqual(payloads[0], { command: 'future-feature', data: 42 });
-    assert.strictEqual(text, 'hello\nworld');
+  it('returns help help', () => {
+    const text = getHelpText('help');
+    assert.ok(text.includes('help'));
+    assert.ok(text.includes('topic'));
   });
 
-  it('skips lines with other text before [Telegram]', () => {
-    const { payloads, text } = extractTelegramCommands(
-      'prefix [Telegram]{"command":"x"}\n[Telegram]{"command":"y"}'
-    );
-    assert.strictEqual(payloads.length, 1);
-    assert.strictEqual(payloads[0].command, 'y');
-    assert.ok(text.includes('prefix [Telegram]{"command":"x"}'));
+  it('falls back to general help for unknown topic', () => {
+    const text = getHelpText('unknown');
+    assert.ok(text.includes('Available commands'));
   });
 });

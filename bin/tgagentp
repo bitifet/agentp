@@ -179,7 +179,7 @@ function parseAllowlist(raw) {
 // Returns empty string if the message isn't a reply or has no text.
 // Uses a dynamic code-fence length (max consecutive backticks + 1)
 // so nested backticks never break the structure.
-const { ensureSharedDir, saveUploadedFile, formatFileSize } = require('../lib/file-share.js');
+const { formatFileSize } = require('../lib/file-share.js');
 
 function quoteReply(msg) {
   const rm = msg.reply_to_message;
@@ -202,7 +202,7 @@ function quoteReply(msg) {
 // ---------------------------------------------------------------------------
 
 // Handle an uploaded file from Telegram.
-// Downloads the file, saves it, and returns a notification message.
+// Returns a notification message with fileId so the agent can download it on demand.
 async function handleFileUpload(token, msg, projectDir) {
   const doc = msg.document;
   const photo = msg.photo;
@@ -217,18 +217,15 @@ async function handleFileUpload(token, msg, projectDir) {
     fileName = doc.file_name || 'upload.bin';
     fileSize = doc.file_size || 0;
   } else if (photo) {
-    // Use the largest photo
     const largest = photo[photo.length - 1];
     fileId = largest.file_id;
     fileName = 'photo.jpg';
     fileSize = largest.file_size || 0;
   }
 
-  const fileData = await downloadTelegramFile(token, fileId);
-  ensureSharedDir(projectDir);
-  const relativePath = saveUploadedFile(projectDir, fileName, fileData);
   const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
-  return `📎 File uploaded: \`${relativePath}\`${sizeStr}`;
+  return `📎 File uploaded: \`${fileName}\`${sizeStr}\n` +
+    `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -942,7 +939,7 @@ function handleSendRequest(req, res, token, serverBaseResolver) {
       const activeUrl = normalizeUrl(serverBaseResolver());
 
       if (targetUrl === activeUrl) {
-        processUploadCommands(text, server, token, owningChatId).then((cleaned) => {
+        processTelegramCommands(text, server, token, owningChatId).then((cleaned) => {
           if (cleaned) sendLongMessage(token, owningChatId, cleaned).catch(() => {});
         });
       } else {
@@ -970,9 +967,14 @@ function handleSendRequest(req, res, token, serverBaseResolver) {
 }
 
 // Scan response text for [Telegram]{...} structured messages, process them,
-// and return the text with those lines removed.
-// Supported commands: "upload" — sends a file to the Telegram chat.
-// Format: [Telegram]{"command":"upload","path":"<file>","msg":"<caption>"}
+// and return the text with those lines removed (or replaced, for help commands).
+// Supported commands:
+//   "upload"  — send a file to the Telegram chat.
+//               Format: [Telegram]{"command":"upload","path":"<rel-path>","msg":"<caption>"}
+//   "download" — save a Telegram file to the project directory.
+//                Format: [Telegram]{"command":"download","fileId":"<id>","path":"<rel-path>"}
+//   "help"    — get help about available commands.
+//               Format: [Telegram]{"command":"help","topic":"<upload|download|help>"}
 // The [Telegram]{...} must be the only content on its line.
 
 // Parse a single [Telegram]{...} line. Returns { payload } or null.
@@ -985,42 +987,54 @@ function parseTelegramLine(line) {
   return payload;
 }
 
-// Extract all [Telegram]{...} payloads from a text and return the text with those lines removed.
-// Returns { payloads, text } or null if no [Telegram] lines found.
-function extractTelegramCommands(text) {
-  const lines = text.split('\n');
-  const payloads = [];
-  const kept = [];
-  for (const line of lines) {
-    const payload = parseTelegramLine(line);
-    if (payload) {
-      payloads.push(payload);
-    } else {
-      kept.push(line);
-    }
-  }
-  if (payloads.length === 0) return null;
-  return { payloads, text: kept.join('\n').trim() };
+const TELEGRAM_COMMANDS_HELP = {
+  all: 'Available commands:\n\n' +
+    '• upload — send a file to Telegram.\n' +
+    '  [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    '• download — save a file from Telegram to the project.\n' +
+    '  [Telegram]{"command":"download","fileId":"<telegram-file-id>","path":"<relative-destination>"}\n\n' +
+    '• help — show this help or details for a specific command.\n' +
+    '  [Telegram]{"command":"help","topic":"<command>"}',
+  upload: 'Upload a file to the Telegram chat.\n\n' +
+    'Format: [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    '- path: file path relative to the project root (required)\n' +
+    '- msg:  optional caption sent with the file',
+  download: 'Download a file the user uploaded to Telegram.\n\n' +
+    'Format: [Telegram]{"command":"download","fileId":"<telegram-file-id>","path":"<relative-destination>"}\n\n' +
+    '- fileId: the Telegram file identifier (provided when the user uploads a file)\n' +
+    '- path:   destination path relative to the project root (required)',
+  help: 'Get help about Telegram commands.\n\n' +
+    'Format: [Telegram]{"command":"help","topic":"<command>"}\n\n' +
+    '- topic: one of "upload", "download", "help". Omit for general help.',
+};
+
+function getHelpText(topic) {
+  if (topic && TELEGRAM_COMMANDS_HELP[topic]) return TELEGRAM_COMMANDS_HELP[topic];
+  return TELEGRAM_COMMANDS_HELP.all;
 }
 
-async function processUploadCommands(text, server, token, chatState) {
+async function processTelegramCommands(text, server, token, chatState) {
   if (!text) return text;
-  const extracted = extractTelegramCommands(text);
-  if (!extracted) return text;
+  const lines = text.split('\n');
+  const replacements = new Map(); // lineIndex → replacement text (for help)
+  const toStrip = new Set();      // lineIndex → strip (for upload/download)
   const filesSent = [];
   const dir = serverDir(server);
-  const sharedDir = dir ? path.join(dir, 'telegram-shared') : null;
-  for (const payload of extracted.payloads) {
+
+  for (let i = 0; i < lines.length; i++) {
+    const payload = parseTelegramLine(lines[i]);
+    if (!payload) continue;
+
     if (payload.command === 'upload' && payload.path) {
+      toStrip.add(i);
       const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
-      // Enforce containment: only allow files within telegram-shared/
-      if (sharedDir && !resolved.startsWith(sharedDir + path.sep)) {
-        log.error(`processUploadCommands: path outside telegram-shared/ rejected: ${payload.path}`);
+      if (dir && !resolved.startsWith(dir + path.sep)) {
+        log.error(`processTelegramCommands: path outside project rejected: ${payload.path}`);
         continue;
       }
       try {
         if (!fs.existsSync(resolved)) {
-          log.error(`processUploadCommands: file not found: ${resolved}`);
+          log.error(`processTelegramCommands: file not found: ${resolved}`);
           continue;
         }
         const fileData = fs.readFileSync(resolved);
@@ -1028,20 +1042,46 @@ async function processUploadCommands(text, server, token, chatState) {
         const caption = typeof payload.msg === 'string' ? payload.msg : undefined;
         await sendTelegramDocument(token, chatState, fileData, fileName, caption);
         filesSent.push(fileName);
-        // Clean up only files under telegram-shared/downloads/
-        const downloadsDir = path.join(sharedDir, 'downloads');
-        if (resolved.startsWith(downloadsDir + path.sep)) {
-          try { fs.unlinkSync(resolved); } catch (_) {}
-        }
       } catch (err) {
-        log.error(`processUploadCommands: failed to send file ${resolved}: ${err.message}`);
+        log.error(`processTelegramCommands: failed to send file ${resolved}: ${err.message}`);
       }
+    } else if (payload.command === 'download' && payload.fileId && payload.path) {
+      toStrip.add(i);
+      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
+      if (dir && !resolved.startsWith(dir + path.sep)) {
+        log.error(`processTelegramCommands: download path outside project rejected: ${payload.path}`);
+        continue;
+      }
+      try {
+        const fileData = await downloadTelegramFile(token, payload.fileId);
+        fs.mkdirSync(path.dirname(resolved), { recursive: true });
+        fs.writeFileSync(resolved, fileData);
+        filesSent.push(path.basename(resolved));
+      } catch (err) {
+        log.error(`processTelegramCommands: failed to download file: ${err.message}`);
+      }
+    } else if (payload.command === 'help') {
+      const topic = typeof payload.topic === 'string' ? payload.topic : undefined;
+      replacements.set(i, getHelpText(topic));
     }
   }
+
+  if (toStrip.size === 0 && replacements.size === 0) return text;
+
   if (filesSent.length > 0) {
-    log.info(`processUploadCommands: sent ${filesSent.length} file(s): ${filesSent.join(', ')}`);
+    log.info(`processTelegramCommands: processed ${filesSent.length} file(s): ${filesSent.join(', ')}`);
   }
-  return extracted.text || '';
+
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (toStrip.has(i)) continue;
+    if (replacements.has(i)) {
+      out.push(replacements.get(i));
+    } else {
+      out.push(lines[i]);
+    }
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 async function cmdAllow(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
@@ -1688,6 +1728,11 @@ async function main() {
     serverOwners[url] = { chatId: cs.chatId, threadId: cs.threadId };
     getState(url);
 
+    // Send Telegram bridge awareness note to the new session
+    if (getState(url).activeSessionId) {
+      sendGreeting(cs).catch(() => {});
+    }
+
     // Auto-activate tmux window for this server
     const servers = listServers();
     const normalized = normalizeUrl(url);
@@ -1726,9 +1771,32 @@ async function main() {
 
   const setActiveSessionForChat = (chatState, id) => {
     const server = chatState.serverBase;
+    const prevId = getState(server).activeSessionId;
     getState(server).activeSessionId = id;
     log.info(`[chat ${chatState.chatId}] Switched to session: ${id}`);
+    if (id !== prevId) sendGreeting(chatState);
   };
+
+  const TELEGRAM_GREETING =
+    '[Informational] Your responses are being relayed through Telegram.\n' +
+    'The user can talk to you from there (you\'ll see their messages prefixed with [Telegram]).\n\n' +
+    'You can send and receive files using these structured commands:\n\n' +
+    'To send a file to the user:\n' +
+    '  [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    'To download a file the user sent:\n' +
+    '  [Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
+    'For details: [Telegram]{"command":"help","topic":"<command>"}\n' +
+    'For general help: [Telegram]{"command":"help"}';
+
+  async function sendGreeting(chatState) {
+    const st = getState(chatState.serverBase);
+    if (!st.activeSessionId) return;
+    try {
+      await sendToSession(chatState.serverBase, st.activeSessionId, TELEGRAM_GREETING);
+    } catch (err) {
+      log.debug(`sendGreeting error: ${err.message}`);
+    }
+  }
 
   // Start agentp gateway (tiny HTTP server for agentp --tg)
   const serverBaseResolver = () => {
@@ -1841,7 +1909,7 @@ async function main() {
       if (url === chatServer) {
         if (answer && answer.trim()) {
           const trimmed = answer.trim();
-          const cleaned = await processUploadCommands(trimmed, url, token, chatState);
+          const cleaned = await processTelegramCommands(trimmed, url, token, chatState);
           msgLog('out', chatId, '', cleaned);
           if (cleaned) {
             await sendLongMessage(token, chatState, cleaned, replyTo, threadId);
@@ -2225,21 +2293,6 @@ async function main() {
         }
         try {
           const notification = await handleFileUpload(token, msg, projectDir);
-          // Verify the file is actually on disk before notifying
-          const relativePath = notification.match(/`([^`]+)`/)?.[1];
-          if (relativePath) {
-            const fullPath = path.join(projectDir, relativePath);
-            let retries = 5;
-            while (!fs.existsSync(fullPath) && retries > 0) {
-              await new Promise(r => setTimeout(r, 100));
-              retries--;
-            }
-            if (!fs.existsSync(fullPath)) {
-              log.error(`File not found after upload: ${fullPath}`);
-              await sendLongMessage(token, cs, `❌ File upload failed: file not saved to disk.`);
-              continue;
-            }
-          }
           const userText = msg.caption || msg.text || '';
           const fullMessage = notification + (userText ? '\n\nUser message: ' + userText : '');
           log.debug(`[chat ${chatId}] ${from}: [file upload]`);
@@ -2340,11 +2393,10 @@ async function main() {
                 fileName = 'photo.jpg';
                 fileSize = largest.file_size || 0;
               }
-              const fileData = await downloadTelegramFile(token, fileId);
-              ensureSharedDir(projectDir);
-              const relativePath = saveUploadedFile(projectDir, fileName, fileData);
               const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
-              await sendLongMessage(token, cs, `📎 File downloaded: \`${relativePath}\`${sizeStr}`);
+              await sendLongMessage(token, cs,
+                `📎 File available: \`${fileName}\`${sizeStr}\n` +
+                `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`);
             } catch (err) {
               log.error(`Download on reply error: ${err.message}`);
               await sendLongMessage(token, cs, `❌ File download failed: ${err.message}`);
@@ -2382,7 +2434,7 @@ async function main() {
         try {
           const answer = await executeTuiCommand(paneId, cs.serverBase, tuiCmd);
           if (answer && answer.trim()) {
-            const cleaned = await processUploadCommands(answer.trim(), cs.serverBase, token, cs);
+            const cleaned = await processTelegramCommands(answer.trim(), cs.serverBase, token, cs);
             if (cleaned) {
               await sendLongMessage(token, cs, cleaned);
             } else {
@@ -2498,4 +2550,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { processUploadCommands, parseTelegramLine, extractTelegramCommands };
+module.exports = { processTelegramCommands, parseTelegramLine, getHelpText };
