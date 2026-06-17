@@ -1780,9 +1780,10 @@ async function main() {
     if (id !== prevId) sendGreeting(chatState);
   };
 
-  const TELEGRAM_GREETING =
+  const TELEGRAM_GREETING_BODY = (sessionName) =>
     '[Telegram] The following information is for your awareness. Reply with only "Ack" and do not take any action:\n\n' +
-    'Your responses are being relayed through a Telegram bridge. ' +
+    'Your responses are being relayed through a Telegram bridge ' +
+    '(current session: ' + sessionName + ').\n' +
     'The user sees your messages and can reply from there. ' +
     'Their messages appear here prefixed with [Telegram].\n\n' +
     'You can use these structured commands in your own response text ' +
@@ -1800,12 +1801,13 @@ async function main() {
     if (!st.activeSessionId) {
       try {
         const discovered = await discoverActiveSession(chatState.serverBase);
-        if (discovered) st.activeSessionId = discovered.id;
+        if (discovered) { st.activeSessionId = discovered.id; st.activeSessionName = discovered.name; }
       } catch {}
     }
     if (!st.activeSessionId) return;
+    const greeting = TELEGRAM_GREETING_BODY(st.activeSessionName || st.activeSessionId);
     try {
-      await sendToSession(chatState.serverBase, st.activeSessionId, TELEGRAM_GREETING);
+      await sendToSession(chatState.serverBase, st.activeSessionId, greeting);
     } catch (err) {
       log.debug(`sendGreeting error: ${err.message}`);
     }
@@ -2407,9 +2409,15 @@ async function main() {
                 fileSize = largest.file_size || 0;
               }
               const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
-              await sendLongMessage(token, cs,
-                `📎 File available: \`${fileName}\`${sizeStr}\n` +
-                `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`);
+              const notification = `📎 File available: \`${fileName}\`${sizeStr}\n` +
+                `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`;
+              await sendLongMessage(token, cs, notification);
+              // Also send the notification to the agent's session so it knows the fileId
+              const st = getState(cs.serverBase);
+              if (st.activeSessionId) {
+                sendToSession(cs.serverBase, st.activeSessionId,
+                  '[Telegram] ' + notification).catch(() => {});
+              }
             } catch (err) {
               log.error(`Download on reply error: ${err.message}`);
               await sendLongMessage(token, cs, `❌ File download failed: ${err.message}`);
