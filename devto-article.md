@@ -140,7 +140,7 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/reject` | Deny a tool permission |
 | `/always` | Approve a permission and remember the choice |
 | `/answer <number>` | Respond to a structured question from the AI |
-| `/markdown [n]` | Send original markdown response as a `.md` file (reply to get that specific one) |
+| `/markdown` | Send original markdown response as `.md` file (reply to get that specific one) |
 | `//<command>` | Send a raw TUI command (e.g., `//init`, `//clear`) — answer or confirmation forwarded |
 | `/queue <msg>` | Queue message when busy — auto-sent after current task finishes (replies chain!) |
 | `/record` | Record / pause / retrofill conversation for `agentp` context |

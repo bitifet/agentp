@@ -431,9 +431,8 @@ async function cmdHelp(token, chatId, args, chatState) {
     }
     if (topic === 'markdown') {
       await sendLongMessage(token, chatState,
-        '`/markdown [n]` ─ send the original markdown of a recent response as a file\n\n' +
-        'Without arguments, sends the most recent response. With a number N, sends the Nth most recent.\n\n' +
-        'Reply to any message to send the original markdown of the response that generated that message ' +
+        '`/markdown` ─ send the original markdown of the most recent response as a `.md` file\n\n' +
+        'Reply to any message and use `/markdown` to get the original markdown of the response that generated that message ' +
         '(works even if the response was split into multiple Telegram messages).');
       return;
     }
@@ -465,7 +464,7 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
     '`/disconnect` ─ disconnect this chat from its server\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
-    '`/markdown [n]` ─ send the original markdown of a recent response (most recent by default)\n' +
+    '`/markdown` ─ send the original markdown of the last response as a `.md` file\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
     (tgagentpRootValid
       ? '`/serve <path>` ─ start a server in an existing directory\n' +
@@ -1579,23 +1578,16 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
 
 async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId) {
   let entry = null;
-  const nStr = args && args.length > 0 ? args[0] : null;
   if (replyToMsgId) {
     entry = getResponseByMessageId(chatId, chatState.threadId, replyToMsgId);
     if (!entry) {
       await sendLongMessage(token, chatState, '❌ Could not find the original response for this message. It may be too old or was not sent by tgagentp.');
       return;
     }
-  } else if (nStr && /^\d+$/.test(nStr)) {
-    entry = getRecentResponse(chatId, chatState.threadId, parseInt(nStr, 10));
-    if (!entry) {
-      await sendLongMessage(token, chatState, `❌ No response at position ${nStr}. Try a smaller number or /markdown alone.`);
-      return;
-    }
   } else {
     entry = getRecentResponse(chatId, chatState.threadId, 1);
     if (!entry) {
-      await sendLongMessage(token, chatState, '❌ No recent responses available.');
+      await sendLongMessage(token, chatState, '❌ No recent responses available. Send a message to the agent first.');
       return;
     }
   }
