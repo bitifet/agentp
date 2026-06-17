@@ -162,6 +162,33 @@ function flushRecorded(chatId, threadId) {
   return msgs;
 }
 
+// Ring buffer of recent responses keyed by Telegram message ID.
+// Stored per chatId+threadId for /markdown command lookups.
+const responseHistory = {}; // convKey → [{ messageId, text }]
+
+function recordResponseMessage(chatId, threadId, messageIds, text) {
+  const key = convKey(chatId, threadId);
+  if (!responseHistory[key]) responseHistory[key] = [];
+  responseHistory[key].push({ messageIds, text });
+  if (responseHistory[key].length > 20) responseHistory[key].shift();
+}
+
+function getResponseByMessageId(chatId, threadId, messageId) {
+  const key = convKey(chatId, threadId);
+  const list = responseHistory[key] || [];
+  return list.find(e => e.messageIds.includes(messageId));
+}
+
+function getRecentResponse(chatId, threadId, index) {
+  const key = convKey(chatId, threadId);
+  const list = responseHistory[key] || [];
+  if (list.length === 0) return null;
+  // index 1 = most recent, 2 = second most recent, etc.
+  const idx = list.length - (index || 1);
+  if (idx < 0 || idx >= list.length) return null;
+  return list[idx];
+}
+
 // ---------------------------------------------------------------------------
 // Telegram Bot API helpers
 // ---------------------------------------------------------------------------
@@ -430,6 +457,7 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
     '`/disconnect` ─ disconnect this chat from its server\n' +
     '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
+    '`/markdown [n]` ─ send the original markdown of a recent response (most recent by default)\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
     (tgagentpRootValid
       ? '`/serve <path>` ─ start a server in an existing directory\n' +
@@ -1541,6 +1569,33 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
   log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
 }
 
+async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo) {
+  let entry = null;
+  const nStr = args && args.length > 0 ? args[0] : null;
+  if (replyTo) {
+    entry = getResponseByMessageId(chatId, chatState.threadId, replyTo);
+    if (!entry) {
+      await sendLongMessage(token, chatState, '❌ Could not find the original response for this message. It may be too old or was not sent by tgagentp.');
+      return;
+    }
+  } else if (nStr && /^\d+$/.test(nStr)) {
+    entry = getRecentResponse(chatId, chatState.threadId, parseInt(nStr, 10));
+    if (!entry) {
+      await sendLongMessage(token, chatState, `❌ No response at position ${nStr}. Try a smaller number or /markdown alone.`);
+      return;
+    }
+  } else {
+    entry = getRecentResponse(chatId, chatState.threadId, 1);
+    if (!entry) {
+      await sendLongMessage(token, chatState, '❌ No recent responses available.');
+      return;
+    }
+  }
+  const fileData = Buffer.from(entry.text, 'utf8');
+  const fileName = 'response-' + Date.now() + '.md';
+  await sendTelegramDocument(token, chatState, fileData, fileName, 'Original markdown response');
+}
+
 const COMMANDS = {
   'help': cmdHelp,
   'servers': cmdServers,
@@ -1562,6 +1617,7 @@ const COMMANDS = {
   'answer': cmdAnswer,
   'serve': cmdServe,
   'new': cmdNew,
+  'markdown': cmdMarkdown,
 };
 
 // --------------------------------------------------------------------------
@@ -1928,7 +1984,8 @@ async function main() {
           const cleaned = await processTelegramCommands(trimmed, url, token, chatState);
           msgLog('out', chatId, '', cleaned);
           if (cleaned) {
-            await sendLongMessage(token, chatState, cleaned, replyTo, threadId);
+            const msgIds = await sendLongMessage(token, chatState, cleaned, replyTo, threadId);
+            if (msgIds && msgIds.length > 0) recordResponseMessage(chatId, threadId, msgIds, cleaned);
             bufferMessage(chatId, threadId, 'assistant', cleaned);
           }
         }
@@ -2489,14 +2546,14 @@ async function main() {
             continue;
           }
           try {
-            await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat);
+            await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat, replyTo);
           } catch (err) {
             log.error(`Error handling /${cmd}: ${err.message}`);
             try { await sendLongMessage(token, cs, `Error: ${err.message}`); } catch (_) {}
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new, /markdown`);
         }
         continue;
       }
