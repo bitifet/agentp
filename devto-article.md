@@ -161,6 +161,8 @@ When the AI asks a structured question (e.g., tool configuration), tgagentp forw
 
 **`!!` wildcard:** Use `!!` in any command to reference the previous user message. For example, `/queue !!` queues your last message, `/note !!` sends it as a note.
 
+> **On formatting:** The agent produces Markdown, but Telegram only supports a limited subset (bold, italic, code, pre). tgagentp converts Markdown to Telegram's HTML automatically, which works great for prose, lists, and code — but complex tables, nested formatting, or raw HTML may not survive the trip. If something looks mangled, use `/markdown` to download the original response as a `.md` file and read it comfortably in any Markdown viewer or editor.
+
 ---
 
 ### `agentp` and `ocmux` together

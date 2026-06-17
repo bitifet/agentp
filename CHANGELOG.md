@@ -6,28 +6,35 @@ All notable changes to this project will be documented in this file.
 
 ### New Features
 
-- **`/markdown` command:** Send the original markdown of a recent response as a `.md` file. Reply to any message to get the markdown that generated that specific response (works even if the response was split into multiple Telegram messages). `/markdown N` sends the Nth most recent. Works entirely in-memory — no disk I/O needed.
-
-### Changed
-
-- **`sendLongMessage` now returns message IDs:** Callers can track which Telegram messages correspond to which responses (used by `/markdown`'s ring buffer).
-
-## [0.11.7] - 2026-06-17
-
-### New Features
-
-- **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOT`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server. Requires `TGAGENTP_ROOT` environment variable.
-- **`TGAGENTP_ROOT` startup validation:** tgagentp validates `TGAGENTP_ROOT` at startup; if missing or invalid, `/serve` and `/new` are gracefully disabled (no crash). `/help` shows an enablement hint when the root is not configured. `/help serve` and `/help new` show how to enable them.
-- **`/think` immediate effect:** Thinking text is now always buffered in server state (even when disabled). Toggling `/think on` during a request flushes any already-received thinking text immediately, instead of only taking effect on the next request.
-- **`[Telegram]{...}` agent protocol:** Structured commands in agent responses for file sharing and help. Replaces the old `telegram-shared/` mailbox and `POST /send-file` HTTP endpoint. Commands: `upload` (agent sends file to Telegram), `download` (agent pulls file from Telegram), `help` (agent requests documentation).
-- **Auto-greeting:** tgagentp now sends an awareness note to the session on server connect and session change, informing the agent about the available `[Telegram]{...}` commands.
+- **`[Telegram]{...}` agent protocol:** Structured commands in agent responses for file sharing and help. Replaces the old `telegram-shared/` mailbox and `POST /send-file` HTTP endpoint. Commands: `upload` (agent sends file to Telegram), `download` (agent pulls file from Telegram), `help` (agent requests documentation, response sent back to session).
+- **Auto-greeting:** tgagentp now sends an awareness note to the session on server connect and session change, informing the agent about the available `[Telegram]{...}` commands. Includes the current session name.
+- **`/markdown` command:** Send the original markdown of the most recent response as a `.md` file. Reply to any message to get the markdown that generated that specific response (works even if split into multiple Telegram messages). Entirely in-memory — no disk I/O.
 
 ### Bug Fixes
 
-- **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` broke `node:test`'s suite detection (all 24 tests reported as a single failure with `suites: 0`). Switched to `Writable` stream via `Object.defineProperty` for stdout that captures AND passes through, preserving both test output capture and test runner recognition.
 - **State key normalization:** `getState()` now normalizes URL keys (trailing slashes, `127.0.0.1` vs `localhost`), preventing session state from being silently lost when URLs differ in format.
-- **Session switch bug:** `setActiveSessionForChat` was being called with `chatId` (number) instead of `chatState` (object), causing session state to be written to a phantom numeric key.
-- **Session filter:** `/sessions` now only shows primary-agent sessions (not subagent sessions), matching what appears in the TUI.
+- **Session switch fix:** `setActiveSessionForChat` was being called with `chatId` (number) instead of `chatState` (object), causing session state to be written to a phantom numeric key.
+- **Session filtering:** `/sessions` now only shows primary-agent sessions (not subagent sessions), matching what appears in the TUI.
+- **Greeting improvements:** Help command responses now go to the session (agent sees them), not inline in the user-visible response. Greeting text clarified to prevent agents from using CLI tools to fulfill commands.
+- **Download-on-reply:** When replying to a file message, the fileId is now sent to both the user's Telegram chat and the agent's session (previously only the user saw it).
+- **Thinking buffer leak:** Post-response thinking flush now checks `thinkingEnabled`, preventing thinking messages from being sent when disabled.
+
+### Changed
+
+- **`sendLongMessage` returns message IDs:** Enables `/markdown` to look up original responses by replied-to message.
+- **No more `telegram-shared/` auto-saving:** Uploaded files are no longer auto-saved to disk; tgagentp sends fileId to the agent, which can pull files on demand via the `download` command.
+
+## [0.11.7] - 2026-06-13
+
+### New Features
+
+- **`/serve` and `/new` commands:** Remote project management via Telegram. `/serve <path>` starts a server in an existing directory under `TGAGENTP_ROOT`. `/new <path>` creates a directory, initializes git, and starts a server. Both commands auto-connect the chat to the new server.
+- **`TGAGENTP_ROOT` validation:** Validated at startup; if missing or invalid, `/serve` and `/new` are gracefully disabled (no crash). `/help` shows an enablement hint.
+- **`/think` immediate effect:** Thinking text always buffered in server state; toggling `/think on` during a request flushes any already-received thinking immediately.
+
+### Bug Fixes
+
+- **`tests/agentp.test.js` fixed:** Direct mocking of `process.stdout.write` broke `node:test`'s suite detection. Switched to `Writable` stream via `Object.defineProperty`.
 
 ## [0.11.6] - 2026-06-11
 
