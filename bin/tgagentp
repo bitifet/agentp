@@ -1904,7 +1904,7 @@ async function main() {
         }, cancelRef).catch(() => {});
         await onConnected;
         answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName, sessionCancelRef);
-        if (st._thinkingBuf) {
+        if (st.thinkingEnabled && st._thinkingBuf) {
           const html = '💭 ' + st._thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
           sendLongMessage(token, chatState, html, replyTo, threadId).catch(() => {});
           st._thinkingBuf = '';
