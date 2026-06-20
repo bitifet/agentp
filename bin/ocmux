@@ -332,7 +332,7 @@ function doNew(targetDir, longMode, printLogs) {
   try { fs.truncateSync(lf); } catch { /* may not exist yet */ }
 
   // Send the command to the interactive shell (like typing it manually)
-  const serveFlags = printLogs ? '--port 0 --print-logs' : '--port 0';
+  const serveFlags = printLogs ? '--print-logs' : '';
   tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
     `opencode serve ${serveFlags} 2>&1 | tee '${lf}'`, 'Enter']);
 
