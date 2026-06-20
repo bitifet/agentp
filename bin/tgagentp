@@ -18,7 +18,7 @@ const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
 const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
-const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId } = require('../lib/ocmux.js');
+const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId, serverStatus, listDeadServers } = require('../lib/ocmux.js');
 const { executeTuiCommand } = require('../lib/tui-cmd.js');
 const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../lib/telegram-api.js');
 const { sendLongMessage } = require('../lib/telegram-format.js');
@@ -559,14 +559,21 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
     return;
   }
 
-  // Default: list servers
+  // Default: list servers (alive + dead)
   const servers = listServers();
-  if (servers.length === 0) {
-    await sendLongMessage(token, chatState, 'No servers running.');
+  // Also find dead servers from saved connections
+  let savedData;
+  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const knownDirs = savedData && Array.isArray(savedData.connections)
+    ? savedData.connections.map(c => c.dir).filter(Boolean) : [];
+  const dead = listDeadServers(knownDirs);
+  const all = [...servers, ...dead.map(d => ({ url: d.url, dir: d.dir, index: d.windowIndex, status: 'dead' }))];
+  if (all.length === 0) {
+    await sendLongMessage(token, chatState, 'No servers found.');
     return;
   }
   const activeUrl = chatState.serverBase ? normalizeUrl(chatState.serverBase) : null;
-  const lines = servers.map(s => {
+  const lines = all.map(s => {
     const normalizedUrl = normalizeUrl(s.url);
     const isActive = activeUrl && normalizedUrl === activeUrl;
     const isOwned = Object.keys(serverOwners).some(url => normalizeUrl(url) === normalizedUrl);
@@ -575,12 +582,14 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
       bullet = '▶ ';
     } else if (isOwned) {
       bullet = ' · ';
+    } else if (s.status === 'dead') {
+      bullet = '💀 ';
     } else {
       bullet = '🔌 ';
     }
     return bullet + `${s.url} → ${s.dir} (${s.status})`;
   });
-  const prefix = chatState.serverBase ? 'Active servers:' : 'Available servers:';
+  const prefix = chatState.serverBase ? 'All servers:' : 'Available servers:';
   await sendLongMessage(token, chatState, prefix + '\n' + lines.join('\n'));
 }
 
@@ -1504,9 +1513,16 @@ async function cmdServe(token, chatId, args, chatState, setServerForChat, setAct
   }
   const sf = statefileFor(targetDir);
   if (fs.existsSync(sf)) {
-    await sendLongMessage(token, chatState,
-      `⚠️ Server already exists for \`${relPath}\`.\n` +
-      'Use `/servers switch <name>` to connect to it.');
+    const status = serverStatus(targetDir);
+    if (status && status.status === 'dead') {
+      await sendLongMessage(token, chatState,
+        `💀 A dead server exists at \`${relPath}\` (${status.url}).\n` +
+        `Use \`/resurrect ${relPath}\` to restart it.`);
+    } else {
+      await sendLongMessage(token, chatState,
+        `⚠️ Server already exists for \`${relPath}\`.\n` +
+        'Use `/servers switch <name>` to connect to it.');
+    }
     return;
   }
   await sendLongMessage(token, chatState,
