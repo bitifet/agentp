@@ -2572,8 +2572,8 @@ async function main() {
         const cmdArgs = parts.slice(1);
         const handler = cmds[cmd];
         if (handler) {
-          // Disconnected guard: only /help, /servers, /force-switch, /start, /comment, /shutdown, /serve, and /new work without a server
-          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown' && cmd !== 'serve' && cmd !== 'new') {
+          // Disconnected guard: only /help, /servers, /force-switch, /start, /comment, /shutdown, /serve, /new, and /resurrect work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'force-switch' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown' && cmd !== 'serve' && cmd !== 'new' && cmd !== 'resurrect') {
             await sendLongMessage(token, cs,
               '🔌 Not connected to any server.\n\n' +
               'Use `/servers` to see available servers and `/servers switch <name>` to connect.');
