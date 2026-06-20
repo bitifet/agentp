@@ -1363,31 +1363,49 @@ async function cmdComment(token, chatId, args, chatState) {
 }
 
 async function cmdResurrect(token, chatId, args, chatState) {
-  const url = chatState.serverBase;
-  if (!url) {
-    await sendLongMessage(token, chatState, '🔌 Not connected to any server. Nothing to resurrect.');
-    return;
-  }
-
-  let dir = serverDir(url);
-  if (!dir) {
-    // Fallback: look up directory from saved connections
-    try {
-      const savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
-      if (savedData && Array.isArray(savedData.connections)) {
-        const match = savedData.connections.find(c =>
-          String(c.chatId) === String(chatId) && (c.threadId || null) === (chatState.threadId || null)
-        );
-        if (match && match.dir) dir = match.dir;
+  let dir = null;
+  const dirArg = args && args.length > 0 ? args.join(' ') : null;
+  if (dirArg) {
+    // User specified a directory: resolve it
+    if (TGAGENTP_ROOT) {
+      const resolved = path.resolve(TGAGENTP_ROOT, dirArg);
+      if (resolved.startsWith(TGAGENTP_ROOT) && fs.existsSync(resolved)) {
+        dir = resolved;
       }
-    } catch {}
-  }
-  if (!dir) {
-    await sendLongMessage(token, chatState,
-      'Could not find the directory for this server.\n' +
-      'The tmux window may have been removed.\n' +
-      'Use `ocmux resurrect` from the terminal to recover it.');
-    return;
+    }
+    if (!dir) {
+      // Resolve against home or absolute path
+      const resolved = path.resolve(dirArg);
+      if (fs.existsSync(resolved)) dir = resolved;
+    }
+    if (!dir) {
+      await sendLongMessage(token, chatState, `❌ Directory not found: \`${dirArg}\``);
+      return;
+    }
+  } else {
+    const url = chatState.serverBase;
+    if (!url) {
+      await sendLongMessage(token, chatState, '🔌 Not connected to any server. Specify a directory or switch to a server first.');
+      return;
+    }
+    dir = serverDir(url);
+    if (!dir) {
+      try {
+        const savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+        if (savedData && Array.isArray(savedData.connections)) {
+          const match = savedData.connections.find(c =>
+            String(c.chatId) === String(chatId) && (c.threadId || null) === (chatState.threadId || null)
+          );
+          if (match && match.dir) dir = match.dir;
+        }
+      } catch {}
+    }
+    if (!dir) {
+      await sendLongMessage(token, chatState,
+        'Could not find the directory for this server.\n' +
+        'Use `ocmux resurrect` from the terminal or specify a directory: `/resurrect <path>`.');
+      return;
+    }
   }
 
   await sendLongMessage(token, chatState,
