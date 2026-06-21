@@ -22,6 +22,7 @@ const {
   logfileFor,
   URL_RE,
   resurrectServer,
+  startServer,
   getActiveServer,
 } = require('../lib/ocmux');
 
