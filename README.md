@@ -233,22 +233,9 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | Command | Action |
 |---|---|
 | `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`, `record`, `queue`) |
-| `/servers` | List all running ocmux-served projects with URL + status (✅ idle / ⏳ busy) |
+| `/servers` | List all ocmux-served projects (▶ active, 🔌 disconnected, 💀 dead) |
 | `/servers switch <name> [--force]` | Switch active server; matches by full path, basename, or substring; `--force` takes over from another chat |
-| `/serve <path>` | Start a server in an existing directory under `TGAGENTP_ROOT` |
-| `/new <path>` | Create a directory, init git, and start a server under `TGAGENTP_ROOT` |
-| `/sessions` | List recent sessions for the current server (max 50, with date headings) |
-| `/sessions switch <number\|name>` | Switch active session by position or partial name match |
-| `/agents` | List primary agents (▶ marker for the active one) |
-| `/agents switch <name>` | Switch active agent — persists on session and refreshes TUI |
-| `/models` | List connected providers with model counts, context limits, and costs |
-| `/status` | Show current server path, URL, busy status, and active session |
-| `/cancel` | Cancel the current AI response for the active server |
-| `/think [on\|off\|switch]` | Toggle forwarding of model thinking messages to the chat |
-| `/record [stop]` | Toggle recording of Telegram conversation for agentp context; `/record stop` clears and stops |
-| `/queue <message>` | Queue a message when the server is busy; auto-sent when current task finishes |
-| `/flush` | Clear all queued messages (manual and auto-queued) |
-| `/resurrect` | Recover a dead server — restart processes in the same directory, reconnect chat |
+| `/resurrect [path]` | Restart a crashed server from its `.ocmux.json`; accepts optional directory path |
 | `/allow` | Approve a permission request once |
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |

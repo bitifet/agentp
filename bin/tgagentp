@@ -2058,7 +2058,7 @@ async function main() {
         const msg = isConnError
           ? `⚠️ Server \`${url}\` is unreachable. The message has been requeued and will be sent when the server is available again.\n\n` +
             `**Options:**\n` +
-            `• Start the server: \`ocmux serve\`\n` +
+            `• Restart it: \`/resurrect\`\n` +
             `• Switch to another server: \`/servers switch <name>\`\n` +
             `• Flush the queue: \`/flush\``
           : `Error: ${err.message}`;
@@ -2289,7 +2289,7 @@ async function main() {
             await sendLongMessage(token, cs,
               '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
               '⚠️ The server at `' + state.url + '` is not reachable.\n' +
-              'Options: start the server with `ocmux serve`, or switch with `/servers switch <name>`.');
+              'Use `/resurrect` to restart it, or `/servers switch <name>` to connect elsewhere.');
           } catch (_) {}
         }
       }
@@ -2425,7 +2425,7 @@ async function main() {
               `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
               `Your file upload has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
               `**Options:**\n` +
-              `• Start the server: \`ocmux serve\`\n` +
+              `• Restart it: \`/resurrect\`\n` +
               `• Switch to another server: \`/servers switch <name>\`\n` +
               `• Flush the queue: \`/flush\``);
             continue;
@@ -2626,7 +2626,7 @@ async function main() {
         const qlen = st.messageQueue.length;
         const servers = listServers();
         const suggestions = [];
-        suggestions.push(`• Start the server: \`ocmux serve\``);
+        suggestions.push(`• Restart it: \`/resurrect\``);
         if (servers.length > 0) {
           suggestions.push(`• Switch to another server: \`/servers switch <name>\``);
         }

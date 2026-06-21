@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.8-pre01] - 2026-06-17
+## [0.11.8] - 2026-06-21
 
 ### New Features
 
@@ -23,6 +23,9 @@ All notable changes to this project will be documented in this file.
 
 - **`sendLongMessage` returns message IDs:** Enables `/markdown` to look up original responses by replied-to message.
 - **No more `telegram-shared/` auto-saving:** Uploaded files are no longer auto-saved to disk; tgagentp sends fileId to the agent, which can pull files on demand via the `download` command.
+- **`ocmux --port 0` removed:** Was redundant with opencode's default. Removed from both `bin/ocmux` and `lib/ocmux.js`.
+- **Server state machine:** New `serverStatus()`, `listDeadServers()`, `startServer()` in `lib/ocmux.js`. `/servers` now shows dead servers (💀). `/serve` detects dead `.ocmux.json` and suggests `/resurrect`. Dead-server messages now suggest `/resurrect` instead of `ocmux serve`.
+- **`/resurrect` improvements:** Now accepts optional directory argument (`/resurrect <path>`). Was previously blocked by the disconnected command guard.
 
 ## [0.11.7] - 2026-06-13
 
