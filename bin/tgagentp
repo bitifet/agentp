@@ -1373,6 +1373,7 @@ async function cmdComment(token, chatId, args, chatState) {
 
 async function cmdResurrect(token, chatId, args, chatState) {
   let dir = null;
+  let url = null;
   const dirArg = args && args.length > 0 ? args.join(' ') : null;
   if (dirArg) {
     // User specified a directory: resolve it
@@ -1391,8 +1392,11 @@ async function cmdResurrect(token, chatId, args, chatState) {
       await sendLongMessage(token, chatState, `❌ Directory not found: \`${dirArg}\``);
       return;
     }
+    // Read the old URL from the state file
+    const state = readState(statefileFor(dir));
+    url = state ? state.url : null;
   } else {
-    const url = chatState.serverBase;
+    url = chatState.serverBase;
     if (!url) {
       await sendLongMessage(token, chatState, '🔌 Not connected to any server. Specify a directory or switch to a server first.');
       return;
