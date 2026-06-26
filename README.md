@@ -241,7 +241,11 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/always` | Approve and remember for the session |
 | `/answer <number>` | Respond to a question asked by the AI (structured multiple-choice) |
 | `/markdown` | Send the original markdown of the last response as a `.md` file; reply to a message to get that specific response |
+| `/agents list` | List available agents/models |
+| `/agents switch <name>` | Switch the active agent for subsequent messages (synced to server via API) |
 | `/shutdown [force\|clear]` | (requires `--dev`) Stop tgagentp; `clear` also wipes saved connections |
+
+> **Note on model/agent switching:** Changing the model in the OpenCode TUI's prompt dropdown is a **local UI action** — it only takes effect server-side after a message is sent *through the TUI*. If you change the model in the TUI and then send a prompt via `agentp` or Telegram, the old model will still be used. Use `/agents switch <name>` from Telegram (or `tgagentp`) to change models — this explicitly calls the API and syncs correctly.
 
 #### TUI Command Passthrough
 
