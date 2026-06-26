@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.10] - 2026-06-27
+
+### Bug Fixes
+
+- **Symlink path resolution:** `windowByDir()` in `lib/ocmux.js` now compares both the search directory and tmux window names via `fs.realpathSync()`. This fixes "tmux window not found" errors when the current directory is accessed through a symlink (`process.cwd()` returns realpath, tmux stores the symlink path).
+- **Stale `.ocmux.json` fallback:** When `ocmux` (default mode) finds a state file whose tmux window no longer exists, it now skips it and searches the parent directory for a valid server. This prevents stale child `.ocmux.json` files (from resurrect bugs, deleted windows, etc.) from blocking access to working parent servers.
+- **New server window naming:** `doNew()`, `startServer()`, and `resurrectServer()` now normalize the target directory with `fs.realpathSync()` before creating the tmux window, ensuring consistent naming regardless of how the user navigated to the directory.
+
+### Documentation
+
+- **Model/agent switching:** README now documents `/agents list` and `/agents switch <name>` commands, and explains why TUI model dropdown changes don't propagate to agentp/tgagentp prompts.
+
 ## [0.11.9] - 2026-06-21
 
 ### New Features
