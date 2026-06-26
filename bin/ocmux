@@ -215,12 +215,7 @@ function cmdSwitch(statefile, longMode) {
 
   const actualName = windowNameByIndex(winIdx);
   if (actualName !== serverDir) {
-    let found = windowByDir(serverDir);
-    // Also try the real path (resolves symlinks) — tmux windows may have been
-    // created from a different path that resolves to the same location.
-    if (found == null) {
-      try { found = windowByDir(fs.realpathSync(serverDir)); } catch {}
-    }
+    const found = windowByDir(serverDir);
     if (found == null) {
       console.error(`Error: tmux window for ${serverDir} not found`);
       console.error("Run 'ocmux serve' to create a new server.");
