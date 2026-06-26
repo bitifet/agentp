@@ -49,7 +49,7 @@ function tmux(args) {
 }
 
 function findParentStatefile(startDir) {
-  let dir = path.resolve(startDir);
+  let dir = path.isAbsolute(startDir) ? startDir : path.resolve(startDir);
   while (true) {
     if (fs.existsSync(path.join(dir, '.ocmux.json'))) {
       return path.join(dir, '.ocmux.json');
