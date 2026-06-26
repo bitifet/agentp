@@ -603,13 +603,26 @@ function main() {
       console.error("Error: '--print-logs' is only valid with 'serve'.");
       process.exit(1);
     }
-    // Default mode
-    const sf = findParentStatefile(targetDir);
+    // Default mode — find an existing server and switch to it
+    let sf = findParentStatefile(targetDir);
     if (!sf) {
       console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
       console.error("Run 'ocmux serve' to create a new server.");
       process.exit(1);
     }
+
+    // Skip stale state files whose tmux window no longer exists,
+    // and search from the parent directory instead.
+    const state = readState(sf);
+    if (state && state.window_index != null) {
+      const serverDir = path.dirname(sf);
+      const actualName = windowNameByIndex(state.window_index);
+      if (actualName !== serverDir && windowByDir(serverDir) == null) {
+        const parentSf = findParentStatefile(path.dirname(serverDir));
+        if (parentSf) sf = parentSf;
+      }
+    }
+
     ensureSession();
     cmdSwitch(sf, longMode);
   }
