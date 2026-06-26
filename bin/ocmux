@@ -49,7 +49,7 @@ function tmux(args) {
 }
 
 function findParentStatefile(startDir) {
-  let dir = path.isAbsolute(startDir) ? startDir : path.resolve(startDir);
+  let dir = path.resolve(startDir);
   while (true) {
     if (fs.existsSync(path.join(dir, '.ocmux.json'))) {
       return path.join(dir, '.ocmux.json');
@@ -215,7 +215,12 @@ function cmdSwitch(statefile, longMode) {
 
   const actualName = windowNameByIndex(winIdx);
   if (actualName !== serverDir) {
-    const found = windowByDir(serverDir);
+    let found = windowByDir(serverDir);
+    // Also try the real path (resolves symlinks) — tmux windows may have been
+    // created from a different path that resolves to the same location.
+    if (found == null) {
+      try { found = windowByDir(fs.realpathSync(serverDir)); } catch {}
+    }
     if (found == null) {
       console.error(`Error: tmux window for ${serverDir} not found`);
       console.error("Run 'ocmux serve' to create a new server.");
@@ -309,6 +314,8 @@ function cmdNew(targetDir, longMode, printLogs) {
 }
 
 function doNew(targetDir, longMode, printLogs) {
+  // Normalize to real path so tmux window names are consistent regardless of symlinks
+  try { targetDir = fs.realpathSync(targetDir); } catch {}
   ensureSession();
   const lf = logfileFor(targetDir);
 
