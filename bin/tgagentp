@@ -4,7 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive, getSession } = require('../lib/opencode.js');
+const { getAuthHeaders, makeRequest, buildJsonRequest, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
 
 // Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
 const log = {
@@ -308,9 +308,14 @@ async function cmdHelp(token, chatId, args, chatState) {
     }
     if (topic === 'models') {
       await sendLongMessage(token, chatState,
-        '`/models` ─ list all providers and their models.\n' +
-        'Shows provider name, connection status, default model, and up to 5 models per provider\n' +
-        'with status, context limit, and input/output costs.');
+        '`/models` ─ list connected providers.\n' +
+        '  • Shows provider names with model count: `**OpenAI** (*5 models*)`\n' +
+        '  • The current provider is marked with ▶\n' +
+        '  • Includes hint to drill down: `/models <provider>`\n\n' +
+        '`/models <provider>` ─ list all models for a matching provider.\n' +
+        '  • Partial name/ID matching supported\n' +
+        '  • Current model marked with ▶\n' +
+        '  • Shows context limit and input/output costs in parentheses');
       return;
     }
     if (topic === 'allow' || topic === 'reject' || topic === 'always' || topic === 'answer') {
@@ -896,17 +901,21 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
     const st = getState(server);
     if (st.activeSessionId) {
       try {
-        const session = await getSession(server, st.activeSessionId);
-        if (session && session.model) {
-          const m = session.model;
-          if (typeof m === 'object' && m.providerID && m.modelID) {
-            currentProviderID = m.providerID;
-            currentModelID = m.modelID;
-          } else if (typeof m === 'string') {
-            const parts = m.split('/');
-            if (parts.length === 2) {
-              currentProviderID = parts[0];
-              currentModelID = parts[1];
+        const url = `${server}/session/${encodeURIComponent(st.activeSessionId)}`;
+        const { status, body } = await makeRequest(buildJsonRequest(url, 'GET'), null, null, 3000);
+        if (status === 200) {
+          const session = JSON.parse(body);
+          if (session && session.model) {
+            const m = session.model;
+            if (typeof m === 'object' && m.providerID && m.modelID) {
+              currentProviderID = m.providerID;
+              currentModelID = m.modelID;
+            } else if (typeof m === 'string') {
+              const parts = m.split('/');
+              if (parts.length === 2) {
+                currentProviderID = parts[0];
+                currentModelID = parts[1];
+              }
             }
           }
         }
