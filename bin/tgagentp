@@ -2328,6 +2328,119 @@ async function main() {
 
   let offset = 0;
 
+  // Restore chat↔server connections from persistent state
+  let savedData;
+  let connByOldId = {};
+  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  if (savedData && Array.isArray(savedData.connections)) {
+    // Phase 1: restore chat states and populate serverOwners
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      connByOldId[String(chatId)] = { chatId, threadId, dir };
+    }
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
+        cs.serverBase = state.url;
+        // Prefer non-thread (private chat) as owner over topic threads
+        const existing = serverOwners[state.url];
+        if (!existing || (!threadId && existing.threadId)) {
+          serverOwners[state.url] = { chatId, threadId };
+        }
+      }
+    }
+    // Phase 2: prune secondary connections per URL (only owner survives)
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (!state.serverBase) continue;
+      const owner = serverOwners[state.serverBase];
+      if (!owner) continue;
+      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
+        const url = state.serverBase;
+        state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
+        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
+      }
+    }
+    // Phase 3: send startup notification only to the surviving owner per URL
+    const notifiedUrls = new Set();
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      if (!cs.serverBase) continue;
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
+        if (notifiedUrls.has(state.url)) {
+          log.info(`[chat ${chatId}] Skipping startup notification for ${dir} (already notified for this URL)`);
+          continue;
+        }
+        notifiedUrls.add(state.url);
+        const alive = await isServerAlive(state.url);
+        if (alive) {
+          const lines = [
+            '✅ Bot started.',
+            '**Server:**',
+            '  • **Path:** `' + dir + '`',
+            '  • **URL:** `' + state.url + '`',
+            '  • **Status:** ✅ restored',
+          ];
+          try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
+          log.info(`Restored connection: chat ${chatId} → ${dir}`);
+        } else {
+          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.url} is unreachable`);
+          try {
+            await sendLongMessage(token, cs,
+              '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
+              '⚠️ The server at `' + state.url + '` is not reachable.\n' +
+              'Use `/resurrect` to restart it, or `/servers switch <name>` to connect elsewhere.');
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  // ── Group migration handler ──────────────────────────────────────
+  // When a regular group is promoted to a supergroup (or topics enabled),
+  // Telegram changes the chat ID. This function updates the stored
+  // connections and allowlist so the bot continues to work transparently.
+  async function handleGroupMigration(oldId, newId) {
+    if (oldId === newId) return;
+    log.info(`Group migration detected: chat ${oldId} → ${newId}`);
+
+    // Update allowlist if the old ID is in it
+    if (allowedChatIds) {
+      const idx = allowedChatIds.indexOf(oldId);
+      if (idx !== -1) {
+        allowedChatIds[idx] = newId;
+        log.info(`Updated allowlist: ${oldId} → ${newId}`);
+      }
+    }
+
+    // Update connections.json: replace all references to oldId with newId
+    try {
+      const data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+      if (Array.isArray(data.connections)) {
+        let changed = false;
+        for (const conn of data.connections) {
+          if (String(conn.chatId) === oldId) {
+            conn.chatId = newId;
+            changed = true;
+          }
+        }
+        if (changed) {
+          fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2));
+          log.info(`Updated connection: ${oldId} → ${newId}`);
+        }
+      }
+    } catch (_) {}
+
+    // Update in-memory chat state key (the existing state remains, just
+    // the key changes — new messages from newId will hit a new state)    
+  }
+
   // Drain stale updates from previous sessions before entering the poll loop.
   // Using timeout=1 to return immediately without long-polling.
   try {
