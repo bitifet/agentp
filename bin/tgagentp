@@ -888,40 +888,40 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
       return;
     }
 
-    // Determine current model: first from the active agent, fall back to
-    // the active session (covers agents without explicit model + manual /model switches).
+    // Determine current model: session model first (the real in-use model,
+    // including manual /model TUI switches), then fall back to the agent's
+    // configured default model.
     let currentProviderID = null;
     let currentModelID = null;
-    const activeAgentName = getState(server).activeAgentName;
-    if (activeAgentName) {
+    const st = getState(server);
+    if (st.activeSessionId) {
       try {
-        const agents = await listAgents(server);
-        const activeAgent = agents.find(a => a.name === activeAgentName);
-        if (activeAgent && activeAgent.model) {
-          currentProviderID = activeAgent.model.providerID;
-          currentModelID = activeAgent.model.modelID;
+        const session = await getSession(server, st.activeSessionId);
+        if (session && session.model) {
+          const m = session.model;
+          if (typeof m === 'object' && m.providerID && m.modelID) {
+            currentProviderID = m.providerID;
+            currentModelID = m.modelID;
+          } else if (typeof m === 'string') {
+            const parts = m.split('/');
+            if (parts.length === 2) {
+              currentProviderID = parts[0];
+              currentModelID = parts[1];
+            }
+          }
         }
       } catch {}
     }
-    // Fallback: check the active session for its current model
+    // Fallback: active agent's configured model
     if (!currentModelID) {
-      const st = getState(server);
-      if (st.activeSessionId) {
+      const activeAgentName = getState(server).activeAgentName;
+      if (activeAgentName) {
         try {
-          const session = await getSession(server, st.activeSessionId);
-          if (session && session.model) {
-            const m = session.model;
-            // session.model may be an object { providerID, modelID } or a string "provider/model"
-            if (typeof m === 'object' && m.providerID && m.modelID) {
-              currentProviderID = m.providerID;
-              currentModelID = m.modelID;
-            } else if (typeof m === 'string') {
-              const parts = m.split('/');
-              if (parts.length === 2) {
-                currentProviderID = parts[0];
-                currentModelID = parts[1];
-              }
-            }
+          const agents = await listAgents(server);
+          const activeAgent = agents.find(a => a.name === activeAgentName);
+          if (activeAgent && activeAgent.model) {
+            currentProviderID = activeAgent.model.providerID;
+            currentModelID = activeAgent.model.modelID;
           }
         } catch {}
       }
