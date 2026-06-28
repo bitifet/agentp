@@ -931,9 +931,11 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
       for (const [id, model] of modelEntries) {
         const isCurrent = currentProviderID === provider.id && currentModelID === id;
         const bullet = isCurrent ? '\u25b6 ' : '\u00b7 ';
-        const ctx = model.limit ? Math.round(model.limit.context / 1000) + 'K' : '';
-        const cost = model.cost ? ` $${model.cost.input}/${model.cost.output}` : '';
-        lines.push(bullet + '`' + id + '`' + (ctx ? ' ' + ctx : '') + cost);
+        const extras = [];
+        if (model.limit) extras.push(Math.round(model.limit.context / 1000) + 'K ctx');
+        if (model.cost) extras.push(`$${model.cost.input}/$${model.cost.output}`);
+        const suffix = extras.length > 0 ? ` (*${extras.join(', ')}*)` : '';
+        lines.push(bullet + '`' + id + '`' + suffix);
       }
       await sendLongMessage(token, chatState, lines.join('\n'));
       return;
