@@ -888,27 +888,69 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
       return;
     }
 
-    const lines = [];
-
-    for (const provider of filtered) {
-      lines.push('');
-      lines.push('**' + provider.name + '** ✅');
-
-      const modelEntries = Object.entries(provider.models || {});
-      if (modelEntries.length === 0) continue;
-
-      const shown = modelEntries.slice(0, 5);
-      for (const [id, model] of shown) {
-        const ctx = model.limit ? Math.round(model.limit.context / 1000) + 'K' : '';
-        const cost = model.cost ? ` $${model.cost.input}/${model.cost.output}` : '';
-        lines.push('  `' + id + '`' + (ctx ? ' ' + ctx : '') + cost);
-      }
-      if (modelEntries.length > 5) {
-        lines.push('  *…and ' + (modelEntries.length - 5) + ' more*');
-      }
+    // Determine current model from the active agent
+    let currentProviderID = null;
+    let currentModelID = null;
+    const activeAgentName = getState(server).activeAgentName;
+    if (activeAgentName) {
+      try {
+        const agents = await listAgents(server);
+        const activeAgent = agents.find(a => a.name === activeAgentName);
+        if (activeAgent && activeAgent.model) {
+          currentProviderID = activeAgent.model.providerID;
+          currentModelID = activeAgent.model.modelID;
+        }
+      } catch {}
     }
 
-    await sendLongMessage(token, chatState, 'Connected providers:\n' + lines.join('\n'));
+    // /models <provider> — list all models for a matching provider
+    if (args.length > 0) {
+      const query = args.join(' ');
+      const matches = filtered.filter(p =>
+        p.name.toLowerCase().includes(query.toLowerCase()) ||
+        p.id.toLowerCase().includes(query.toLowerCase())
+      );
+      if (matches.length === 0) {
+        await sendLongMessage(token, chatState, `No provider matching "${query}".`);
+        return;
+      }
+      if (matches.length > 1) {
+        const list = matches.map(p => '  `' + p.name + '`').join('\n');
+        await sendLongMessage(token, chatState,
+          `Multiple matches for "${query}":\n${list}\n\nPlease be more specific.`);
+        return;
+      }
+      const provider = matches[0];
+      const modelEntries = Object.entries(provider.models || {});
+      if (modelEntries.length === 0) {
+        await sendLongMessage(token, chatState,
+          '**' + provider.name + '** has no models configured.');
+        return;
+      }
+      const lines = ['**' + provider.name + '** models:'];
+      for (const [id, model] of modelEntries) {
+        const isCurrent = currentProviderID === provider.id && currentModelID === id;
+        const bullet = isCurrent ? '\u25b6 ' : '\u00b7 ';
+        const ctx = model.limit ? Math.round(model.limit.context / 1000) + 'K' : '';
+        const cost = model.cost ? ` $${model.cost.input}/${model.cost.output}` : '';
+        lines.push(bullet + '`' + id + '`' + (ctx ? ' ' + ctx : '') + cost);
+      }
+      await sendLongMessage(token, chatState, lines.join('\n'));
+      return;
+    }
+
+    // Default: list providers with model count per provider
+    const lines = ['**Connected providers:**'];
+    for (const provider of filtered) {
+      const modelCount = Object.keys(provider.models || {}).length;
+      const isCurrentProvider = currentProviderID === provider.id;
+      const bullet = isCurrentProvider ? '\u25b6 ' : '\u00b7 ';
+      lines.push(bullet + '**' + provider.name + '**' +
+        (modelCount > 0 ? ` (*${modelCount} models*)` : ' *No models*'));
+    }
+    lines.push('');
+    lines.push('\u{1f4a1} Use `/models <provider>` to list the models it provides.');
+    await sendLongMessage(token, chatState, lines.join('\n'));
   } catch (err) {
     await sendLongMessage(token, chatState, `Error listing models: ${err.message}`);
   }
@@ -1851,6 +1893,7 @@ async function main() {
     if (srvDiscovered) {
       getState(url).activeSessionId = srvDiscovered.id;
       getState(url).activeSessionName = srvDiscovered.name;
+      startSessionMonitor(url, srvDiscovered.id);
       log.info(`  → session: ${srvDiscovered.name || srvDiscovered.id}`);
     }
     const defaultSrvAgent = srvAgents.find(a => a.mode === 'primary') || srvAgents[0];
@@ -1872,7 +1915,10 @@ async function main() {
     getState(server).activeSessionId = id;
     if (name) getState(server).activeSessionName = name;
     log.info(`[chat ${chatState.chatId}] Switched to session: ${name || id}`);
-    if (id !== prevId) sendGreeting(chatState);
+    if (id !== prevId) {
+      sendGreeting(chatState);
+      startSessionMonitor(server, id);
+    }
   };
 
   const TELEGRAM_GREETING_BODY = (sessionName) =>
@@ -1890,6 +1936,90 @@ async function main() {
     '[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
     'For more details about a command:\n' +
     '[Telegram]{"command":"help","topic":"<upload|download|help>"}';
+
+  /**
+   * Start a persistent SSE session monitor that catches question.asked,
+   * permission_asked, and permission_replied events in the background,
+   * even when the AI was triggered by agentp (--tg) rather than by tgagentp.
+   * Automatically restarted when the session or server changes.
+   */
+  function startSessionMonitor(server, sessionId) {
+    const st = getState(server);
+    if (st._monitorRef && st._monitorRef.current) {
+      st._monitorRef.current.destroy();
+      st._monitorRef.current = null;
+    }
+    const monRef = { current: null };
+    st._monitorRef = monRef;
+    st._monitorStarted = true;
+
+    const notifiedPerms = new Set();
+
+    listenForSessionEvents(server, sessionId, {
+      onText: null,
+      onConnected: null,
+      onThinking: null,
+      onPermission: (perm) => {
+        const st2 = getState(server);
+        const permDump = JSON.stringify(perm);
+        log.debug(`  [monitor] -> permission_asked callback: ${permDump}`);
+        st2.pendingPermission = { server, sessionId, permissionId: perm.id, type: perm.permission || 'unspecified', pattern: perm.patterns || perm.pattern, title: perm.title };
+        const ownerChat = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === normalizeUrl(server))?.[1];
+        if (ownerChat && !notifiedPerms.has(perm.id)) {
+          notifiedPerms.add(perm.id);
+          const toolStr = perm.permission || 'unspecified';
+          const patternArr = perm.patterns || (perm.pattern ? [perm.pattern] : []);
+          const patternStr = patternArr.join(', ');
+          const msg = '\u{1f510}**Permission needed**\n'
+            + '**Tool:** `' + toolStr + '`\n'
+            + (patternStr ? '**Target:** `' + patternStr + '`\n' : '')
+            + (perm.title ? '**Detail:** ' + perm.title + '\n' : '')
+            + 'Use `/allow` to approve once, `/always` to always allow, or `/reject` to deny.';
+          log.debug(`  [monitor] -> sending permission notification to chat ${ownerChat.chatId}`);
+          sendLongMessage(token, { chatId: ownerChat.chatId, threadId: ownerChat.threadId }, msg)
+            .then(() => log.debug(`  [monitor] -> permission notification sent OK`))
+            .catch((err) => log.debug(`  [monitor] -> permission notification failed: ${err.message}`));
+        } else if (ownerChat) {
+          log.debug(`  [monitor] -> permission ${perm.id} already notified, updating pendingPermission only`);
+        } else {
+          log.debug(`  [monitor] -> no owner chat found for server ${server}, skipping notification`);
+        }
+      },
+      onPermissionReplied: () => {
+        log.debug(`  [monitor] -> permission_replied: clearing pendingPermission`);
+        getState(server).pendingPermission = null;
+      },
+      onQuestion: (q) => {
+        const st2 = getState(server);
+        const qDump = JSON.stringify(q);
+        log.debug(`  [monitor] -> question_asked callback: ${qDump}`);
+        st2.pendingQuestion = { server, sessionId, questionId: q.id, question: q.question || 'Unknown question', options: q.options || [] };
+        const ownerChat = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === normalizeUrl(server))?.[1];
+        if (ownerChat) {
+          const options = (q.options || []).map((opt, i) => `${i + 1}. ${opt.text || opt}`).join('\n');
+          const msg = '\u2753**Question from the AI**\n\n'
+            + (q.question || 'Choose an option:') + '\n\n'
+            + (options ? options + '\n\n' : '')
+            + 'Use `/answer <number>` to respond.';
+          log.debug(`  [monitor] -> sending question notification to chat ${ownerChat.chatId}`);
+          sendLongMessage(token, { chatId: ownerChat.chatId, threadId: ownerChat.threadId }, msg)
+            .then(() => log.debug(`  [monitor] -> question notification sent OK`))
+            .catch((err) => log.debug(`  [monitor] -> question notification failed: ${err.message}`));
+        } else {
+          log.debug(`  [monitor] -> no owner chat found for server ${server}, skipping question notification`);
+        }
+      },
+    }, monRef).then(() => {
+      // Normal completion (90s safety timeout or stream ended)
+    }, (err) => {
+      log.debug(`  [monitor] SSE listener for session ${sessionId} ended: ${err.message}`);
+    }).finally(() => {
+      if (getState(server)._monitorRef === monRef) {
+        getState(server)._monitorRef = null;
+        getState(server)._monitorStarted = false;
+      }
+    });
+  }
 
   async function sendGreeting(chatState) {
     const st = getState(chatState.serverBase);
@@ -1928,10 +2058,17 @@ async function main() {
     if (st._sessionReq && st._sessionReq.current) { st._sessionReq.current.destroy(); st._sessionReq.current = null; }
     st._cancelRef = cancelRef;
     st._sessionReq = sessionCancelRef;
+
+    // Ensure the persistent session monitor is running so question/permission
+    // events from any source (agentp, tgagentp, TUI) are caught, not just
+    // those triggered by this message's per-request SSE listener.
+    if (useSession && sessionId && !st._monitorStarted) {
+      startSessionMonitor(url, sessionId);
+    }
+
     try {
       let answer;
       if (useSession) {
-        const notifiedPerms = new Set();
         let sseConnected;
         const onConnected = Promise.race([
           new Promise((resolve) => { sseConnected = resolve; }),
@@ -1953,48 +2090,9 @@ async function main() {
                 .catch(() => {});
             }
           },
-          onPermission: (perm) => {
-            const st2 = getState(url);
-            const permDump = JSON.stringify(perm);
-            log.debug(`  → permission_asked callback: ${permDump}`);
-            st2.pendingPermission = { server: url, sessionId, permissionId: perm.id, type: perm.permission || 'unspecified', pattern: perm.patterns || perm.pattern, title: perm.title };
-            if (!notifiedPerms.has(perm.id)) {
-              notifiedPerms.add(perm.id);
-              const toolStr = perm.permission || 'unspecified';
-              const patternArr = perm.patterns || (perm.pattern ? [perm.pattern] : []);
-              const patternStr = patternArr.join(', ');
-              const msg = '🔐 **Permission needed**\n'
-                + '**Tool:** `' + toolStr + '`\n'
-                + (patternStr ? '**Target:** `' + patternStr + '`\n' : '')
-                + (perm.title ? '**Detail:** ' + perm.title + '\n' : '')
-                + 'Use `/allow` to approve once, `/always` to always allow, or `/reject` to deny.';
-              log.debug(`  → sending permission notification to chat ${chatId}`);
-              sendLongMessage(token, chatState, msg, replyTo, threadId)
-                .then(() => log.debug(`  → permission notification sent OK`))
-                .catch((err) => log.debug(`  → permission notification failed: ${err.message}`));
-            } else {
-              log.debug(`  → permission ${perm.id} already notified, updating pendingPermission only`);
-            }
-          },
-          onPermissionReplied: () => {
-            log.debug(`  → permission_replied: clearing pendingPermission`);
-            getState(url).pendingPermission = null;
-          },
-          onQuestion: (q) => {
-            const st2 = getState(url);
-            const qDump = JSON.stringify(q);
-            log.debug(`  → question_asked callback: ${qDump}`);
-            st2.pendingQuestion = { server: url, sessionId, questionId: q.id, question: q.question || 'Unknown question', options: q.options || [] };
-            const options = (q.options || []).map((opt, i) => `${i + 1}. ${opt.text || opt}`).join('\n');
-            const msg = '❓ **Question from the AI**\n\n'
-              + (q.question || 'Choose an option:') + '\n\n'
-              + (options ? options + '\n\n' : '')
-              + 'Use `/answer <number>` to respond.';
-            log.debug(`  → sending question notification to chat ${chatId}`);
-            sendLongMessage(token, chatState, msg, replyTo, threadId)
-              .then(() => log.debug(`  → question notification sent OK`))
-              .catch((err) => log.debug(`  → question notification failed: ${err.message}`));
-          },
+          // onPermission, onPermissionReplied, and onQuestion are handled by
+          // the persistent session monitor (startSessionMonitor) so they are
+          // caught even when agentp (--tg) triggers the AI response.
         }, cancelRef).catch(() => {});
         await onConnected;
         answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName, sessionCancelRef);
@@ -2003,8 +2101,8 @@ async function main() {
           sendLongMessage(token, chatState, html, replyTo, threadId).catch(() => {});
           st._thinkingBuf = '';
         }
-        // Keep the SSE listener alive so subsequent permission/question events
-        // that arrive after sendToSession returns are still forwarded to Telegram.
+        // Keep the per-request SSE listener alive for streaming text events.
+        // Questions and permissions are handled by the persistent monitor.
       } else {
         await sendText(url, `[Telegram] ${text}`);
         answer = await listenForFinalAnswer(url, null, cancelRef);
@@ -2143,24 +2241,32 @@ async function main() {
     // Handle /shutdown clear — wipe saved connections before exiting
     if (args && args.length > 0 && args[0].toLowerCase() === 'clear') {
       clearConnections();
-      await sendLongMessage(token, cs, '🧹 Connection state cleared.');
-      log.debug('/shutdown clear received, exiting...');
-      try { await getUpdates(token, offset, 1); } catch (_) {}
+      await sendLongMessage(token, cs, '\u{1f9f9} Connection state cleared.').catch(() => {});
+      log.info('/shutdown clear: exiting');
       process.exit(0);
     }
 
-    const isForce = args && args.length > 0 && args[0].toLowerCase() === 'force';
+    // Parse numeric exit code from args (default 0). Uses regex /^\d+$/
+    // to robustly match only pure-digit arguments.
+    let exitCode = 0;
+    for (const arg of (args || [])) {
+      if (/^\d+$/.test(arg)) {
+        exitCode = parseInt(arg, 10);
+        break;
+      }
+    }
+
+    const isForce = args && args.some(a => a.toLowerCase() === 'force');
     if (st.busy && !isForce) {
       await sendLongMessage(token, cs,
-        '⏳ Server is busy processing a message.\n' +
-        'Use `/shutdown force` to shut down anyway (in-flight response will be lost).');
+        '\u23f3 Server is busy processing a message.\n' +
+        'Use `/shutdown force` to shut down anyway (in-flight response will be lost).').catch(() => {});
       return;
     }
-    const status = st.busy ? '⏳ busy (forced)' : '✅ idle';
-    await sendLongMessage(token, cs, `👋 Shutting down (state: ${status})...`);
-    try { await getUpdates(token, offset, 1); } catch (_) {}
-    log.debug('/shutdown received, exiting...');
-    process.exit(0);
+    const status = st.busy ? '\u23f3 busy (forced)' : '\u2705 idle';
+    await sendLongMessage(token, cs, `\u{1f44b} Shutting down (state: ${status}, exit ${exitCode})...`).catch(() => {});
+    log.info(`/shutdown: exiting with code ${exitCode}`);
+    process.exit(exitCode);
   };
 
   const cmdNote = async (token, chatId, cmdArgs, chatState) => {
@@ -2222,118 +2328,17 @@ async function main() {
 
   let offset = 0;
 
-  // Restore chat↔server connections from persistent state
-  let savedData;
-  let connByOldId = {};
-  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
-  if (savedData && Array.isArray(savedData.connections)) {
-    // Phase 1: restore chat states and populate serverOwners
-    for (const { chatId, threadId, dir } of savedData.connections) {
-      connByOldId[String(chatId)] = { chatId, threadId, dir };
-    }
-    for (const { chatId, threadId, dir } of savedData.connections) {
-      if (!dir) continue;
-      const cs = getChatState(chatId, threadId);
-      const sf = statefileFor(dir);
-      const state = readState(sf);
-      if (state && state.url) {
-        cs.serverBase = state.url;
-        // Prefer non-thread (private chat) as owner over topic threads
-        const existing = serverOwners[state.url];
-        if (!existing || (!threadId && existing.threadId)) {
-          serverOwners[state.url] = { chatId, threadId };
-        }
+  // Drain stale updates from previous sessions before entering the poll loop.
+  // Using timeout=1 to return immediately without long-polling.
+  try {
+    const drainResult = await getUpdates(token, 0, 1);
+    if (drainResult && drainResult.ok && drainResult.result) {
+      for (const u of drainResult.result) {
+        offset = Math.max(offset, u.update_id + 1);
       }
+      log.info(`Drained ${drainResult.result.length} stale update(s), offset ${offset}`);
     }
-    // Phase 2: prune secondary connections per URL (only owner survives)
-    for (const key of Object.keys(chatStates)) {
-      const state = chatStates[key];
-      if (!state.serverBase) continue;
-      const owner = serverOwners[state.serverBase];
-      if (!owner) continue;
-      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
-        const url = state.serverBase;
-        state.serverBase = null;
-        removeConnection(state.chatId, state.threadId);
-        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
-      }
-    }
-    // Phase 3: send startup notification only to the surviving owner per URL
-    const notifiedUrls = new Set();
-    for (const { chatId, threadId, dir } of savedData.connections) {
-      if (!dir) continue;
-      const cs = getChatState(chatId, threadId);
-      if (!cs.serverBase) continue;
-      const sf = statefileFor(dir);
-      const state = readState(sf);
-      if (state && state.url) {
-        if (notifiedUrls.has(state.url)) {
-          log.info(`[chat ${chatId}] Skipping startup notification for ${dir} (already notified for this URL)`);
-          continue;
-        }
-        notifiedUrls.add(state.url);
-        const alive = await isServerAlive(state.url);
-        if (alive) {
-          const lines = [
-            '✅ Bot started.',
-            '**Server:**',
-            '  • **Path:** `' + dir + '`',
-            '  • **URL:** `' + state.url + '`',
-            '  • **Status:** ✅ restored',
-          ];
-          try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
-          log.info(`Restored connection: chat ${chatId} → ${dir}`);
-        } else {
-          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.url} is unreachable`);
-          try {
-            await sendLongMessage(token, cs,
-              '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
-              '⚠️ The server at `' + state.url + '` is not reachable.\n' +
-              'Use `/resurrect` to restart it, or `/servers switch <name>` to connect elsewhere.');
-          } catch (_) {}
-        }
-      }
-    }
-  }
-
-  // ── Group migration handler ──────────────────────────────────────
-  // When a regular group is promoted to a supergroup (or topics enabled),
-  // Telegram changes the chat ID. This function updates the stored
-  // connections and allowlist so the bot continues to work transparently.
-  async function handleGroupMigration(oldId, newId) {
-    if (oldId === newId) return;
-    log.info(`Group migration detected: chat ${oldId} → ${newId}`);
-
-    // Update allowlist if the old ID is in it
-    if (allowedChatIds) {
-      const idx = allowedChatIds.indexOf(oldId);
-      if (idx !== -1) {
-        allowedChatIds[idx] = newId;
-        log.info(`Updated allowlist: ${oldId} → ${newId}`);
-      }
-    }
-
-    // Update connections.json: replace all references to oldId with newId
-    try {
-      const data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
-      if (Array.isArray(data.connections)) {
-        let changed = false;
-        for (const conn of data.connections) {
-          if (String(conn.chatId) === oldId) {
-            conn.chatId = newId;
-            changed = true;
-          }
-        }
-        if (changed) {
-          fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2));
-          log.info(`Updated connection: ${oldId} → ${newId}`);
-        }
-      }
-    } catch (_) {}
-
-    // Update in-memory chat state key (the existing state remains, just
-    // the key changes — new messages from newId will hit a new state)    
-  }
+  } catch (_) {}
 
   // Poll for updates and forward each text message to OpenCode, sending the answer back.
   while (true) {
