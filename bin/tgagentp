@@ -4,7 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { version } = require('../package.json');
-const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
+const { getAuthHeaders, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive, getSession } = require('../lib/opencode.js');
 
 // Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
 const log = {
@@ -888,7 +888,8 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
       return;
     }
 
-    // Determine current model from the active agent
+    // Determine current model: first from the active agent, fall back to
+    // the active session (covers agents without explicit model + manual /model switches).
     let currentProviderID = null;
     let currentModelID = null;
     const activeAgentName = getState(server).activeAgentName;
@@ -901,6 +902,29 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
           currentModelID = activeAgent.model.modelID;
         }
       } catch {}
+    }
+    // Fallback: check the active session for its current model
+    if (!currentModelID) {
+      const st = getState(server);
+      if (st.activeSessionId) {
+        try {
+          const session = await getSession(server, st.activeSessionId);
+          if (session && session.model) {
+            const m = session.model;
+            // session.model may be an object { providerID, modelID } or a string "provider/model"
+            if (typeof m === 'object' && m.providerID && m.modelID) {
+              currentProviderID = m.providerID;
+              currentModelID = m.modelID;
+            } else if (typeof m === 'string') {
+              const parts = m.split('/');
+              if (parts.length === 2) {
+                currentProviderID = parts[0];
+                currentModelID = parts[1];
+              }
+            }
+          }
+        } catch {}
+      }
     }
 
     // /models <provider> — list all models for a matching provider
