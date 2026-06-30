@@ -315,7 +315,18 @@ async function cmdHelp(token, chatId, args, chatState) {
         '`/models <provider>` ─ list all models for a matching provider.\n' +
         '  • Partial name/ID matching supported\n' +
         '  • Current model marked with ▶\n' +
-        '  • Shows context limit and input/output costs in parentheses');
+        '  • Shows context limit and input/output costs in parentheses\n\n' +
+        'Use `/model <providerID/modelID>` or `/model <modelID>` to switch the active session model.');
+      return;
+    }
+    if (topic === 'model') {
+      await sendLongMessage(token, chatState,
+        '`/model <providerID/modelID>` ─ switch the active session to a specific model.\n' +
+        '`/model <modelID>` ─ search all connected providers for a model by name.\n\n' +
+        'Examples:\n' +
+        '  `/model opencode/big-pickle` ─ explicit provider/model\n' +
+        '  `/model gpt-4` ─ search across all providers\n\n' +
+        'Use `/models` to see available providers and models.');
       return;
     }
     if (topic === 'allow' || topic === 'reject' || topic === 'always' || topic === 'answer') {
@@ -899,42 +910,67 @@ async function cmdModels(token, chatId, args, chatState, setServerForChat, setAc
     let currentProviderID = null;
     let currentModelID = null;
     const st = getState(server);
-    if (st.activeSessionId) {
+    let activeSid = st.activeSessionId;
+    log.info(`[cmdModels] activeSessionId=${activeSid} activeAgentName=${st.activeAgentName}`);
+    // Auto-discover active session if not set
+    if (!activeSid) {
       try {
-        const url = `${server}/session/${encodeURIComponent(st.activeSessionId)}`;
-        const { status, body } = await makeRequest(buildJsonRequest(url, 'GET'), null, null, 3000);
-        if (status === 200) {
-          const session = JSON.parse(body);
-          if (session && session.model) {
-            const m = session.model;
-            if (typeof m === 'object' && m.providerID && m.modelID) {
-              currentProviderID = m.providerID;
-              currentModelID = m.modelID;
-            } else if (typeof m === 'string') {
-              const parts = m.split('/');
-              if (parts.length === 2) {
-                currentProviderID = parts[0];
-                currentModelID = parts[1];
-              }
+        const discovered = await discoverActiveSession(server);
+        if (discovered) {
+          st.activeSessionId = discovered.id;
+          st.activeSessionName = discovered.name;
+          activeSid = discovered.id;
+          log.info(`[cmdModels] auto-discovered session: ${discovered.name || discovered.id}`);
+        }
+      } catch (err) {
+        log.info(`[cmdModels] auto-discover error: ${err.message}`);
+      }
+    }
+    if (activeSid) {
+      try {
+        const sessions = await listSessions(server);
+        const session = sessions.find(s => String(s.id) === String(activeSid));
+        if (session && session.model) {
+          const m = session.model;
+          log.info(`[cmdModels] session model: ${JSON.stringify(m)}`);
+          if (typeof m === 'object' && m.providerID) {
+            currentProviderID = m.providerID;
+            currentModelID = m.modelID || m.id;
+          } else if (typeof m === 'string') {
+            const parts = m.split('/');
+            if (parts.length === 2) {
+              currentProviderID = parts[0];
+              currentModelID = parts[1];
             }
           }
+        } else {
+          log.info(`[cmdModels] session found=${!!session}, has model=${session && !!session.model}`);
         }
-      } catch {}
+      } catch (err) {
+        log.info(`[cmdModels] listSessions error: ${err.message}`);
+      }
     }
     // Fallback: active agent's configured model
     if (!currentModelID) {
-      const activeAgentName = getState(server).activeAgentName;
+      const activeAgentName = st.activeAgentName;
       if (activeAgentName) {
         try {
           const agents = await listAgents(server);
           const activeAgent = agents.find(a => a.name === activeAgentName);
           if (activeAgent && activeAgent.model) {
-            currentProviderID = activeAgent.model.providerID;
-            currentModelID = activeAgent.model.modelID;
+            const am = activeAgent.model;
+            log.info(`[cmdModels] agent model: ${JSON.stringify(am)}`);
+            currentProviderID = am.providerID;
+            currentModelID = am.modelID || am.id;
+          } else {
+            log.info(`[cmdModels] agent found=${!!activeAgent}, has model=${activeAgent && !!activeAgent.model}`);
           }
-        } catch {}
+        } catch (err) {
+          log.info(`[cmdModels] listAgents error: ${err.message}`);
+        }
       }
     }
+    log.info(`[cmdModels] result: provider=${currentProviderID} model=${currentModelID}`);
 
     // /models <provider> — list all models for a matching provider
     if (args.length > 0) {
@@ -1691,6 +1727,115 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
   log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
 }
 
+async function cmdModel(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  const st = getState(server);
+  // Auto-discover active session if not set
+  if (!st.activeSessionId) {
+    try {
+      const discovered = await discoverActiveSession(server);
+      if (discovered) {
+        st.activeSessionId = discovered.id;
+        st.activeSessionName = discovered.name;
+      }
+    } catch (err) {
+      log.info(`[cmdModel] auto-discover error: ${err.message}`);
+    }
+  }
+  if (args.length === 0) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/model <providerID/modelID>` or `/model <modelID>` to search.\n' +
+      'Example: `/model opencode/big-pickle` or `/model gpt-4`');
+    return;
+  }
+  if (!st.activeSessionId) {
+    await sendLongMessage(token, chatState, 'No active session. Use `/sessions` to select one.');
+    return;
+  }
+  const query = args[0];
+  let providerID, modelID;
+
+  // Try "providerID/modelID" format first
+  if (query.includes('/')) {
+    const parts = query.split('/');
+    const rawProviderID = parts[0];
+    modelID = parts[1];
+    providerID = rawProviderID;
+
+    // Validate provider ID exists, or try partial match (e.g. "go" → "opencode-go")
+    try {
+      const result = await listProviders(server);
+      const all = result.all || [];
+      const connectedIds = result.connected || [];
+      const connected = all.filter(p => connectedIds.includes(p.id));
+      const exists = connected.some(p => p.id === rawProviderID);
+      if (!exists) {
+        const match = connected.find(p =>
+          (p.name && p.name.toLowerCase().includes(rawProviderID.toLowerCase())) ||
+          (p.id && p.id.toLowerCase().includes(rawProviderID.toLowerCase()))
+        );
+        if (match) {
+          providerID = match.id;
+          log.info(`[cmdModel] resolved "${rawProviderID}" → "${match.id}"`);
+        } else {
+          await sendLongMessage(token, chatState,
+            `Provider "${rawProviderID}" not found. Use \`/models\` to list available providers.`);
+          return;
+        }
+      }
+      // Verify model exists under this provider
+      const provider = all.find(p => p.id === providerID);
+      if (!provider || !provider.models || !provider.models[modelID]) {
+        const availableModels = provider && provider.models ? Object.keys(provider.models).join(', ') : 'unknown';
+        log.info(`[cmdModel] model "${modelID}" not found in ${providerID}, available: ${availableModels}`);
+        await sendLongMessage(token, chatState,
+          `Model "${modelID}" not found under provider \`${providerID}\`. Use \`/models\` to list available models.`);
+        return;
+      }
+    } catch (err) {
+      log.info(`[cmdModel] provider validation error: ${err.message}`);
+      // Continue with what we have — may still work
+    }
+  } else {
+    // Search across all connected providers to resolve to providerID/modelID
+    try {
+      const result = await listProviders(server);
+      const all = result.all || [];
+      const connectedIds = result.connected || [];
+      const connected = all.filter(p => connectedIds.includes(p.id));
+      for (const provider of connected) {
+        const models = Object.keys(provider.models || {});
+        const match = models.find(m => m.toLowerCase() === query.toLowerCase());
+        if (match) {
+          providerID = provider.id;
+          modelID = match;
+          break;
+        }
+      }
+    } catch (err) {
+      log.info(`[cmdModel] listProviders error: ${err.message}`);
+    }
+    if (!modelID) {
+      await sendLongMessage(token, chatState,
+        `No model matching "${query}" found in any connected provider. Use \`/models\` to list available models.`);
+      return;
+    }
+  }
+
+  // Send an async no-reply message with the desired model.
+  // This triggers createUserMessage which fires ModelSwitched when the model differs,
+  // persisting it as the session's current model.
+  try {
+    await sendToSessionAsync(server, st.activeSessionId, '.', null, { providerID, modelID }, true);
+    const label = providerID ? `\`${providerID}/${modelID}\`` : `\`${modelID}\``;
+    await sendLongMessage(token, chatState,
+      `✅ Switched to model ${label}.`);
+    log.info(`[chat ${chatId}] Switched to model ${providerID || '?'}/${modelID}`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error switching model: ${err.message}`);
+  }
+}
+
 async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId) {
   let entry = null;
   if (replyToMsgId) {
@@ -1719,6 +1864,7 @@ const COMMANDS = {
   'session': cmdSessions,
   'agents': cmdAgents,
   'models': cmdModels,
+  'model': cmdModel,
   'think': cmdThink,
   'record': cmdRecord,
   'resurrect': cmdResurrect,
@@ -2745,7 +2891,7 @@ async function main() {
           }
         } else {
           await sendLongMessage(token, cs,
-            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new, /markdown`);
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /sessions, /agents, /models, /model, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new, /markdown`);
         }
         continue;
       }
