@@ -457,8 +457,10 @@ describe('resurrectServer', { concurrency: false }, () => {
       if (callIdx === 3) return tmuxOk();                    // select-window
       if (callIdx === 4) return tmuxOk();                    // send-keys C-c
       if (callIdx === 5) return tmuxOk();                    // kill-window
-      if (callIdx === 6) return tmuxOk();                    // ensureSession → has-session
-      if (callIdx === 7) return { status: 1, stdout: '', stderr: 'error' };  // new-window FAILS
+      if (callIdx === 6) return tmuxOk();                    // windowByDir (verify kill, loop)
+      if (callIdx === 7) return tmuxOk();                    // windowByDir (verify kill, final check)
+      if (callIdx === 8) return tmuxOk();                    // ensureSession → has-session
+      if (callIdx === 9) return { status: 1, stdout: '', stderr: 'error' };  // new-window FAILS
       return tmuxOk();
     };
     assert.throws(
@@ -477,16 +479,17 @@ describe('resurrectServer', { concurrency: false }, () => {
       if (callIdx === 3) return tmuxOk();
       if (callIdx === 4) return tmuxOk();
       if (callIdx === 5) return tmuxOk();
-      if (callIdx === 6) return tmuxOk();                    // ensureSession → has-session
-      if (callIdx === 7) return tmuxOk();                    // new-window
-      if (callIdx === 8) return tmuxOk('9\t/proj');          // windowByDir
-      if (callIdx === 9) return tmuxOk();                    // pinWindowName (set-window-option)
-      if (callIdx === 10) return tmuxOk();                   // send-keys server start
+      if (callIdx === 6) return tmuxOk();                    // windowByDir (verify kill, loop)
+      if (callIdx === 7) return tmuxOk();                    // windowByDir (verify kill, final check)
+      if (callIdx === 8) return tmuxOk();                    // ensureSession → has-session
+      if (callIdx === 9) return tmuxOk();                    // new-window
+      if (callIdx === 10) return tmuxOk('9\t/proj');         // windowByDir (fallback in startServer)
+      if (callIdx === 11) return tmuxOk();                   // pinWindowName
+      if (callIdx === 12) return tmuxOk();                   // send-keys server start
       // Then the log polling loop (50 iterations)
       // Each iteration: readFileSync → URL_RE match (no spawnSync in loop)
       // No URL in log → loop runs all 50 iterations
-      if (callIdx === 11) return tmuxOk();                   // windowByDir (for cleanup in error)
-      if (callIdx === 12) return tmuxOk();                   // kill-window
+      if (callIdx === 13) return tmuxOk();                   // kill-window (cleanup)
       return tmuxOk();
     };
     // The log file content: doesn't contain a URL
@@ -511,18 +514,20 @@ describe('resurrectServer', { concurrency: false }, () => {
       if (callIdx === 3) return tmuxOk();                    // select-window
       if (callIdx === 4) return tmuxOk();                    // send-keys C-c
       if (callIdx === 5) return tmuxOk();                    // kill-window
-      if (callIdx === 6) return tmuxOk();                    // ensureSession → has-session
-      if (callIdx === 7) return tmuxOk();                    // new-window
-      if (callIdx === 8) return tmuxOk('9\t/proj');          // windowByDir
-      if (callIdx === 9) return tmuxOk();                    // pinWindowName (set-window-option)
-      if (callIdx === 10) return tmuxOk();                   // send-keys server start
+      if (callIdx === 6) return tmuxOk();                    // windowByDir (verify kill, loop)
+      if (callIdx === 7) return tmuxOk();                    // windowByDir (verify kill, final check)
+      if (callIdx === 8) return tmuxOk();                    // ensureSession → has-session
+      if (callIdx === 9) return tmuxOk();                    // new-window
+      if (callIdx === 10) return tmuxOk('9\t/proj');         // windowByDir (fallback in startServer)
+      if (callIdx === 11) return tmuxOk();                   // pinWindowName
+      if (callIdx === 12) return tmuxOk();                   // send-keys server start
       // log polling loop (50 iterations, no spawnSync calls)
       // After polling: writeFileSync (no spawnSync), then:
-      if (callIdx === 11) return tmuxOk('%2\n');             // split-window (returns pane id)
-      if (callIdx === 12) return tmuxOk();                   // send-keys for TUI
-      if (callIdx === 13) return tmuxOk();                   // resize-pane
-      if (callIdx === 14) return tmuxOk('9\t0\n10\t1\n');    // activeWindowIndex
-      if (callIdx === 15) return tmuxOk();                   // select-window
+      if (callIdx === 13) return tmuxOk('%2\n');             // split-window (returns pane id)
+      if (callIdx === 14) return tmuxOk();                   // send-keys for TUI
+      if (callIdx === 15) return tmuxOk();                   // resize-pane
+      if (callIdx === 16) return tmuxOk('9\t0\n10\t1\n');    // activeWindowIndex
+      if (callIdx === 17) return tmuxOk();                   // select-window
       return tmuxOk();
     };
 
