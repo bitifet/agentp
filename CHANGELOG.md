@@ -7,7 +7,23 @@ All notable changes to this project will be documented in this file.
 ### New Commands
 
 - **`/model <providerID/modelID>`** — switch the active session model from Telegram. Resolves partial provider names (e.g. `go` → `opencode-go`). Uses `POST /session/:id/prompt_async` with `model` + `noReply: true` — fires the internal `ModelSwitchedEvent` to persist the change on the server.
+- **`/server <name>`** — switch to a server (replaces `/servers switch <name>`). Add `--force` to take over from another chat.
+- **`/session <name-or-number>`** — switch to a session by name or position (replaces `/sessions switch <name>`). Subcommands: `new [name]`, `rename <name>`.
+- **`/agent <name>`** — switch the active agent (replaces `/agents switch <name>`).
 - **`/shutdown <exitCode>`** — accept optional numeric exit code (default 0) for use in `while cmd ; do ... ; done` loops.
+
+### Command API Consistency
+
+All commands now follow the pattern: **singular for switching/acting, plural for listing/querying**:
+
+| Plural (list) | Singular (switch) |
+|---|---|
+| `/servers` | `/server <name>` |
+| `/sessions` | `/session <name>` |
+| `/agents` | `/agent <name>` |
+| `/models` | `/model <name>` |
+
+Old subcommand syntax (`/servers switch`, `/sessions new`, `/agents switch`) still works via backward-compatible redirects. `/force-switch` replaced by `/server --force`.
 
 ### Improvements
 
@@ -19,7 +35,8 @@ All notable changes to this project will be documented in this file.
   - Model info: context limit, input/output costs in parentheses
   - Uses `listSessions()` for detection instead of `GET /session/{id}` (faster, auth-compatible)
 - **Startup stale-update drain** — skips stale Telegram updates from previous sessions at startup.
-- **`/help model`** topic — documents the new `/model` command.
+- **`/help model`, `/help server`, `/help agent`, `/help session`** — dedicated help topics for all singular commands.
+- **New `/help` main screen** updated with all new commands and removed old aliases.
 
 ### Bug Fixes
 
@@ -29,6 +46,7 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - `sendToSessionAsync()` accepts optional `model` and `noReply` parameters.
+- `cmdForceSwitch` removed (replaced by `cmdServer` with `--force` flag).
 
 ## [0.11.10] - 2026-06-27
 

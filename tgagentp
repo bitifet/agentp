@@ -1,0 +1,3011 @@
+#!/usr/bin/env node
+
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const { version } = require('../package.json');
+const { getAuthHeaders, makeRequest, buildJsonRequest, sendText, listenForFinalAnswer, listSessions, createSession, updateSession, selectSession, sendToSession, sendToSessionAsync, respondToPermission, respondToQuestion, listenForSessionEvents, listAgents, listProviders, isServerAlive } = require('../lib/opencode.js');
+
+// Logger: info→stdout, error→stderr (always), debug→stderr (--verbose only)
+const log = {
+  verbose: false,
+  info(msg) { process.stdout.write(`${new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')} ${msg}\n`); },
+  error(msg) { process.stderr.write(`${msg}\n`); },
+  debug(msg) { if (this.verbose) process.stderr.write(`${msg}\n`); },
+};
+
+const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
+const PORT_FILE = '/tmp/tgagentp-port';
+const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
+const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
+const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId, serverStatus, listDeadServers } = require('../lib/ocmux.js');
+const { executeTuiCommand } = require('../lib/tui-cmd.js');
+const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../lib/telegram-api.js');
+const { sendLongMessage } = require('../lib/telegram-format.js');
+const { spawnSync } = require('child_process');
+
+const TGAGENTP_ROOT = process.env.TGAGENTP_ROOT;
+let tgagentpRootValid = false;
+if (TGAGENTP_ROOT) {
+  try {
+    const stats = fs.statSync(TGAGENTP_ROOT);
+    if (!stats.isDirectory()) {
+      log.error(`TGAGENTP_ROOT is not a directory: ${TGAGENTP_ROOT} — /serve and /new disabled`);
+    } else {
+      try {
+        fs.accessSync(TGAGENTP_ROOT, fs.constants.W_OK);
+        tgagentpRootValid = true;
+      } catch {
+        log.error(`TGAGENTP_ROOT is not writable: ${TGAGENTP_ROOT} — /serve and /new disabled`);
+      }
+    }
+  } catch {
+    log.error(`TGAGENTP_ROOT does not exist: ${TGAGENTP_ROOT} — /serve and /new disabled`);
+  }
+}
+
+// Persist chat↔server directory mappings across restarts
+function saveConnection(chatId, threadId, dir) {
+  let data = { connections: [] };
+  try { data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const key = convKey(chatId, threadId);
+  const idx = data.connections.findIndex(c => convKey(c.chatId, c.threadId) === key);
+  const entry = { chatId, threadId: threadId || null, dir };
+  if (idx !== -1) data.connections[idx] = entry;
+  else data.connections.push(entry);
+  try { fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2)); } catch {}
+}
+
+function removeConnection(chatId, threadId) {
+  let data = { connections: [] };
+  try { data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const key = convKey(chatId, threadId);
+  data.connections = data.connections.filter(c => convKey(c.chatId, c.threadId) !== key);
+  try { fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2)); } catch {}
+}
+
+function clearConnections() {
+  try { fs.unlinkSync(CONNECTIONS_FILE); } catch {}
+}
+
+// Agentp gateway message queue, keyed by server URL
+const agentpQueues = {};
+
+function validateAgentpAuth(req) {
+  const password = process.env.OPENCODE_SERVER_PASSWORD;
+  if (!password) return true;
+  const username = process.env.OPENCODE_SERVER_USERNAME || 'opencode';
+  const expected = 'Basic ' + Buffer.from(`${username}:${password}`).toString('base64');
+  return req.headers.authorization === expected;
+}
+
+function flushAgentpQueue(server, token, chatId, threadId) {
+  if (!chatId) return;
+  const q = agentpQueues[server];
+  if (!q || q.messages.length === 0) return;
+  const msgs = q.messages.splice(0);
+  q.notified = false;
+  if (q.notifyTimer) { clearTimeout(q.notifyTimer); q.notifyTimer = null; }
+  const cs = { chatId, threadId };
+  sendLongMessage(token, cs,
+    `📨 Delivering ${msgs.length} queued agentp message(s):`, undefined, threadId)
+    .then(() => {
+      for (const msg of msgs) {
+        sendLongMessage(token, cs, msg.trim(), undefined, threadId).catch(() => {});
+      }
+    })
+    .catch(() => {});
+}
+
+// Check if an opencode server is reachable by hitting its /session endpoint.
+// Uses a short 5s timeout; returns true for any HTTP response (even 4xx/5xx)
+// and false only for connection-level failures (dead server, DNS, timeout).
+// ---------------------------------------------------------------------------
+// Per-chat state
+// ---------------------------------------------------------------------------
+
+const MAX_RECORDED_MSGS = 100;
+const MAX_RECORDED_BYTES = 100 * 1024;
+
+const chatStates = {};
+const serverOwners = {}; // serverUrl → { chatId, threadId } (for agentp gateway routing)
+
+// Compound key for isolated chat+thread (forum topic) state
+function convKey(chatId, threadId) {
+  return threadId ? `${chatId}:t${threadId}` : chatId;
+}
+
+function getChatState(chatId, threadId, defaultServer) {
+  const key = convKey(chatId, threadId);
+  if (!chatStates[key]) {
+    chatStates[key] = {
+      chatId,
+      threadId: threadId || null,
+      serverBase: defaultServer || null,
+      recording: { active: false, paused: false, messages: [], bytes: 0 },
+      ring: { messages: [], bytes: 0 },
+    };
+  }
+  return chatStates[key];
+}
+
+const RING_MAX_MSGS = 50;
+const RING_MAX_BYTES = 50 * 1024;
+
+function bufferMessage(chatId, threadId, role, text) {
+  const cs = getChatState(chatId, threadId);
+
+  // Always maintain an in-memory ring buffer of recent messages.
+  // This enables retroactive /record N: copy last N messages into recording.
+  cs.ring.messages.push({ role, text });
+  cs.ring.bytes += Buffer.byteLength(text, 'utf8');
+  while (cs.ring.messages.length > RING_MAX_MSGS || cs.ring.bytes > RING_MAX_BYTES) {
+    const oldest = cs.ring.messages.shift();
+    cs.ring.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+  }
+
+  // Recording buffer (only when active AND not paused)
+  if (!cs.recording.active || cs.recording.paused) return;
+  cs.recording.messages.push({ role, text });
+  cs.recording.bytes += Buffer.byteLength(text, 'utf8');
+  while (cs.recording.messages.length > MAX_RECORDED_MSGS || cs.recording.bytes > MAX_RECORDED_BYTES) {
+    const oldest = cs.recording.messages.shift();
+    cs.recording.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+  }
+}
+
+function flushRecorded(chatId, threadId) {
+  const cs = getChatState(chatId, threadId);
+  if (!cs.recording.active) return [];
+  const msgs = cs.recording.messages.splice(0);
+  cs.recording.bytes = 0;
+  return msgs;
+}
+
+// Ring buffer of recent responses keyed by Telegram message ID.
+// Stored per chatId+threadId for /markdown command lookups.
+const responseHistory = {}; // convKey → [{ messageId, text }]
+
+function recordResponseMessage(chatId, threadId, messageIds, text) {
+  const key = convKey(chatId, threadId);
+  if (!responseHistory[key]) responseHistory[key] = [];
+  responseHistory[key].push({ messageIds, text });
+  if (responseHistory[key].length > 20) responseHistory[key].shift();
+}
+
+function getResponseByMessageId(chatId, threadId, messageId) {
+  const key = convKey(chatId, threadId);
+  const list = responseHistory[key] || [];
+  return list.find(e => e.messageIds.includes(messageId));
+}
+
+function getRecentResponse(chatId, threadId, index) {
+  const key = convKey(chatId, threadId);
+  const list = responseHistory[key] || [];
+  if (list.length === 0) return null;
+  // index 1 = most recent, 2 = second most recent, etc.
+  const idx = list.length - (index || 1);
+  if (idx < 0 || idx >= list.length) return null;
+  return list[idx];
+}
+
+// ---------------------------------------------------------------------------
+// Telegram Bot API helpers
+// ---------------------------------------------------------------------------
+
+// Lightweight Markdown to Telegram HTML conversion.
+// Parse TGAGENTP_ALLOWED_CHAT_IDS env var (comma-separated chat IDs).
+// Returns null when unset (all chats allowed), or an array of IDs to filter.
+function parseAllowlist(raw) {
+  if (!raw || !raw.trim()) return null;
+  const ids = raw.split(',').map(s => s.trim()).filter(Boolean);
+  return ids.length > 0 ? ids : null;
+}
+
+// Build a quoted reply context from a Telegram reply_to_message.
+// Returns empty string if the message isn't a reply or has no text.
+// Uses a dynamic code-fence length (max consecutive backticks + 1)
+// so nested backticks never break the structure.
+const { formatFileSize } = require('../lib/file-share.js');
+
+function quoteReply(msg) {
+  const rm = msg.reply_to_message;
+  if (!rm || !rm.text) return '';
+  const replyFrom = rm.from?.username
+    ? `@${rm.from.username}`
+    : [rm.from?.first_name, rm.from?.last_name].filter(Boolean).join(' ') || 'unknown';
+  const senderType = rm.from?.is_bot ? 'assistant' : 'user';
+  let maxBackticks = 0;
+  for (let i = 0, cur = 0; i < rm.text.length; i++) {
+    if (rm.text[i] === '`') { cur++; maxBackticks = Math.max(maxBackticks, cur); }
+    else cur = 0;
+  }
+  const fence = '`'.repeat(Math.max(3, maxBackticks + 1));
+  return `In response to ${replyFrom} (${senderType}):\n\n${fence}\n${rm.text}\n${fence}\n\n`;
+}
+
+// ---------------------------------------------------------------------------
+// File upload helpers
+// ---------------------------------------------------------------------------
+
+// Handle an uploaded file from Telegram.
+// Returns a notification message with fileId so the agent can download it on demand.
+async function handleFileUpload(token, msg, projectDir) {
+  const doc = msg.document;
+  const photo = msg.photo;
+  if (!doc && !photo) return null;
+
+  let fileId;
+  let fileName;
+  let fileSize;
+
+  if (doc) {
+    fileId = doc.file_id;
+    fileName = doc.file_name || 'upload.bin';
+    fileSize = doc.file_size || 0;
+  } else if (photo) {
+    const largest = photo[photo.length - 1];
+    fileId = largest.file_id;
+    fileName = 'photo.jpg';
+    fileSize = largest.file_size || 0;
+  }
+
+  const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
+  return `📎 File uploaded: \`${fileName}\`${sizeStr}\n` +
+    `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`;
+}
+
+// ---------------------------------------------------------------------------
+// Telegram command handlers
+// ---------------------------------------------------------------------------
+
+async function cmdHelp(token, chatId, args, chatState) {
+  if (args.length > 0) {
+    const topic = args[0].toLowerCase();
+    if (topic === 'servers') {
+      await sendLongMessage(token, chatState,
+        '`/servers` ─ list running servers\n' +
+        '  • Shows alive and dead servers\n' +
+        '  • Your server marked with ▶\n\n' +
+        '`/server <name>` ─ switch to a server by directory path or basename\n' +
+        '`/server --force <name>` ─ take over a server from another chat');
+      return;
+    }
+    if (topic === 'agents') {
+      await sendLongMessage(token, chatState,
+        '`/agents` ─ list primary agents\n' +
+        '  • Current agent marked with ▶\n' +
+        '  • Shows model and description\n\n' +
+        '`/agent <name>` ─ switch to an agent');
+      return;
+    }
+    if (topic === 'sessions') {
+      await sendLongMessage(token, chatState,
+        '`/sessions` ─ list sessions\n' +
+        '  • Primary-agent sessions shown by default (includes subagent sessions to maintain context)\n' +
+        '  • Active session marked with ▶\n' +
+        '  • Grouped by recency: Today, this week, older months\n\n' +
+        '`/session <name-or-number>` ─ switch to a session by name or position\n' +
+        '`/session new [name]` ─ create a new session\n' +
+        '`/session rename <name>` ─ rename the active session');
+      return;
+    }
+    if (topic === 'sessions') {
+      await sendLongMessage(token, chatState,
+        '`/sessions` ─ list active sessions (numbered, newest first, max 50)\n' +
+        '`/session <name-or-number>` ─ switch to a session by name or position\n' +
+        '`/session new [name]` ─ create a new session\n' +
+        '`/session rename <name>` ─ rename the active session\n\n' +
+        'Switch by number (from the list) or by case-insensitive partial name match.\n' +
+        'Use `/sessions` to find session numbers.');
+      return;
+    }
+    if (topic === 'servers') {
+      await sendLongMessage(token, chatState,
+        '`/servers` ─ list running servers\n' +
+        '  • Shows alive and dead servers\n' +
+        '  • Your server marked with ▶\n\n' +
+        '`/server <name>` ─ switch to a server by directory path or basename\n' +
+        '`/server --force <name>` ─ take over a server from another chat');
+      return;
+    }
+    if (topic === 'server') {
+      await sendLongMessage(token, chatState,
+        '`/server <name>` ─ switch to a server by directory path or basename.\n' +
+        '`/server --force <name>` ─ take over a server from another chat.\n\n' +
+        'Matches by full directory path, basename, or case-insensitive substring.\n' +
+        'Use `/servers` to see available servers.');
+      return;
+    }
+    if (topic === 'agents') {
+      await sendLongMessage(token, chatState,
+        '`/agents` ─ list primary agents (with ▶ marker for the active one).\n' +
+        '`/agent <name>` ─ switch the active agent. Subsequent messages will use this agent.\n\n' +
+        'Agent switching requires an active session (`/session <name>` or `/session new`).');
+      return;
+    }
+    if (topic === 'agent') {
+      await sendLongMessage(token, chatState,
+        '`/agent <name>` ─ switch the active agent.\n\n' +
+        'Matches by exact name first, then case-insensitive substring.\n' +
+        'The agent is synced to the server session via API.\n' +
+        'Use `/agents` to list available agents.');
+      return;
+    }
+    if (topic === 'session') {
+      await sendLongMessage(token, chatState,
+        '`/session <name-or-number>` ─ switch to a session by name or position\n' +
+        '`/session new [name]` ─ create a new session\n' +
+        '`/session rename <name>` ─ rename the active session\n\n' +
+        'Use `/sessions` to list available sessions with numbers.');
+      return;
+    }
+    if (topic === 'models') {
+      await sendLongMessage(token, chatState,
+        '`/models` ─ list connected providers.\n' +
+        '  • Shows provider names with model count: `**OpenAI** (*5 models*)`\n' +
+        '  • The current provider is marked with ▶\n' +
+        '  • Includes hint to drill down: `/models <provider>`\n\n' +
+        '`/models <provider>` ─ list all models for a matching provider.\n' +
+        '  • Partial name/ID matching supported\n' +
+        '  • Current model marked with ▶\n' +
+        '  • Shows context limit and input/output costs in parentheses\n\n' +
+        'Use `/model <providerID/modelID>` or `/model <modelID>` to switch the active session model.');
+      return;
+    }
+    if (topic === 'model') {
+      await sendLongMessage(token, chatState,
+        '`/model <providerID/modelID>` ─ switch the active session to a specific model.\n' +
+        '`/model <modelID>` ─ search all connected providers for a model by name.\n\n' +
+        'Examples:\n' +
+        '  `/model opencode/big-pickle` ─ explicit provider/model\n' +
+        '  `/model gpt-4` ─ search across all providers\n\n' +
+        'Use `/models` to see available providers and models.');
+      return;
+    }
+    if (topic === 'allow' || topic === 'reject' || topic === 'always' || topic === 'answer') {
+      await sendLongMessage(token, chatState,
+        '`/allow` ─ approve a permission request once\n' +
+        '`/reject` ─ deny a permission request\n' +
+        '`/always` ─ approve and remember for the session\n' +
+        '`/answer <number>` ─ respond to a question from the AI\n\n' +
+        'These commands respond to OpenCode prompts forwarded by tgagentp.\n' +
+        'When OpenCode needs approval (e.g. to run a shell command), tgagentp sends a\n' +
+        '🔐 notification to the chat. Use one of these commands to answer.\n' +
+        'When the AI asks a multiple-choice question, tgagentp sends a ❓ notification\n' +
+        'with numbered options. Use `/answer <number>` to respond.');
+      return;
+    }
+    if (topic === 'think') {
+      await sendLongMessage(token, chatState,
+        '`/think` ─ toggle thinking message forwarding\n' +
+        '`/think on` ─ forward model thinking to the chat in real-time\n' +
+        '`/think off` ─ stop forwarding thinking messages (default)\n' +
+        '`/think switch` ─ toggle current state\n\n' +
+        'When enabled, the model\'s internal reasoning steps are sent to the chat\n' +
+        'as they are generated, prefixed with 💭.\n' +
+        'Can also be enabled at startup with `--think` flag.');
+      return;
+    }
+    if (topic === 'queue') {
+      await sendLongMessage(token, chatState,
+        '`/queue <message>` ─ queue a message when the server is busy\n\n' +
+        'When the server is processing a previous message, queuing allows you to\n' +
+        'continue working without waiting. Once the current task finishes, the next\n' +
+        'queued message is automatically sent and the answer will reply to the\n' +
+        'original queued message.\n\n' +
+        'Messages are also automatically queued when the server is unreachable.\n' +
+        'Use `/flush` to clear the queue at any time.');
+      return;
+    }
+    if (topic === 'flush') {
+      await sendLongMessage(token, chatState,
+        '`/flush` ─ clear all queued messages\n\n' +
+        'Flushes both the regular message queue and any queued agentp messages.\n' +
+        'Messages are queued automatically when the server is unreachable or busy.');
+      return;
+    }
+    if (topic === 'comment') {
+      await sendLongMessage(token, chatState,
+        '`/comment <text>` ─ save a comment in the chat\n\n' +
+        'Comments are NOT forwarded to the agent. They are stored as a regular message\n' +
+        'in the chat. If you reply to a comment with a message that doesn\'t start with\n' +
+        '`/comment`, the comment text is included as context (via the reply-to quoting mechanism).');
+      return;
+    }
+    if (topic === 'note') {
+      await sendLongMessage(token, chatState,
+        '`/note <message>` ─ send context for the agent to acknowledge\n\n' +
+        'The message is forwarded to the agent with an awareness prefix. ' +
+        'The agent will reply with "Ack" and take no action, ' +
+        'but the information will inform future responses.');
+      return;
+    }
+    if (topic === 'disconnect') {
+      await sendLongMessage(token, chatState,
+        '`/disconnect` ─ disconnect this chat from its server\n\n' +
+        'Clears the server connection for this chat. Use `/server <name>` to reconnect.');
+      return;
+    }
+    if (topic === 'status') {
+      await sendLongMessage(token, chatState,
+        '`/status` ─ show current server, session, agent, and queue info\n\n' +
+        'Shows:\n' +
+        '• Server URL and directory path\n' +
+        '• Status: ✅ idle, ⏳ busy, or ❌ unreachable\n' +
+        '• Active session name/ID\n' +
+        '• Active agent name\n' +
+        '• Number of queued messages');
+      return;
+    }
+    if (topic === 'record') {
+      await sendLongMessage(token, chatState,
+        '`/record` ─ toggle between active/paused (starts fresh if inactive)\n' +
+        '`/record continue` ─ resume recording without clearing buffer\n' +
+        '`/record pause [N]` ─ pause recording, keep buffer (optionally discard last N)\n' +
+        '`/record flush` ─ clear buffer, keep current state (active/paused)\n' +
+        '`/record stop` ─ fully stop and clear buffer\n' +
+        '`/record N` ─ retroactively buffer the last N messages from the ring\n\n' +
+        '**States:**\n' +
+        '🔴 *active* — new messages are added to the buffer\n' +
+        '⏸ *paused* — buffer preserved, not recording new messages\n' +
+        '⏹ *inactive* — no buffer, nothing recorded\n\n' +
+        'When active or paused, the next `agentp` invocation retrieves the buffered\n' +
+        'conversation and prepends it to its `--qa` stdout output.\n' +
+        '`/record N` uses the always-on ring buffer (last 50 messages) to retroactively\n' +
+        'fill the recording buffer — as if `/record` had been enabled N messages ago.\n\n' +
+        'Max 100 messages / 100KB. Oldest messages are dropped first.');
+      return;
+    }
+    if (topic === 'serve') {
+      const hint = TGAGENTP_ROOT ? '' :
+        '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
+      await sendLongMessage(token, chatState,
+        '`/serve <path>` ─ start a server in an existing directory\n\n' +
+        'The path is relative to `TGAGENTP_ROOT`.\n' +
+        'Example: `/serve projects/my-app`\n\n' +
+        'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
+        hint);
+      return;
+    }
+    if (topic === 'new') {
+      const hint = TGAGENTP_ROOT ? '' :
+        '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
+      await sendLongMessage(token, chatState,
+        '`/new <path>` ─ create a directory, initialize git, and start a server\n\n' +
+        'The path is relative to `TGAGENTP_ROOT`.\n' +
+        'Example: `/new projects/my-app`\n\n' +
+        'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
+        hint);
+      return;
+    }
+    if (topic === 'markdown') {
+      await sendLongMessage(token, chatState,
+        '`/markdown` ─ send the original markdown of the most recent response as a `.md` file\n\n' +
+        'Reply to any message and use `/markdown` to get the original markdown of the response that generated that message ' +
+        '(works even if the response was split into multiple Telegram messages).');
+      return;
+    }
+    await sendLongMessage(token, chatState,
+      'Unknown topic. Try `/help servers`, `/help server`, `/help sessions`, `/help session`, `/help agents`, `/help agent`, `/help models`, `/help model`, `/help allow`, `/help think`, `/help record`, `/help queue`, `/help flush`, `/help note`, `/help comment`, `/help disconnect`, `/help serve`, `/help new`, `/help markdown`, or just `/help`.');
+    return;
+  }
+  await sendLongMessage(token, chatState,
+    '`/help` ─ show this message\n' +
+    '`/help <topic>` ─ detailed help\n' +
+    '`/status` ─ show current server and session\n' +
+    '`/cancel` ─ cancel the running prompt\n' +
+    '`/servers` ─ list running opencode servers\n' +
+    '`/server <name>` ─ switch to a different server\n' +
+    '`/server --force <name>` ─ take over a server from another chat\n' +
+    '`/sessions` ─ list sessions\n' +
+    '`/session <name-or-number>` ─ switch to a session\n' +
+    '`/session new [name]` ─ create a new session\n' +
+    '`/session rename <name>` ─ rename the active session\n' +
+    '`/agents` ─ list available agents\n' +
+    '`/agent <name>` ─ switch active agent\n' +
+    '`/models` ─ list providers and models\n' +
+    '`/model <provider/model>` ─ switch session model\n' +
+    '`/think` ─ toggle thinking message forwarding\n' +
+    '`/record` ─ record Telegram conversation for agentp context\n' +
+    '`/queue <message>` ─ queue a message when server is busy\n' +
+    '`/flush` ─ clear all queued messages\n' +
+    '`/note <message>` ─ send context for the agent to acknowledge\n' +
+    '`/comment <text>` ─ save a comment in the chat (not forwarded to the agent)\n' +
+    '`/disconnect` ─ disconnect this chat from its server\n' +
+    '`/allow` / `/reject` / `/always` ─ respond to permission requests\n' +
+    '`/markdown` ─ send the original markdown of the last response as a `.md` file\n' +
+    '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
+    (tgagentpRootValid
+      ? '`/serve <path>` ─ start a server in an existing directory\n' +
+        '`/new <path>` ─ create a directory, init git, and start a server\n\n'
+      : 'ℹ️  Set `TGAGENTP_ROOT` to a writable directory to enable `/serve` and `/new`.\n\n') +
+    'Everything else is forwarded to the active server as `[Telegram] <text>`.');
+}
+
+async function cmdServers(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  // Backward compatibility: redirect old subcommands to singular commands
+  if (args.length > 0) {
+    const sub = args[0].toLowerCase();
+    if (sub === 'switch') {
+      const rest = args.slice(1).filter(a => a !== '--force');
+      const force = args.includes('--force');
+      return cmdServer(token, chatId, force ? ['--force', ...rest] : rest, chatState, setServerForChat, setActiveSessionForChat);
+    }
+    if (sub === 'force-switch') {
+      return cmdServer(token, chatId, ['--force', ...args.slice(1)], chatState, setServerForChat, setActiveSessionForChat);
+    }
+  }
+
+  // Default: list servers (alive + dead)
+  const servers = listServers();
+  // Also find dead servers from saved connections
+  let savedData;
+  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  const knownDirs = savedData && Array.isArray(savedData.connections)
+    ? savedData.connections.map(c => c.dir).filter(Boolean) : [];
+  const dead = listDeadServers(knownDirs);
+  const all = [...servers, ...dead.map(d => ({ url: d.url, dir: d.dir, index: d.windowIndex, status: 'dead' }))];
+  if (all.length === 0) {
+    await sendLongMessage(token, chatState, 'No servers found.');
+    return;
+  }
+  const activeUrl = chatState.serverBase ? normalizeUrl(chatState.serverBase) : null;
+  const lines = all.map(s => {
+    const normalizedUrl = normalizeUrl(s.url);
+    const isActive = activeUrl && normalizedUrl === activeUrl;
+    const isOwned = Object.keys(serverOwners).some(url => normalizeUrl(url) === normalizedUrl);
+    let bullet;
+    if (isActive) {
+      bullet = '▶ ';
+    } else if (isOwned) {
+      bullet = ' · ';
+    } else if (s.status === 'dead') {
+      bullet = '💀 ';
+    } else {
+      bullet = '🔌 ';
+    }
+    return bullet + `${s.url} → ${s.dir} (${s.status})`;
+  });
+  const prefix = chatState.serverBase ? 'All servers:' : 'Available servers:';
+  await sendLongMessage(token, chatState, prefix + '\n' + lines.join('\n'));
+}
+
+function sessionName(s) {
+  return s.title || s.slug || s.id;
+}
+
+function normalizeUrl(url) {
+  if (!url) return url;
+  return url.replace(/\/+$/, '').replace(/^http:\/\/127\.0\.0\.1:/, 'http://localhost:');
+}
+
+function serverDir(serverUrl) {
+  const servers = listServers();
+  const normalized = normalizeUrl(serverUrl);
+  const found = servers.find(s => normalizeUrl(s.url) === normalized);
+  return found ? found.dir : null;
+}
+
+// Sort by time.updated descending, limit to N.
+function sortedSessions(sessions, limit) {
+  return sessions
+    .filter(s => s.time && s.time.updated)
+    .sort((a, b) => b.time.updated - a.time.updated)
+    .slice(0, limit || 50);
+}
+
+// Find the most recently updated session and return its ID and name.
+// Returns null if no sessions exist or the server is unreachable.
+async function discoverActiveSession(server) {
+  try {
+    const sessions = await listSessions(server);
+    if (!sessions || sessions.length === 0) return null;
+    const sorted = sortedSessions(sessions, 1);
+    if (sorted.length === 0) return null;
+    const s = sorted[0];
+    return { id: s.id, name: sessionName(s) };
+  } catch {
+    return null;
+  }
+}
+
+async function cmdSessions(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  // Backward compatibility: redirect old subcommands to singular commands
+  if (args.length > 0) {
+    const sub = args[0].toLowerCase();
+    if (sub === 'switch' || sub === 'new' || sub === 'rename') {
+      return cmdSession(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat);
+    }
+    await sendLongMessage(token, chatState,
+      `Unknown subcommand: /sessions ${sub}\n\n` +
+      'Usage:\n' +
+      '  `/sessions` ─ list sessions\n' +
+      '  `/session <name-or-number>` ─ switch to a session\n' +
+      '  `/session new [name]` ─ create a new session\n' +
+      '  `/session rename <name>` ─ rename the active session');
+    return;
+  }
+
+  // Default: list sessions
+  try {
+    const projectDir = serverDir(server);
+    const sessions = await listSessions(server, projectDir);
+    if (!sessions || sessions.length === 0) {
+      await sendLongMessage(token, chatState, 'No active sessions.');
+      return;
+    }
+
+    // Show primary-agent sessions and always include the active session
+    const agents = await listAgents(server).catch(() => []);
+    const primaryAgents = new Set(agents.filter(a => a.mode === 'primary').map(a => a.name));
+    const hasPrimaryAgent = (s) => s.agent && primaryAgents.has(s.agent);
+    const activeId = getState(server).activeSessionId;
+    const filtered = sessions.filter(s =>
+      (hasPrimaryAgent(s) || s.id === activeId) && (!projectDir || s.directory === projectDir));
+    const sorted = sortedSessions(filtered, 50);
+    if (sorted.length === 0) {
+      await sendLongMessage(token, chatState, 'No active sessions.');
+      return;
+    }
+
+    // Build lines with date headings and time labels
+    const now = new Date();
+    const todayStr = now.toLocaleDateString();
+    const oneWeekAgo = new Date(now);
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+    const lines = [];
+    let currentHeading = null;
+
+    sorted.forEach((s, idx) => {
+      const created = new Date(s.time.updated);
+      const isToday = created.toLocaleDateString() === todayStr;
+      const isRecent = created >= oneWeekAgo;
+
+      let heading;
+      if (isToday) {
+        heading = '**Today**';
+      } else if (isRecent) {
+        heading = '**' + created.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' }) + '**';
+      } else {
+        heading = '**' + created.getFullYear() + '-' + String(created.getMonth() + 1).padStart(2, '0') + '**';
+      }
+      if (heading !== currentHeading) {
+        lines.push('');
+        lines.push(heading);
+        currentHeading = heading;
+      }
+
+      const hh = String(created.getHours()).padStart(2, '0');
+      const mm = String(created.getMinutes()).padStart(2, '0');
+      const timeLabel = isRecent
+        ? `[${hh}:${mm}]`
+        : `[${String(created.getDate()).padStart(2, '0')}/${String(created.getMonth() + 1).padStart(2, '0')} - ${hh}:${mm}]`;
+
+      const name = sessionName(s);
+      const pos = idx + 1;
+      const bullet = s.id === activeId ? '▶ ' : '🔌 ';
+      lines.push('`' + bullet + pos + ' ' + timeLabel + ' – ' + name.replace(/`/g, "'") + '`');
+    });
+
+    await sendLongMessage(token, chatState, 'Sessions:\n' + lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error listing sessions: ${err.message}`);
+  }
+}
+
+async function cmdAgents(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  // Backward compatibility: redirect /agents switch to /agent
+  if (args.length > 0 && args[0].toLowerCase() === 'switch') {
+    return cmdAgent(token, chatId, args.slice(1), chatState, setServerForChat, setActiveSessionForChat);
+  }
+
+  try {
+    const agents = await listAgents(server);
+    if (!agents || agents.length === 0) {
+      await sendLongMessage(token, chatState, 'No agents available.');
+      return;
+    }
+    const primary = agents.filter(a => a.mode === 'primary');
+    if (primary.length === 0) {
+      await sendLongMessage(token, chatState, 'No primary agents available.');
+      return;
+    }
+    const activeAgentName = getState(server).activeAgentName;
+    const lines = primary.map(a => {
+      const bullet = a.name === activeAgentName ? '▶ ' : ' · ';
+      const model = a.model ? ` ─ \`${a.model.providerID}/${a.model.modelID}\`` : '';
+      const desc = a.description ? `. ${a.description}` : '';
+      return bullet + '**' + a.name + '**' + model + desc;
+    });
+    await sendLongMessage(token, chatState, 'Primary agents:\n' + lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error listing agents: ${err.message}`);
+  }
+}
+
+async function cmdModels(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  try {
+    const result = await listProviders(server);
+    const all = result.all || [];
+    const connectedIds = result.connected || [];
+
+    const filtered = all.filter(p => connectedIds.includes(p.id));
+    if (filtered.length === 0) {
+      await sendLongMessage(token, chatState, 'No connected providers.');
+      return;
+    }
+
+    // Determine current model: session model first (the real in-use model,
+    // including manual /model TUI switches), then fall back to the agent's
+    // configured default model.
+    let currentProviderID = null;
+    let currentModelID = null;
+    const st = getState(server);
+    let activeSid = st.activeSessionId;
+    log.info(`[cmdModels] activeSessionId=${activeSid} activeAgentName=${st.activeAgentName}`);
+    // Auto-discover active session if not set
+    if (!activeSid) {
+      try {
+        const discovered = await discoverActiveSession(server);
+        if (discovered) {
+          st.activeSessionId = discovered.id;
+          st.activeSessionName = discovered.name;
+          activeSid = discovered.id;
+          log.info(`[cmdModels] auto-discovered session: ${discovered.name || discovered.id}`);
+        }
+      } catch (err) {
+        log.info(`[cmdModels] auto-discover error: ${err.message}`);
+      }
+    }
+    if (activeSid) {
+      try {
+        const sessions = await listSessions(server);
+        const session = sessions.find(s => String(s.id) === String(activeSid));
+        if (session && session.model) {
+          const m = session.model;
+          log.info(`[cmdModels] session model: ${JSON.stringify(m)}`);
+          if (typeof m === 'object' && m.providerID) {
+            currentProviderID = m.providerID;
+            currentModelID = m.modelID || m.id;
+          } else if (typeof m === 'string') {
+            const parts = m.split('/');
+            if (parts.length === 2) {
+              currentProviderID = parts[0];
+              currentModelID = parts[1];
+            }
+          }
+        } else {
+          log.info(`[cmdModels] session found=${!!session}, has model=${session && !!session.model}`);
+        }
+      } catch (err) {
+        log.info(`[cmdModels] listSessions error: ${err.message}`);
+      }
+    }
+    // Fallback: active agent's configured model
+    if (!currentModelID) {
+      const activeAgentName = st.activeAgentName;
+      if (activeAgentName) {
+        try {
+          const agents = await listAgents(server);
+          const activeAgent = agents.find(a => a.name === activeAgentName);
+          if (activeAgent && activeAgent.model) {
+            const am = activeAgent.model;
+            log.info(`[cmdModels] agent model: ${JSON.stringify(am)}`);
+            currentProviderID = am.providerID;
+            currentModelID = am.modelID || am.id;
+          } else {
+            log.info(`[cmdModels] agent found=${!!activeAgent}, has model=${activeAgent && !!activeAgent.model}`);
+          }
+        } catch (err) {
+          log.info(`[cmdModels] listAgents error: ${err.message}`);
+        }
+      }
+    }
+    log.info(`[cmdModels] result: provider=${currentProviderID} model=${currentModelID}`);
+
+    // /models <provider> — list all models for a matching provider
+    if (args.length > 0) {
+      const query = args.join(' ');
+      const matches = filtered.filter(p =>
+        p.name.toLowerCase().includes(query.toLowerCase()) ||
+        p.id.toLowerCase().includes(query.toLowerCase())
+      );
+      if (matches.length === 0) {
+        await sendLongMessage(token, chatState, `No provider matching "${query}".`);
+        return;
+      }
+      if (matches.length > 1) {
+        const list = matches.map(p => '  `' + p.name + '`').join('\n');
+        await sendLongMessage(token, chatState,
+          `Multiple matches for "${query}":\n${list}\n\nPlease be more specific.`);
+        return;
+      }
+      const provider = matches[0];
+      const modelEntries = Object.entries(provider.models || {});
+      if (modelEntries.length === 0) {
+        await sendLongMessage(token, chatState,
+          '**' + provider.name + '** has no models configured.');
+        return;
+      }
+      const lines = ['**' + provider.name + '** models:'];
+      for (const [id, model] of modelEntries) {
+        const isCurrent = currentProviderID === provider.id && currentModelID === id;
+        const bullet = isCurrent ? '\u25b6 ' : '\u00b7 ';
+        const extras = [];
+        if (model.limit) extras.push(Math.round(model.limit.context / 1000) + 'K ctx');
+        if (model.cost) extras.push(`$${model.cost.input}/$${model.cost.output}`);
+        const suffix = extras.length > 0 ? ` (*${extras.join(', ')}*)` : '';
+        lines.push(bullet + '`' + id + '`' + suffix);
+      }
+      await sendLongMessage(token, chatState, lines.join('\n'));
+      return;
+    }
+
+    // Default: list providers with model count per provider
+    const lines = ['**Connected providers:**'];
+    for (const provider of filtered) {
+      const modelCount = Object.keys(provider.models || {}).length;
+      const isCurrentProvider = currentProviderID === provider.id;
+      const bullet = isCurrentProvider ? '\u25b6 ' : '\u00b7 ';
+      lines.push(bullet + '**' + provider.name + '**' +
+        (modelCount > 0 ? ` (*${modelCount} models*)` : ' *No models*'));
+    }
+    lines.push('');
+    lines.push('\u{1f4a1} Use `/models <provider>` to list the models it provides.');
+    await sendLongMessage(token, chatState, lines.join('\n'));
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error listing models: ${err.message}`);
+  }
+}
+
+const PERM_RESPONSE_HELP = ' No pending permission. Use `/status` to check the current state.';
+
+// ---------------------------------------------------------------------------
+// Agentp gateway ─ tiny HTTP server for agentp --tg
+// ---------------------------------------------------------------------------
+
+function startAgentpGateway(token, serverBaseResolver) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      try {
+        if (req.method !== 'POST') {
+          res.writeHead(405);
+          res.end('Method Not Allowed');
+          return;
+        }
+        if (!validateAgentpAuth(req)) {
+          res.writeHead(401);
+          res.end('Unauthorized');
+          return;
+        }
+        if (req.url === '/send') {
+          handleSendRequest(req, res, token, serverBaseResolver);
+        } else {
+          res.writeHead(404);
+          res.end('Not Found');
+        }
+      } catch (err) {
+        log.error(`Agentp gateway handler error: ${err.message}`);
+      }
+    });
+    server.on('error', (err) => {
+      log.error(`Agentp gateway server error: ${err.message}`);
+    });
+    server.listen(TGAGENTP_PORT, '127.0.0.1', () => {
+      const port = server.address().port;
+      try { fs.writeFileSync(PORT_FILE, String(port)); } catch (_) {}
+      log.info(`Agentp gateway listening on port ${port}`);
+      resolve(port);
+    });
+  });
+}
+
+function handleSendRequest(req, res, token, serverBaseResolver) {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    try {
+      let data;
+      try { data = JSON.parse(body); } catch {
+        res.writeHead(400);
+        res.end('Bad Request');
+        return;
+      }
+      const { text, server } = data;
+      if (typeof text !== 'string' || typeof server !== 'string') {
+        res.writeHead(400);
+        res.end('Bad Request: text and server are required');
+        return;
+      }
+
+      // Find the chat that owns this server
+      const targetUrl = normalizeUrl(server);
+      const owningChatId = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === targetUrl)?.[1];
+
+      // Return recorded conversation buffer for the owning chat
+      const buffered = owningChatId ? flushRecorded(owningChatId.chatId, owningChatId.threadId) : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ buffered }));
+
+      if (!owningChatId) return;
+      const activeUrl = normalizeUrl(serverBaseResolver());
+
+      if (targetUrl === activeUrl) {
+        processTelegramCommands(text, server, token, owningChatId).then((cleaned) => {
+          if (cleaned) sendLongMessage(token, owningChatId, cleaned).catch(() => {});
+        });
+      } else {
+        if (!agentpQueues[server]) {
+          agentpQueues[server] = { messages: [], notifyTimer: null, notified: false };
+        }
+        const q = agentpQueues[server];
+        q.messages.push(text);
+        if (!q.notifyTimer) {
+          q.notifyTimer = setTimeout(() => {
+            q.notifyTimer = null;
+            if (q.messages.length > 0 && !q.notified) {
+              q.notified = true;
+              sendLongMessage(token, owningChatId,
+                `📥 ${q.messages.length} agentp message(s) queued for server \`${server}\`. Switch servers to view them.`)
+                .catch(() => {});
+            }
+          }, TGAGENTP_DEBOUNCE_MS);
+        }
+      }
+    } catch (err) {
+      log.error(`Agentp gateway handler error: ${err.message}`);
+    }
+  });
+}
+
+// Scan response text for [Telegram]{...} structured messages, process them,
+// and return the text with those lines removed (or replaced, for help commands).
+// Supported commands:
+//   "upload"  — send a file to the Telegram chat.
+//               Format: [Telegram]{"command":"upload","path":"<rel-path>","msg":"<caption>"}
+//   "download" — save a Telegram file to the project directory.
+//                Format: [Telegram]{"command":"download","fileId":"<id>","path":"<rel-path>"}
+//   "help"    — get help about available commands.
+//               Format: [Telegram]{"command":"help","topic":"<upload|download|help>"}
+// The [Telegram]{...} must be the only content on its line.
+
+// Parse a single [Telegram]{...} line. Returns { payload } or null.
+function parseTelegramLine(line) {
+  const m = line.match(/^\[Telegram\](\{.*\})\s*$/);
+  if (!m) return null;
+  let payload;
+  try { payload = JSON.parse(m[1]); } catch { return null; }
+  if (!payload || typeof payload !== 'object') return null;
+  return payload;
+}
+
+const TELEGRAM_COMMANDS_HELP = {
+  all: 'Available commands:\n\n' +
+    '• upload — send a file to Telegram.\n' +
+    '  [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    '• download — save a file from Telegram to the project.\n' +
+    '  [Telegram]{"command":"download","fileId":"<telegram-file-id>","path":"<relative-destination>"}\n\n' +
+    '• help — show this help or details for a specific command.\n' +
+    '  [Telegram]{"command":"help","topic":"<command>"}',
+  upload: 'Upload a file to the Telegram chat.\n\n' +
+    'Format: [Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    '- path: file path relative to the project root (required)\n' +
+    '- msg:  optional caption sent with the file',
+  download: 'Download a file the user uploaded to Telegram.\n\n' +
+    'Format: [Telegram]{"command":"download","fileId":"<telegram-file-id>","path":"<relative-destination>"}\n\n' +
+    '- fileId: the Telegram file identifier (provided when the user uploads a file)\n' +
+    '- path:   destination path relative to the project root (required)',
+  help: 'Get help about Telegram commands.\n\n' +
+    'Format: [Telegram]{"command":"help","topic":"<command>"}\n\n' +
+    '- topic: one of "upload", "download", "help". Omit for general help.',
+};
+
+function getHelpText(topic) {
+  if (topic && TELEGRAM_COMMANDS_HELP[topic]) return TELEGRAM_COMMANDS_HELP[topic];
+  return TELEGRAM_COMMANDS_HELP.all;
+}
+
+async function processTelegramCommands(text, server, token, chatState) {
+  if (!text) return text;
+  const lines = text.split('\n');
+  const toStrip = new Set();
+  const filesSent = [];
+  const dir = serverDir(server);
+
+  for (let i = 0; i < lines.length; i++) {
+    const payload = parseTelegramLine(lines[i]);
+    if (!payload) continue;
+
+    if (payload.command === 'upload' && payload.path) {
+      toStrip.add(i);
+      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
+      if (dir && !resolved.startsWith(dir + path.sep)) {
+        log.error(`processTelegramCommands: path outside project rejected: ${payload.path}`);
+        continue;
+      }
+      try {
+        if (!fs.existsSync(resolved)) {
+          log.error(`processTelegramCommands: file not found: ${resolved}`);
+          continue;
+        }
+        const fileData = fs.readFileSync(resolved);
+        const fileName = path.basename(resolved);
+        const caption = typeof payload.msg === 'string' ? payload.msg : undefined;
+        await sendTelegramDocument(token, chatState, fileData, fileName, caption);
+        filesSent.push(fileName);
+      } catch (err) {
+        log.error(`processTelegramCommands: failed to send file ${resolved}: ${err.message}`);
+      }
+    } else if (payload.command === 'download' && payload.fileId && payload.path) {
+      toStrip.add(i);
+      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
+      if (dir && !resolved.startsWith(dir + path.sep)) {
+        log.error(`processTelegramCommands: download path outside project rejected: ${payload.path}`);
+        continue;
+      }
+      try {
+        const fileData = await downloadTelegramFile(token, payload.fileId);
+        fs.mkdirSync(path.dirname(resolved), { recursive: true });
+        fs.writeFileSync(resolved, fileData);
+        filesSent.push(path.basename(resolved));
+      } catch (err) {
+        log.error(`processTelegramCommands: failed to download file: ${err.message}`);
+      }
+    } else if (payload.command === 'help') {
+      toStrip.add(i);
+      const topic = typeof payload.topic === 'string' ? payload.topic : undefined;
+      const st = getState(server);
+      if (st.activeSessionId) {
+        sendToSession(server, st.activeSessionId, getHelpText(topic)).catch(() => {});
+      }
+    } else {
+      toStrip.add(i); // unrecognized command — strip silently
+    }
+  }
+
+  if (toStrip.size === 0) return text;
+
+  if (filesSent.length > 0) {
+    log.info(`processTelegramCommands: processed ${filesSent.length} file(s): ${filesSent.join(', ')}`);
+  }
+
+  const out = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!toStrip.has(i)) out.push(lines[i]);
+  }
+  return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+async function cmdAllow(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatState, '/allow' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'once');
+    await sendLongMessage(token, chatState, '✅ Permission approved (once).');
+    log.debug(`  → /allow: ${p.type} ${p.pattern || ''}`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error: ${err.message}`);
+  }
+}
+
+async function cmdReject(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatState, '/reject' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'reject');
+    await sendLongMessage(token, chatState, '⛔ Permission denied.');
+    log.debug(`  → /reject: ${p.type} ${p.pattern || ''}`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error: ${err.message}`);
+  }
+}
+
+async function cmdAlways(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  if (!st.pendingPermission) {
+    await sendLongMessage(token, chatState, '/always' + PERM_RESPONSE_HELP);
+    return;
+  }
+  const p = st.pendingPermission;
+  try {
+    await respondToPermission(p.server, p.sessionId, p.permissionId, 'always');
+    await sendLongMessage(token, chatState, '✅ Permission approved (always).');
+    log.debug(`  → /always: ${p.type} ${p.pattern || ''}`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error: ${err.message}`);
+  }
+}
+
+async function cmdAnswer(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  if (!st.pendingQuestion) {
+    await sendLongMessage(token, chatState, 'No pending question. Use `/status` to check the current state.');
+    return;
+  }
+  const q = st.pendingQuestion;
+  const n = parseInt(args[0], 10);
+  if (isNaN(n) || n < 1 || n > q.options.length) {
+    await sendLongMessage(token, chatState, `Invalid answer. Use a number between 1 and ${q.options.length}.`);
+    return;
+  }
+  const answer = q.options[n - 1].text || q.options[n - 1];
+  await respondToQuestion(q.server, q.sessionId, q.questionId, answer);
+  await sendLongMessage(token, chatState, `✅ Answered: ${answer}`);
+  st.pendingQuestion = null;
+}
+
+async function cmdThink(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const st = getState(chatState.serverBase);
+  const sub = args && args.length > 0 ? args[0].toLowerCase() : 'switch';
+  const wasOn = st.thinkingEnabled;
+  if (sub === 'on') {
+    st.thinkingEnabled = true;
+    await sendLongMessage(token, chatState, '💭 Thinking messages **on** (forwarded to chat).');
+  } else if (sub === 'off') {
+    st.thinkingEnabled = false;
+    await sendLongMessage(token, chatState, '💭 Thinking messages **off**.');
+  } else if (sub === 'switch') {
+    st.thinkingEnabled = !st.thinkingEnabled;
+    await sendLongMessage(token, chatState,
+      `💭 Thinking messages ${st.thinkingEnabled ? '**on**' : '**off**'}.`);
+  } else {
+    await sendLongMessage(token, chatState, 'Usage: `/think [on|off|switch]` (default: switch).');
+  }
+  // When toggled on, flush any thinking text already buffered by the current request
+  if (!wasOn && st.thinkingEnabled && st._thinkingBuf) {
+    const buf = st._thinkingBuf;
+    st._thinkingBuf = '';
+    const html = '💭 ' + buf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    sendLongMessage(token, chatState, html, null, chatState.threadId).catch(() => {});
+  }
+}
+
+async function cmdQueue(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo) {
+  const st = getState(chatState.serverBase);
+  if (!st.busy) {
+    await sendLongMessage(token, chatState, 'Server is not busy. No need to queue — send your message directly.');
+    return;
+  }
+  const text = args.join(' ').trim();
+  if (!text) {
+    await sendLongMessage(token, chatState, 'Usage: `/queue <message>` — queue a message for when the server is idle.');
+    return;
+  }
+  if (!st.messageQueue) st.messageQueue = [];
+  st.messageQueue.push({ text, replyTo });
+  await sendLongMessage(token, chatState, `📥 Queued. ${st.messageQueue.length} message(s) in queue. Will be sent when the current task finishes.`);
+}
+
+function recordingLabel(rec) {
+  if (rec.paused) return '⏸ paused';
+  return rec.active ? '🔴 active' : '⏹ inactive';
+}
+
+async function cmdRecord(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const rec = chatState.recording;
+  const ring = chatState.ring;
+
+  // /record N: retroactively buffer last N messages from the always-on ring
+  if (args.length > 0 && /^\d+$/.test(args[0])) {
+    const n = parseInt(args[0], 10);
+    const count = Math.min(n, ring.messages.length);
+    const msgs = ring.messages.slice(-count);
+    for (const m of msgs) {
+      rec.messages.push({ role: m.role, text: m.text });
+      rec.bytes += Buffer.byteLength(m.text, 'utf8');
+    }
+    while (rec.messages.length > MAX_RECORDED_MSGS || rec.bytes > MAX_RECORDED_BYTES) {
+      const oldest = rec.messages.shift();
+      rec.bytes -= Buffer.byteLength(oldest.text, 'utf8');
+    }
+    rec.active = true;
+    rec.paused = false;
+    const label = rec.messages.length > 0 ? `🔴 *active*, ${rec.messages.length} buffered` : '⏹ *inactive*, buffer empty';
+    await sendLongMessage(token, chatState,
+      `${label} (${count} message(s) retroactively loaded from ring).`);
+    return;
+  }
+
+  // /record pause [N]: pause recording, keep buffer, optionally discard last N
+  if (args.length > 0 && args[0].toLowerCase() === 'pause') {
+    if (rec.active && !rec.paused && args.length > 1 && /^\d+$/.test(args[1])) {
+      const n = parseInt(args[1], 10);
+      const count = Math.min(n, rec.messages.length);
+      rec.messages.splice(-count);
+      rec.bytes = rec.messages.reduce((b, m) => b + Buffer.byteLength(m.text, 'utf8'), 0);
+      await sendLongMessage(token, chatState,
+        `⏸ Recording paused. Discarded last ${count} message(s). ${rec.messages.length} remaining.`);
+    } else {
+      rec.paused = true;
+      rec.active = true;
+      await sendLongMessage(token, chatState,
+        `⏸ Recording paused. Buffer preserved (${rec.messages.length} messages).`);
+    }
+    return;
+  }
+
+  // /record flush: clear buffer, keep state
+  if (args.length > 0 && args[0].toLowerCase() === 'flush') {
+    rec.messages = [];
+    rec.bytes = 0;
+    await sendLongMessage(token, chatState,
+      `🧹 Buffer cleared. State: ${recordingLabel(rec)}.`);
+    return;
+  }
+
+  // /record stop: flush + pause = fully stop and clear
+  if (args.length > 0 && args[0].toLowerCase() === 'stop') {
+    rec.active = false;
+    rec.paused = false;
+    rec.messages = [];
+    rec.bytes = 0;
+    await sendLongMessage(token, chatState, '⏹ Recording stopped. Buffer cleared.');
+    return;
+  }
+
+  // /record (no args) or /record continue: toggle/continue
+  if (args.length > 0 && args[0].toLowerCase() === 'continue') {
+    rec.paused = false;
+    rec.active = true;
+    const empty = rec.messages.length === 0;
+    await sendLongMessage(token, chatState,
+      empty
+        ? '🔴 Recording started (buffer was empty).'
+        : `🔴 Recording continued. ${rec.messages.length} buffered message(s) will grow.`);
+    return;
+  }
+
+  // Bare /record: toggle between active ↔ paused (if active), or activate (if inactive)
+  if (!rec.active) {
+    rec.active = true;
+    rec.paused = false;
+    rec.messages = [];
+    rec.bytes = 0;
+    await sendLongMessage(token, chatState, '🔴 Recording started.');
+  } else if (!rec.paused) {
+    rec.paused = true;
+    await sendLongMessage(token, chatState,
+      `⏸ Recording paused. ${rec.messages.length} message(s) preserved.`);
+  } else {
+    rec.paused = false;
+    const empty = rec.messages.length === 0;
+    await sendLongMessage(token, chatState,
+      empty
+        ? '🔴 Recording continued (buffer was empty).'
+        : `🔴 Recording continued. ${rec.messages.length} buffered message(s) will grow.`);
+  }
+}
+
+async function cmdFlush(token, chatId, args, chatState) {
+  const st = getState(chatState.serverBase);
+  const server = chatState.serverBase;
+  const q = st.messageQueue || [];
+  const qlen = q.length;
+
+  // Clear the message queue
+  st.messageQueue = [];
+
+  // Clear the agentp queue
+  const aq = agentpQueues[server];
+  let alen = 0;
+  if (aq) {
+    alen = aq.messages.length;
+    aq.messages = [];
+    aq.notified = false;
+    if (aq.notifyTimer) { clearTimeout(aq.notifyTimer); aq.notifyTimer = null; }
+  }
+
+  await sendLongMessage(token, chatState,
+    qlen + alen > 0
+      ? `🧹 Flushed ${qlen} queued message(s) and ${alen} agentp message(s).`
+      : '🧹 No queued messages to flush.');
+}
+
+async function cmdComment(token, chatId, args, chatState) {
+  // No-op: the message is already in the chat. /comment prevents forwarding to the agent.
+  // Replying to a comment with a non-/comment message includes it via the quote mechanism.
+  log.info(`[COMMENT] chat=${chatId} text: ${(args || []).join(' ')}`);
+}
+
+async function cmdResurrect(token, chatId, args, chatState) {
+  let dir = null;
+  let url = null;
+  const dirArg = args && args.length > 0 ? args.join(' ') : null;
+  if (dirArg) {
+    // User specified a directory: resolve it
+    if (TGAGENTP_ROOT) {
+      const resolved = path.resolve(TGAGENTP_ROOT, dirArg);
+      if (resolved.startsWith(TGAGENTP_ROOT) && fs.existsSync(resolved)) {
+        dir = resolved;
+      }
+    }
+    if (!dir) {
+      // Resolve against home or absolute path
+      const resolved = path.resolve(dirArg);
+      if (fs.existsSync(resolved)) dir = resolved;
+    }
+    if (!dir) {
+      await sendLongMessage(token, chatState, `❌ Directory not found: \`${dirArg}\``);
+      return;
+    }
+    // Read the old URL from the state file
+    const state = readState(statefileFor(dir));
+    url = state ? state.url : null;
+  } else {
+    url = chatState.serverBase;
+    if (!url) {
+      await sendLongMessage(token, chatState, '🔌 Not connected to any server. Specify a directory or switch to a server first.');
+      return;
+    }
+    dir = serverDir(url);
+    if (!dir) {
+      try {
+        const savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+        if (savedData && Array.isArray(savedData.connections)) {
+          const match = savedData.connections.find(c =>
+            String(c.chatId) === String(chatId) && (c.threadId || null) === (chatState.threadId || null)
+          );
+          if (match && match.dir) dir = match.dir;
+        }
+      } catch {}
+    }
+    if (!dir) {
+      await sendLongMessage(token, chatState,
+        'Could not find the directory for this server.\n' +
+        'Use `ocmux resurrect` from the terminal or specify a directory: `/resurrect <path>`.');
+      return;
+    }
+  }
+
+  await sendLongMessage(token, chatState,
+    `♻️ Resurrecting server \`${dir}\`...\n` +
+    `The old server at \`${url}\` will be replaced with a new one.`);
+
+  try {
+    const { url: newUrl } = resurrectServer(dir, false);
+
+    // Update chat state to new URL
+    chatState.serverBase = newUrl;
+
+    // Transfer relevant state from old URL to new URL
+    const oldSt = getState(url);
+    const newSt = getState(newUrl);
+    newSt.activeSessionId = oldSt.activeSessionId;
+    newSt.activeSessionName = oldSt.activeSessionName;
+    newSt.activeAgentName = oldSt.activeAgentName;
+    newSt.thinkingEnabled = oldSt.thinkingEnabled;
+
+    // Update serverOwners to point to the new URL
+    const normOld = normalizeUrl(url);
+    for (const [sfUrl, owner] of Object.entries(serverOwners)) {
+      if (normalizeUrl(sfUrl) === normOld) {
+        serverOwners[newUrl] = owner;
+        delete serverOwners[sfUrl];
+        break;
+      }
+    }
+
+    await sendLongMessage(token, chatState,
+      `✅ Server resurrected.\n` +
+      `New URL: \`${newUrl}\`\n\n` +
+      `Use \`/status\` to check the session.`);
+  } catch (err) {
+    await sendLongMessage(token, chatState,
+      `❌ Resurrection failed: ${err.message}\n` +
+      `Try \`ocmux resurrect\` from the terminal.`);
+  }
+}
+
+async function cmdDisconnect(token, chatId, args, chatState) {
+  const url = chatState.serverBase;
+  if (!url) {
+    await sendLongMessage(token, chatState, '🔌 Not connected to any server.');
+    return;
+  }
+  // Clear ownership if this chat is the owner
+  const key = convKey(chatId, chatState.threadId);
+  for (const [srvUrl, owner] of Object.entries(serverOwners)) {
+    if (String(owner.chatId) === String(chatId) && owner.threadId === chatState.threadId) {
+      delete serverOwners[srvUrl];
+      break;
+    }
+  }
+  chatState.serverBase = null;
+  removeConnection(chatId, chatState.threadId);
+  await sendLongMessage(token, chatState, '👋 Disconnected from `' + url + '`.');
+  log.info(`[chat ${chatId}] Disconnected from server: ${url}`);
+}
+
+async function cmdServe(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  if (!tgagentpRootValid) {
+    const msg = TGAGENTP_ROOT
+      ? '❌ `TGAGENTP_ROOT` is not a valid writable directory.\nCheck the logs for details.'
+      : '❌ `TGAGENTP_ROOT` environment variable is not set.\nSet it to a writable directory to enable `/serve` and `/new` commands.';
+    await sendLongMessage(token, chatState, msg);
+    return;
+  }
+  const relPath = args.join(' ').trim();
+  if (!relPath) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/serve <path>`\n\n' +
+      'Run `ocmux serve` on a directory under `TGAGENTP_ROOT`.\n' +
+      'The path is relative to the root directory.');
+    return;
+  }
+  const targetDir = path.resolve(TGAGENTP_ROOT, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOT)) {
+    await sendLongMessage(token, chatState,
+      '❌ Path must be within `TGAGENTP_ROOT`.\n' +
+      `Requested: \`${relPath}\``);
+    return;
+  }
+  try {
+    const stats = fs.statSync(targetDir);
+    if (!stats.isDirectory()) {
+      await sendLongMessage(token, chatState,
+        `❌ Not a directory: \`${relPath}\``);
+      return;
+    }
+  } catch {
+    await sendLongMessage(token, chatState,
+      `❌ Directory does not exist: \`${relPath}\``);
+    return;
+  }
+  const sf = statefileFor(targetDir);
+  if (fs.existsSync(sf)) {
+    const status = serverStatus(targetDir);
+    if (status && status.status === 'dead') {
+      await sendLongMessage(token, chatState,
+        `💀 A dead server exists at \`${relPath}\` (${status.url}).\n` +
+        `Use \`/resurrect ${relPath}\` to restart it.`);
+    } else {
+      await sendLongMessage(token, chatState,
+        `⚠️ Server already exists for \`${relPath}\`.\n` +
+        'Use `/server <name>` to connect to it.');
+    }
+    return;
+  }
+  await sendLongMessage(token, chatState,
+    `🚀 Starting server for \`${relPath}\`...`);
+  const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
+  if (result.status !== 0) {
+    const err = result.stderr || result.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  const url = (result.stdout || '').trim();
+  if (!url) {
+    await sendLongMessage(token, chatState,
+      '❌ Server started but did not return a URL.');
+    return;
+  }
+  await setServerForChat(chatState, url);
+  await sendLongMessage(token, chatState,
+    `✅ Server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+  log.info(`[chat ${chatId}] Served ${targetDir} → ${url}`);
+}
+
+async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  if (!tgagentpRootValid) {
+    const msg = TGAGENTP_ROOT
+      ? '❌ `TGAGENTP_ROOT` is not a valid writable directory.\nCheck the logs for details.'
+      : '❌ `TGAGENTP_ROOT` environment variable is not set.\nSet it to a writable directory to enable `/serve` and `/new` commands.';
+    await sendLongMessage(token, chatState, msg);
+    return;
+  }
+  const relPath = args.join(' ').trim();
+  if (!relPath) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/new <path>`\n\n' +
+      'Create a new directory under `TGAGENTP_ROOT`, initialize git, and start a server.\n' +
+      'The path is relative to the root directory.');
+    return;
+  }
+  const targetDir = path.resolve(TGAGENTP_ROOT, relPath);
+  if (!targetDir.startsWith(TGAGENTP_ROOT)) {
+    await sendLongMessage(token, chatState,
+      '❌ Path must be within `TGAGENTP_ROOT`.\n' +
+      `Requested: \`${relPath}\``);
+    return;
+  }
+  if (fs.existsSync(targetDir)) {
+    await sendLongMessage(token, chatState,
+      `❌ Directory already exists: \`${relPath}\`.\n` +
+      'Use `/serve` to start a server in an existing directory.');
+    return;
+  }
+  try {
+    fs.mkdirSync(targetDir, { recursive: true });
+  } catch (err) {
+    await sendLongMessage(token, chatState,
+      `❌ Failed to create directory: ${err.message}`);
+    return;
+  }
+  const gitResult = spawnSync('git', ['init'], { cwd: targetDir, encoding: 'utf8', timeout: 10000 });
+  if (gitResult.status !== 0) {
+    const err = gitResult.stderr || gitResult.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to initialize git:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  await sendLongMessage(token, chatState,
+    `🚀 Starting server for \`${relPath}\`...`);
+  const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
+  if (result.status !== 0) {
+    const err = result.stderr || result.stdout || 'unknown error';
+    await sendLongMessage(token, chatState,
+      `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
+    return;
+  }
+  const url = (result.stdout || '').trim();
+  if (!url) {
+    await sendLongMessage(token, chatState,
+      '❌ Server started but did not return a URL.');
+    return;
+  }
+  await setServerForChat(chatState, url);
+  await sendLongMessage(token, chatState,
+    `✅ Directory created and server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+  log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
+}
+
+async function cmdModel(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  const st = getState(server);
+  // Auto-discover active session if not set
+  if (!st.activeSessionId) {
+    try {
+      const discovered = await discoverActiveSession(server);
+      if (discovered) {
+        st.activeSessionId = discovered.id;
+        st.activeSessionName = discovered.name;
+      }
+    } catch (err) {
+      log.info(`[cmdModel] auto-discover error: ${err.message}`);
+    }
+  }
+  if (args.length === 0) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/model <providerID/modelID>` or `/model <modelID>` to search.\n' +
+      'Example: `/model opencode/big-pickle` or `/model gpt-4`');
+    return;
+  }
+  if (!st.activeSessionId) {
+    await sendLongMessage(token, chatState, 'No active session. Use `/sessions` to select one.');
+    return;
+  }
+  const query = args[0];
+  let providerID, modelID;
+
+  // Try "providerID/modelID" format first
+  if (query.includes('/')) {
+    const parts = query.split('/');
+    const rawProviderID = parts[0];
+    modelID = parts[1];
+    providerID = rawProviderID;
+
+    // Validate provider ID exists, or try partial match (e.g. "go" → "opencode-go")
+    try {
+      const result = await listProviders(server);
+      const all = result.all || [];
+      const connectedIds = result.connected || [];
+      const connected = all.filter(p => connectedIds.includes(p.id));
+      const exists = connected.some(p => p.id === rawProviderID);
+      if (!exists) {
+        const match = connected.find(p =>
+          (p.name && p.name.toLowerCase().includes(rawProviderID.toLowerCase())) ||
+          (p.id && p.id.toLowerCase().includes(rawProviderID.toLowerCase()))
+        );
+        if (match) {
+          providerID = match.id;
+          log.info(`[cmdModel] resolved "${rawProviderID}" → "${match.id}"`);
+        } else {
+          await sendLongMessage(token, chatState,
+            `Provider "${rawProviderID}" not found. Use \`/models\` to list available providers.`);
+          return;
+        }
+      }
+      // Verify model exists under this provider
+      const provider = all.find(p => p.id === providerID);
+      if (!provider || !provider.models || !provider.models[modelID]) {
+        const availableModels = provider && provider.models ? Object.keys(provider.models).join(', ') : 'unknown';
+        log.info(`[cmdModel] model "${modelID}" not found in ${providerID}, available: ${availableModels}`);
+        await sendLongMessage(token, chatState,
+          `Model "${modelID}" not found under provider \`${providerID}\`. Use \`/models\` to list available models.`);
+        return;
+      }
+    } catch (err) {
+      log.info(`[cmdModel] provider validation error: ${err.message}`);
+      // Continue with what we have — may still work
+    }
+  } else {
+    // Search across all connected providers to resolve to providerID/modelID
+    try {
+      const result = await listProviders(server);
+      const all = result.all || [];
+      const connectedIds = result.connected || [];
+      const connected = all.filter(p => connectedIds.includes(p.id));
+      for (const provider of connected) {
+        const models = Object.keys(provider.models || {});
+        const match = models.find(m => m.toLowerCase() === query.toLowerCase());
+        if (match) {
+          providerID = provider.id;
+          modelID = match;
+          break;
+        }
+      }
+    } catch (err) {
+      log.info(`[cmdModel] listProviders error: ${err.message}`);
+    }
+    if (!modelID) {
+      await sendLongMessage(token, chatState,
+        `No model matching "${query}" found in any connected provider. Use \`/models\` to list available models.`);
+      return;
+    }
+  }
+
+  // Send an async no-reply message with the desired model.
+  // This triggers createUserMessage which fires ModelSwitched when the model differs,
+  // persisting it as the session's current model.
+  try {
+    await sendToSessionAsync(server, st.activeSessionId, '.', null, { providerID, modelID }, true);
+    const label = providerID ? `\`${providerID}/${modelID}\`` : `\`${modelID}\``;
+    await sendLongMessage(token, chatState,
+      `✅ Switched to model ${label}.`);
+    log.info(`[chat ${chatId}] Switched to model ${providerID || '?'}/${modelID}`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error switching model: ${err.message}`);
+  }
+}
+
+async function cmdServer(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  if (args.length === 0) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/server <name>`\n' +
+      'To force-switch (take over a server from another chat), use `/server --force <name>`.\n' +
+      '`<name>` can be a full directory path or a basename.\n' +
+      'Use `/servers` to list available servers.');
+    return;
+  }
+  const forceIdx = args.indexOf('--force');
+  const force = forceIdx !== -1;
+  const nameArgs = args.filter((a, i) => a !== '--force');
+  if (nameArgs.length === 0) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/server <name>`\n' +
+      'To force-switch, use `/server --force <name>`.');
+    return;
+  }
+  const name = nameArgs.join(' ');
+  const servers = listServers();
+  if (servers.length === 0) {
+    await sendLongMessage(token, chatState, 'No servers running.');
+    return;
+  }
+  let matches = servers.filter(s => s.dir.toLowerCase() === name.toLowerCase());
+  if (matches.length === 0) {
+    matches = servers.filter(s => path.basename(s.dir).toLowerCase() === name.toLowerCase());
+  }
+  if (matches.length === 0) {
+    const lowerName = name.toLowerCase();
+    matches = servers.filter(s => s.dir.toLowerCase().includes(lowerName) || path.basename(s.dir).toLowerCase().includes(lowerName));
+  }
+  if (matches.length === 0) {
+    await sendLongMessage(token, chatState, `No server found matching "${name}".`);
+    return;
+  }
+  if (matches.length > 1) {
+    let exact = servers.filter(s => s.dir === name);
+    if (exact.length === 0) exact = servers.filter(s => path.basename(s.dir) === name);
+    if (exact.length === 1) {
+      matches = exact;
+    } else {
+      const list = matches.map(s => `  ${s.url} → ${s.dir}`).join('\n');
+      await sendLongMessage(token, chatState,
+        `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
+      return;
+    }
+  }
+  const target = matches[0];
+  const existing = serverOwners[target.url];
+  if (existing && existing.chatId !== chatState.chatId && !force) {
+    await sendLongMessage(token, chatState,
+      `⚠️ Server \`${target.url}\` is already connected to another chat.\n\n` +
+      `Use \`/server --force ${name}\` to take over (the other chat will be disconnected).`);
+    return;
+  }
+  if (force && existing && existing.chatId !== chatState.chatId) {
+    const oldState = getChatState(existing.chatId, existing.threadId);
+    oldState.serverBase = null;
+    sendLongMessage(token, oldState,
+      `⚠️ Server \`${target.url}\` has been taken over by another chat.\n\n` +
+      `Use \`/servers\` to see available servers and reconnect.`).catch(() => {});
+  }
+  const pending = await setServerForChat(chatState, target.url);
+  activateServer(target.dir, target.index, target.url);
+  let msg = `Switched to server: ${target.url} → ${target.dir}`;
+  if (pending && pending.trim()) {
+    await sendLongMessage(token, chatState, msg);
+    await sendLongMessage(token, chatState, pending.trim());
+  } else {
+    await sendLongMessage(token, chatState, msg);
+  }
+}
+
+async function cmdSession(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  if (args.length === 0) {
+    await sendLongMessage(token, chatState,
+      '`/session <name-or-number>` ─ switch to a session\n' +
+      '`/session new [name]` ─ create a new session\n' +
+      '`/session rename <name>` ─ rename the active session\n' +
+      'Use `/sessions` to list available sessions.');
+    return;
+  }
+  const sub = args[0].toLowerCase();
+  if (sub === 'new') {
+    const title = args.slice(1).join(' ') || undefined;
+    try {
+      const session = await createSession(server, title);
+      const name = session.title || session.slug || session.id;
+      setActiveSessionForChat(chatState, session.id, name);
+      selectSession(server, session.id);
+      await sendLongMessage(token, chatState,
+        `Created session: \`${name}\`\nIt is now the active session.`);
+    } catch (err) {
+      await sendLongMessage(token, chatState, `Error creating session: ${err.message}`);
+    }
+    return;
+  }
+  if (sub === 'rename') {
+    if (args.length < 2) {
+      await sendLongMessage(token, chatState, 'Usage: `/session rename <name>`');
+      return;
+    }
+    const st = getState(server);
+    if (!st.activeSessionId) {
+      await sendLongMessage(token, chatState, 'No active session. Use `/session <name>` to select one first.');
+      return;
+    }
+    const newTitle = args.slice(1).join(' ');
+    try {
+      const session = await updateSession(server, st.activeSessionId, newTitle);
+      const name = session.title || session.slug || session.id;
+      await sendLongMessage(token, chatState, `Renamed session to: \`${name}\``);
+    } catch (err) {
+      await sendLongMessage(token, chatState, `Error renaming session: ${err.message}`);
+    }
+    return;
+  }
+  // Switch to session by name or number
+  const query = args.join(' ');
+  try {
+    const projectDir = serverDir(server);
+    const sessions = await listSessions(server, projectDir);
+    const activeId = getState(server).activeSessionId;
+    const filtered = sessions.filter(s =>
+      (s.agent || s.directory || s.id === activeId) && (!projectDir || s.directory === projectDir));
+    const sorted = sortedSessions(filtered, 50);
+    const num = parseInt(query, 10);
+    if (/^\d+$/.test(query) && num >= 1 && num <= sorted.length) {
+      const target = sorted[num - 1];
+      setActiveSessionForChat(chatState, target.id, sessionName(target));
+      selectSession(server, target.id);
+      await sendLongMessage(token, chatState,
+        `Switched to session #${num}: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+      return;
+    }
+    const q = query.toLowerCase();
+    const matches = sorted.filter(s => sessionName(s).toLowerCase().includes(q));
+    if (matches.length === 0) {
+      await sendLongMessage(token, chatState,
+        `No session matching "${query}". Use /sessions to list active sessions.`);
+      return;
+    }
+    if (matches.length > 1) {
+      const list = matches.map(s => `  \`${sessionName(s)}\``).join('\n');
+      await sendLongMessage(token, chatState,
+        `Multiple matches for "${query}":\n${list}\n\nPlease be more specific or use a number.`);
+      return;
+    }
+    const target = matches[0];
+    setActiveSessionForChat(chatState, target.id);
+    selectSession(server, target.id);
+    await sendLongMessage(token, chatState,
+      `Switched to session: \`${sessionName(target)}\`\nSubsequent messages will be sent to this session.`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error switching session: ${err.message}`);
+  }
+}
+
+async function cmdAgent(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat) {
+  const server = chatState.serverBase;
+  if (args.length === 0) {
+    await sendLongMessage(token, chatState,
+      'Usage: `/agent <name>`\n' +
+      'Use `/agents` to list available agents.');
+    return;
+  }
+  const name = args.join(' ');
+  try {
+    const agents = await listAgents(server);
+    if (!agents || agents.length === 0) {
+      await sendLongMessage(token, chatState, 'No agents available.');
+      return;
+    }
+    let matches = agents.filter(a => a.name === name);
+    if (matches.length === 0) {
+      matches = agents.filter(a => a.name.toLowerCase().includes(name.toLowerCase()));
+    }
+    if (matches.length === 0) {
+      await sendLongMessage(token, chatState, `No agent matching "${name}".`);
+      return;
+    }
+    if (matches.length > 1) {
+      const list = matches.map(a => `  \`${a.name}\``).join('\n');
+      await sendLongMessage(token, chatState,
+        `Multiple matches for "${name}":\n${list}\n\nPlease be more specific.`);
+      return;
+    }
+    const target = matches[0];
+    getState(server).activeAgentName = target.name;
+    const st = getState(server);
+    if (st.activeSessionId) {
+      updateSession(server, st.activeSessionId, undefined, target.name);
+      selectSession(server, st.activeSessionId);
+    }
+    const model = target.model ? ` ─ \`${target.model.providerID}/${target.model.modelID}\`` : '';
+    await sendLongMessage(token, chatState,
+      `Switched to agent: **${target.name}**${model}\nSubsequent messages will use this agent.`);
+  } catch (err) {
+    await sendLongMessage(token, chatState, `Error switching agent: ${err.message}`);
+  }
+}
+
+async function cmdMarkdown(token, chatId, args, chatState, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId) {
+  let entry = null;
+  if (replyToMsgId) {
+    entry = getResponseByMessageId(chatId, chatState.threadId, replyToMsgId);
+    if (!entry) {
+      await sendLongMessage(token, chatState, '❌ Could not find the original response for this message. It may be too old or was not sent by tgagentp.');
+      return;
+    }
+  } else {
+    entry = getRecentResponse(chatId, chatState.threadId, 1);
+    if (!entry) {
+      await sendLongMessage(token, chatState, '❌ No recent responses available. Send a message to the agent first.');
+      return;
+    }
+  }
+  const fileData = Buffer.from(entry.text, 'utf8');
+  const fileName = 'response-' + Date.now() + '.md';
+  await sendTelegramDocument(token, chatState, fileData, fileName, 'Original markdown response');
+}
+
+const COMMANDS = {
+  'help': cmdHelp,
+  'servers': cmdServers,
+  'server': cmdServer,
+  'sessions': cmdSessions,
+  'session': cmdSession,
+  'agents': cmdAgents,
+  'agent': cmdAgent,
+  'models': cmdModels,
+  'model': cmdModel,
+  'think': cmdThink,
+  'record': cmdRecord,
+  'resurrect': cmdResurrect,
+  'queue': cmdQueue,
+  'flush': cmdFlush,
+  'comment': cmdComment,
+  'disconnect': cmdDisconnect,
+  'allow': cmdAllow,
+  'reject': cmdReject,
+  'always': cmdAlways,
+  'answer': cmdAnswer,
+  'serve': cmdServe,
+  'new': cmdNew,
+  'markdown': cmdMarkdown,
+};
+
+// --------------------------------------------------------------------------
+// Module-level state
+// ---------------------------------------------------------------------------
+
+const serverState = {};
+function getState(url) {
+  const key = normalizeUrl(url);
+  return serverState[key] = serverState[key] || { busy: false, serverDead: false, pendingResponse: null, activeSessionId: null, activeSessionName: null, activeAgentName: null, taskId: 0, pendingPermission: null, pendingQuestion: null, thinkingEnabled: false, _thinkingBuf: '', messageQueue: [] };
+}
+
+function sessionLabel(st) {
+  if (st.activeSessionName) return '`' + st.activeSessionName + '`';
+  if (st.activeSessionId) return '`' + st.activeSessionId + '`';
+  return '*none (TUI+SSE)*';
+}
+
+// --------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+async function main() {
+  let serverBase = 'http://localhost:4096';
+
+  let DEV_MODE = false;
+
+  const args = process.argv.slice(2);
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--version') {
+      console.log(version);
+      process.exit(0);
+    } else if (args[i] === '--dev') {
+      DEV_MODE = true;
+      log.verbose = true;
+    } else if (args[i] === '--verbose') {
+      log.verbose = true;
+    } else if (args[i] === '--think') {
+      getState(serverBase).thinkingEnabled = true;
+    } else if (args[i] === '--help') {
+      console.error('Usage: tgagentp [options] [url]');
+      console.error('');
+      console.error('Bridge a Telegram bot chat with an OpenCode TUI session.');
+      console.error('Incoming Telegram messages are forwarded to OpenCode; answers are sent back to the chat.');
+      console.error('');
+      console.error('Options:');
+      console.error('  --dev       Enable development mode (adds /shutdown command)');
+      console.error('  --version   Show version');
+      console.error('  --verbose   Show detailed logs (errors, trace, debug) on stderr');
+      console.error('  --think     Start with thinking messages enabled (default: off)');
+      console.error('  --help      Show this help message');
+      console.error('');
+      console.error('Arguments:');
+      console.error('  url        OpenCode TUI server URL or port number (default: 4096)');
+      console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
+      console.error('');
+      console.error('Environment variables:');
+      console.error('  TELEGRAM_BOT_TOKEN         Telegram bot token (required)');
+      console.error('  OPENCODE_SERVER_PASSWORD    OpenCode server password (optional, also used for agentp gateway auth)');
+      console.error('  OPENCODE_SERVER_USERNAME    OpenCode server username (optional, default: opencode)');
+      console.error('  TGAGENTP_ALLOWED_CHAT_IDS   Comma-separated Telegram chat IDs (optional)');
+      console.error('                               Example: "123456,-789012"');
+      console.error('  TGAGENTP_PORT               Agentp gateway listen port (optional, default: random)');
+      console.error('  TGAGENTP_DEBOUNCE_MS        Debounce interval for queued agentp messages (optional, default: 5000)');
+      console.error('');
+      console.error('Also starts an agentp gateway (tiny HTTP server on localhost) that');
+      console.error('accepts POST /send from agentp --tg and forwards answers to Telegram.');
+      console.error('');
+      console.error('See also: agentp, ocmux');
+      console.error('');
+      console.error('Examples:');
+      console.error('  export TELEGRAM_BOT_TOKEN="your-bot-token"');
+      console.error('  tgagentp');
+      console.error('  tgagentp 4096');
+      console.error('  tgagentp http://192.168.1.50:4096');
+      process.exit(0);
+    } else if (args[i].includes('://')) {
+      serverBase = args[i].replace(/\/+$/, '');
+    } else if (/^\d+$/.test(args[i])) {
+      serverBase = 'http://localhost:' + args[i];
+    }
+  }
+
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    console.error('Error: TELEGRAM_BOT_TOKEN environment variable is not set.');
+    console.error('Create a bot with @BotFather on Telegram and export the token before running tgagentp.');
+    process.exit(1);
+  }
+
+  log.info(`tgagentp v${version} started. OpenCode server: ${serverBase}`);
+
+  // When --dev is active, log all message traffic to stderr
+  let msgLogStream = null;
+  if (DEV_MODE) {
+    try {
+      msgLogStream = fs.createWriteStream('/tmp/tgagentp-msg.log', { flags: 'a' });
+      const hdr = JSON.stringify({ ts: new Date().toISOString(), type: 'startup', version });
+      msgLogStream.write(hdr + '\n');
+    } catch (_) { msgLogStream = null; }
+  }
+  const msgLog = (type, chatId, from, text) => {
+    if (!msgLogStream) return;
+    try {
+      const entry = JSON.stringify({
+        ts: new Date().toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ''),
+        type, chatId, from: from || '', text: text || '',
+      });
+      msgLogStream.write(entry + '\n');
+    } catch (_) {}
+  };
+
+  if (!process.env.OPENCODE_SERVER_PASSWORD) {
+    log.error('🔓  Server is not password-protected! Set OPENCODE_SERVER_PASSWORD for better security.');
+  }
+
+  const allowedChatIds = parseAllowlist(process.env.TGAGENTP_ALLOWED_CHAT_IDS);
+  if (allowedChatIds) {
+    log.info(`Chat allowlist: ${allowedChatIds.length} chat(s) configured`);
+  } else {
+    log.info('Chat allowlist: not configured (all chats accepted)');
+  }
+
+  getState(serverBase);
+
+  log.info('Discovering server state...');
+  const [discovered, agents] = await Promise.all([
+    discoverActiveSession(serverBase),
+    listAgents(serverBase).catch(() => []),
+  ]);
+  if (discovered) {
+    getState(serverBase).activeSessionId = discovered.id;
+    getState(serverBase).activeSessionName = discovered.name;
+    log.info(`  → session: ${discovered.name || discovered.id}`);
+  }
+  const defaultAgent = agents.find(a => a.mode === 'primary') || agents[0];
+  if (defaultAgent) {
+    getState(serverBase).activeAgentName = defaultAgent.name;
+    log.info(`  → agent: ${defaultAgent.name}`);
+  }
+
+  log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
+
+  // Chat-aware server/session mutation callbacks (defined here for token access)
+  const setServerForChat = async (chatState, url) => {
+    const cs = chatState;
+
+    // Disconnect any other chat still connected to this server (one server → one chat)
+    const normalizedUrl = normalizeUrl(url);
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (state === cs) continue;
+      if (state.serverBase && normalizeUrl(state.serverBase) === normalizedUrl) {
+        state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
+        log.info(`[chat ${state.chatId}] Disconnected from server: ${url} (taken over by chat ${cs.chatId})`);
+      }
+    }
+
+    // Clear old server ownership when switching away from a server
+    const oldUrl = cs.serverBase;
+    cs.serverBase = url;
+    if (oldUrl && oldUrl !== url) {
+      if (serverOwners[oldUrl] &&
+          String(serverOwners[oldUrl].chatId) === String(cs.chatId)) {
+        delete serverOwners[oldUrl];
+      }
+    }
+    serverOwners[url] = { chatId: cs.chatId, threadId: cs.threadId };
+    getState(url);
+
+    // Send Telegram bridge awareness note to the new session
+    sendGreeting(cs).catch(() => {});
+
+    // Auto-activate tmux window for this server
+    const servers = listServers();
+    const normalized = normalizeUrl(url);
+    const match = servers.find(s => normalizeUrl(s.url) === normalized);
+    if (match) {
+      activateServer(match.dir, match.index, match.url);
+      saveConnection(cs.chatId, cs.threadId, match.dir);
+    }
+
+    log.info(`[chat ${cs.chatId}] Switched to server: ${url}`);
+
+    // Flush agentp queue for the new active server
+    flushAgentpQueue(url, token, cs.chatId, cs.threadId);
+
+    const [srvDiscovered, srvAgents] = await Promise.all([
+      discoverActiveSession(url),
+      listAgents(url).catch(() => []),
+    ]);
+    if (srvDiscovered) {
+      getState(url).activeSessionId = srvDiscovered.id;
+      getState(url).activeSessionName = srvDiscovered.name;
+      startSessionMonitor(url, srvDiscovered.id);
+      log.info(`  → session: ${srvDiscovered.name || srvDiscovered.id}`);
+    }
+    const defaultSrvAgent = srvAgents.find(a => a.mode === 'primary') || srvAgents[0];
+    if (defaultSrvAgent) {
+      getState(url).activeAgentName = defaultSrvAgent.name;
+      log.info(`  → agent: ${defaultSrvAgent.name}`);
+    }
+    const p = getState(url).pendingResponse;
+    if (p) {
+      getState(url).pendingResponse = null;
+      return p;
+    }
+    return null;
+  };
+
+  const setActiveSessionForChat = (chatState, id, name) => {
+    const server = chatState.serverBase;
+    const prevId = getState(server).activeSessionId;
+    getState(server).activeSessionId = id;
+    if (name) getState(server).activeSessionName = name;
+    log.info(`[chat ${chatState.chatId}] Switched to session: ${name || id}`);
+    if (id !== prevId) {
+      sendGreeting(chatState);
+      startSessionMonitor(server, id);
+    }
+  };
+
+  const TELEGRAM_GREETING_BODY = (sessionName) =>
+    '[Telegram] The following information is for your awareness. Reply with only "Ack" and do not take any action:\n\n' +
+    'Your responses are being relayed through a Telegram bridge ' +
+    '(current session: ' + sessionName + ').\n' +
+    'The user sees your messages and can reply from there. ' +
+    'Their messages appear here prefixed with [Telegram].\n\n' +
+    'You can use these structured commands in your own response text ' +
+    '(on their own line, with no other content on that line). ' +
+    'Do NOT use CLI tools to generate them — just include them directly in your response:\n\n' +
+    'To send a file to the user:\n' +
+    '[Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    'To download a file the user sent:\n' +
+    '[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
+    'For more details about a command:\n' +
+    '[Telegram]{"command":"help","topic":"<upload|download|help>"}';
+
+  /**
+   * Start a persistent SSE session monitor that catches question.asked,
+   * permission_asked, and permission_replied events in the background,
+   * even when the AI was triggered by agentp (--tg) rather than by tgagentp.
+   * Automatically restarted when the session or server changes.
+   */
+  function startSessionMonitor(server, sessionId) {
+    const st = getState(server);
+    if (st._monitorRef && st._monitorRef.current) {
+      st._monitorRef.current.destroy();
+      st._monitorRef.current = null;
+    }
+    const monRef = { current: null };
+    st._monitorRef = monRef;
+    st._monitorStarted = true;
+
+    const notifiedPerms = new Set();
+
+    listenForSessionEvents(server, sessionId, {
+      onText: null,
+      onConnected: null,
+      onThinking: null,
+      onPermission: (perm) => {
+        const st2 = getState(server);
+        const permDump = JSON.stringify(perm);
+        log.debug(`  [monitor] -> permission_asked callback: ${permDump}`);
+        st2.pendingPermission = { server, sessionId, permissionId: perm.id, type: perm.permission || 'unspecified', pattern: perm.patterns || perm.pattern, title: perm.title };
+        const ownerChat = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === normalizeUrl(server))?.[1];
+        if (ownerChat && !notifiedPerms.has(perm.id)) {
+          notifiedPerms.add(perm.id);
+          const toolStr = perm.permission || 'unspecified';
+          const patternArr = perm.patterns || (perm.pattern ? [perm.pattern] : []);
+          const patternStr = patternArr.join(', ');
+          const msg = '\u{1f510}**Permission needed**\n'
+            + '**Tool:** `' + toolStr + '`\n'
+            + (patternStr ? '**Target:** `' + patternStr + '`\n' : '')
+            + (perm.title ? '**Detail:** ' + perm.title + '\n' : '')
+            + 'Use `/allow` to approve once, `/always` to always allow, or `/reject` to deny.';
+          log.debug(`  [monitor] -> sending permission notification to chat ${ownerChat.chatId}`);
+          sendLongMessage(token, { chatId: ownerChat.chatId, threadId: ownerChat.threadId }, msg)
+            .then(() => log.debug(`  [monitor] -> permission notification sent OK`))
+            .catch((err) => log.debug(`  [monitor] -> permission notification failed: ${err.message}`));
+        } else if (ownerChat) {
+          log.debug(`  [monitor] -> permission ${perm.id} already notified, updating pendingPermission only`);
+        } else {
+          log.debug(`  [monitor] -> no owner chat found for server ${server}, skipping notification`);
+        }
+      },
+      onPermissionReplied: () => {
+        log.debug(`  [monitor] -> permission_replied: clearing pendingPermission`);
+        getState(server).pendingPermission = null;
+      },
+      onQuestion: (q) => {
+        const st2 = getState(server);
+        const qDump = JSON.stringify(q);
+        log.debug(`  [monitor] -> question_asked callback: ${qDump}`);
+        st2.pendingQuestion = { server, sessionId, questionId: q.id, question: q.question || 'Unknown question', options: q.options || [] };
+        const ownerChat = Object.entries(serverOwners).find(([url]) => normalizeUrl(url) === normalizeUrl(server))?.[1];
+        if (ownerChat) {
+          const options = (q.options || []).map((opt, i) => `${i + 1}. ${opt.text || opt}`).join('\n');
+          const msg = '\u2753**Question from the AI**\n\n'
+            + (q.question || 'Choose an option:') + '\n\n'
+            + (options ? options + '\n\n' : '')
+            + 'Use `/answer <number>` to respond.';
+          log.debug(`  [monitor] -> sending question notification to chat ${ownerChat.chatId}`);
+          sendLongMessage(token, { chatId: ownerChat.chatId, threadId: ownerChat.threadId }, msg)
+            .then(() => log.debug(`  [monitor] -> question notification sent OK`))
+            .catch((err) => log.debug(`  [monitor] -> question notification failed: ${err.message}`));
+        } else {
+          log.debug(`  [monitor] -> no owner chat found for server ${server}, skipping question notification`);
+        }
+      },
+    }, monRef).then(() => {
+      // Normal completion (90s safety timeout or stream ended)
+    }, (err) => {
+      log.debug(`  [monitor] SSE listener for session ${sessionId} ended: ${err.message}`);
+    }).finally(() => {
+      if (getState(server)._monitorRef === monRef) {
+        getState(server)._monitorRef = null;
+        getState(server)._monitorStarted = false;
+      }
+    });
+  }
+
+  async function sendGreeting(chatState) {
+    const st = getState(chatState.serverBase);
+    if (!st.activeSessionId) {
+      try {
+        const discovered = await discoverActiveSession(chatState.serverBase);
+        if (discovered) { st.activeSessionId = discovered.id; st.activeSessionName = discovered.name; }
+      } catch {}
+    }
+    if (!st.activeSessionId) return;
+    const greeting = TELEGRAM_GREETING_BODY(st.activeSessionName || st.activeSessionId);
+    try {
+      await sendToSession(chatState.serverBase, st.activeSessionId, greeting);
+    } catch (err) {
+      log.debug(`sendGreeting error: ${err.message}`);
+    }
+  }
+
+  // Start agentp gateway (tiny HTTP server for agentp --tg)
+  const serverBaseResolver = () => {
+    const entries = Object.entries(serverOwners);
+    if (entries.length === 0) return serverBase;
+    const cs = getChatState(entries[0][1].chatId, entries[0][1].threadId);
+    return cs.serverBase;
+  };
+  startAgentpGateway(token, serverBaseResolver);
+
+  async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId, replyTo, threadId) {
+    const st = getState(url);
+    const isCancelled = () => getState(url).taskId !== myTaskId;
+    const cancelRef = { current: null };
+    const chatState = { chatId, threadId };
+    const sessionCancelRef = { current: null };
+    // Destroy any previous SSE listener so stale forwarding to old chats stops
+    if (st._cancelRef && st._cancelRef.current) { st._cancelRef.current.destroy(); st._cancelRef.current = null; }
+    if (st._sessionReq && st._sessionReq.current) { st._sessionReq.current.destroy(); st._sessionReq.current = null; }
+    st._cancelRef = cancelRef;
+    st._sessionReq = sessionCancelRef;
+
+    // Ensure the persistent session monitor is running so question/permission
+    // events from any source (agentp, tgagentp, TUI) are caught, not just
+    // those triggered by this message's per-request SSE listener.
+    if (useSession && sessionId && !st._monitorStarted) {
+      startSessionMonitor(url, sessionId);
+    }
+
+    try {
+      let answer;
+      if (useSession) {
+        let sseConnected;
+        const onConnected = Promise.race([
+          new Promise((resolve) => { sseConnected = resolve; }),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+        listenForSessionEvents(url, sessionId, {
+          onText: null,
+          onConnected: sseConnected,
+          onThinking: (chunk) => {
+            const st2 = getState(url);
+            st2._thinkingBuf += chunk;
+            if (!st2.thinkingEnabled) return;
+            const buf = st2._thinkingBuf;
+            if (buf.length >= 50 || chunk.endsWith('\n')) {
+              st2._thinkingBuf = '';
+              const html = '💭 ' + buf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+              sendLongMessage(token, chatState, html, replyTo, threadId)
+                .then(() => {})
+                .catch(() => {});
+            }
+          },
+          // onPermission, onPermissionReplied, and onQuestion are handled by
+          // the persistent session monitor (startSessionMonitor) so they are
+          // caught even when agentp (--tg) triggers the AI response.
+        }, cancelRef).catch(() => {});
+        await onConnected;
+        answer = await sendToSession(url, sessionId, `[Telegram] ${text}`, st.activeAgentName, sessionCancelRef);
+        if (st.thinkingEnabled && st._thinkingBuf) {
+          const html = '💭 ' + st._thinkingBuf.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+          sendLongMessage(token, chatState, html, replyTo, threadId).catch(() => {});
+          st._thinkingBuf = '';
+        }
+        // Keep the per-request SSE listener alive for streaming text events.
+        // Questions and permissions are handled by the persistent monitor.
+      } else {
+        await sendText(url, `[Telegram] ${text}`);
+        answer = await listenForFinalAnswer(url, null, cancelRef);
+      }
+      if (isCancelled()) {
+        log.debug(`  → cancelled, discarding response from ${url}`);
+        st.pendingPermission = null;
+        return;
+      }
+      st.pendingPermission = null;
+      const chatServer = getChatState(chatId, threadId).serverBase;
+      if (url === chatServer) {
+        if (answer && answer.trim()) {
+          const trimmed = answer.trim();
+          const cleaned = await processTelegramCommands(trimmed, url, token, chatState);
+          msgLog('out', chatId, '', cleaned);
+          if (cleaned) {
+            const msgIds = await sendLongMessage(token, chatState, cleaned, replyTo, threadId);
+            if (msgIds && msgIds.length > 0) recordResponseMessage(chatId, threadId, msgIds, cleaned);
+            bufferMessage(chatId, threadId, 'assistant', cleaned);
+          }
+        }
+      } else {
+        getState(url).pendingResponse = answer;
+        msgLog('out', chatId, '(switch)', (answer || '').trim());
+        await sendLongMessage(token, chatState, `✅ Server \`${url}\` finished processing. Switch back to see the response.`, replyTo, threadId);
+        if (answer && answer.trim()) bufferMessage(chatId, threadId, 'assistant', answer.trim());
+      }
+    } catch (err) {
+      if (cancelRef.current) { cancelRef.current.destroy(); cancelRef.current = null; }
+      if (isCancelled()) {
+        log.debug(`  → cancelled, ignoring error from ${url}: ${err.message}`);
+        st.pendingPermission = null;
+        return;
+      }
+      log.error(`Error processing message (${url}): ${err.message}`);
+
+      // Detect connection errors (server dead) and requeue the message
+      const isConnError = err.code === 'ECONNREFUSED' || err.code === 'ECONNRESET' ||
+        err.code === 'ETIMEDOUT' || err.message.includes('socket hang up') ||
+        err.message.includes('connect ECONNREFUSED');
+      if (isConnError) {
+        st.serverDead = true;
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.unshift({ text, replyTo });
+        log.info(`Server ${url} appears dead. Re-queued message.`);
+      }
+
+      const chatServer = getChatState(chatId, threadId).serverBase;
+      if (url === chatServer) {
+        const msg = isConnError
+          ? `⚠️ Server \`${url}\` is unreachable. The message has been requeued and will be sent when the server is available again.\n\n` +
+            `**Options:**\n` +
+            `• Restart it: \`/resurrect\`\n` +
+            `• Switch to another server: \`/server <name>\`\n` +
+            `• Flush the queue: \`/flush\``
+          : `Error: ${err.message}`;
+        try { await sendLongMessage(token, chatState, msg, replyTo, threadId); } catch (_) {}
+      }
+    } finally {
+      st._thinkingBuf = '';
+      st.pendingPermission = null;
+      // Only clear the reference if the SSE listener was destroyed or finished.
+      // If it is still running, keep the reference so the next message call
+      // can destroy it (lines 1557–1559).
+      if (st._cancelRef === cancelRef && !cancelRef.current) st._cancelRef = null;
+      if (st._sessionReq === sessionCancelRef) st._sessionReq = null;
+      if (!isCancelled()) {
+        getState(url).busy = false;
+        // Don't drain the queue if the server is dead — messages stay queued
+        if (st.serverDead) return;
+        const q = st.messageQueue || [];
+        st.messageQueue = [];
+        if (q.length > 0) {
+          const next = q[0];
+          st.messageQueue = q.slice(1);
+          const nextText = next.text;
+          const nextReplyTo = next.replyTo;
+          getState(url).busy = true;
+          const nextTaskId = ++st.taskId;
+          log.debug(`  → processing queued message (task ${nextTaskId})`);
+          processMessageAsync(chatId, nextText, url, !!st.activeSessionId, st.activeSessionId, nextTaskId, nextReplyTo, threadId);
+        }
+      }
+    }
+  }
+
+  const cmdCancel = async (token, chatId, cmdArgs, chatState) => {
+    const cs = chatState || getChatState(chatId);
+    if (!cs.serverBase) {
+      await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+      return;
+    }
+    const st = getState(cs.serverBase);
+    if (!st.busy) {
+      await sendLongMessage(token, cs, 'Nothing to cancel.');
+      return;
+    }
+    st.taskId++;
+    st.busy = false;
+    if (st._cancelRef && st._cancelRef.current) {
+      st._cancelRef.current.destroy();
+      st._cancelRef.current = null;
+    }
+    if (st._sessionReq && st._sessionReq.current) {
+      st._sessionReq.current.destroy();
+      st._sessionReq.current = null;
+    }
+    await sendLongMessage(token, cs, '✅ Cancelled.');
+    log.debug(`[chat ${chatId}] /cancel on ${cs.serverBase}`);
+  }
+
+  const cmdStatus = async (token, chatId, cmdArgs, chatState) => {
+    const cs = chatState || getChatState(chatId);
+    if (!cs.serverBase) {
+      await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+      return;
+    }
+    const st = getState(cs.serverBase);
+    const deadInfo = st.serverDead ? ' ❌ unreachable' : '';
+    const busyInfo = st.busy ? '⏳ busy' : '✅ idle';
+    const dir = serverDir(cs.serverBase);
+    const lines = ['**Server:**'];
+    if (dir) lines.push('  • **Path:** `' + dir + '`');
+    lines.push('  • **URL:** `' + cs.serverBase + '`');
+    lines.push('  • **Status:** ' + busyInfo + deadInfo);
+    lines.push('**Session:** ' + sessionLabel(st));
+    lines.push('**Agent:** ' + (st.activeAgentName ? '`' + st.activeAgentName + '`' : '*default*'));
+    await sendLongMessage(token, cs, lines.join('\n'));
+  };
+
+  const cmdShutdown = async (token, chatId, args, chatState) => {
+    const cs = chatState || getChatState(chatId);
+    const st = getState(cs.serverBase);
+
+    // Handle /shutdown clear — wipe saved connections before exiting
+    if (args && args.length > 0 && args[0].toLowerCase() === 'clear') {
+      clearConnections();
+      await sendLongMessage(token, cs, '\u{1f9f9} Connection state cleared.').catch(() => {});
+      log.info('/shutdown clear: exiting');
+      process.exit(0);
+    }
+
+    // Parse numeric exit code from args (default 0). Uses regex /^\d+$/
+    // to robustly match only pure-digit arguments.
+    let exitCode = 0;
+    for (const arg of (args || [])) {
+      if (/^\d+$/.test(arg)) {
+        exitCode = parseInt(arg, 10);
+        break;
+      }
+    }
+
+    const isForce = args && args.some(a => a.toLowerCase() === 'force');
+    if (st.busy && !isForce) {
+      await sendLongMessage(token, cs,
+        '\u23f3 Server is busy processing a message.\n' +
+        'Use `/shutdown force` to shut down anyway (in-flight response will be lost).').catch(() => {});
+      return;
+    }
+    const status = st.busy ? '\u23f3 busy (forced)' : '\u2705 idle';
+    await sendLongMessage(token, cs, `\u{1f44b} Shutting down (state: ${status}, exit ${exitCode})...`).catch(() => {});
+    log.info(`/shutdown: exiting with code ${exitCode}`);
+    process.exit(exitCode);
+  };
+
+  const cmdNote = async (token, chatId, cmdArgs, chatState) => {
+    const text = cmdArgs.join(' ');
+    if (!text) {
+      await sendLongMessage(token, chatState, 'Usage: `/note <message>` — sends a note for the agent to acknowledge.');
+      return;
+    }
+    const url = chatState.serverBase;
+    if (!url) {
+      await sendLongMessage(token, chatState, '🔌 Not connected to any server.');
+      return;
+    }
+    const st = getState(url);
+    if (st.serverDead) {
+      const alive = await isServerAlive(url);
+      if (!alive) {
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.push({ text: '📝 **Note:** ' + text, replyTo: null });
+        await sendLongMessage(token, chatState, `⚠️ Server unreachable. Note queued (#${st.messageQueue.length}).`);
+        return;
+      }
+      st.serverDead = false;
+    }
+    const intro = 'The following information is for your awareness. Reply with only "Ack" and do not take any action:';
+    const noteText = intro + '\n\n' + text;
+    if (st.busy) {
+      // Experimental: try async injection instead of queuing
+      if (st.activeSessionId) {
+        try {
+          log.debug(`  → /note: attempting async injection into session ${st.activeSessionId}`);
+          await sendToSessionAsync(url, st.activeSessionId, noteText, st.activeAgentName);
+          await sendLongMessage(token, chatState, '💉 Note injected into ongoing session.');
+          log.debug(`  → /note: async injection succeeded`);
+          return;
+        } catch (err) {
+          log.debug(`  → /note: async injection failed (${err.message}), falling back to queue`);
+        }
+      }
+      if (!st.messageQueue) st.messageQueue = [];
+      st.messageQueue.push({ text: noteText, replyTo: null });
+      await sendLongMessage(token, chatState, `⏳ Server is busy. Note queued (#${st.messageQueue.length}).`);
+      return;
+    }
+
+    // Auto-switch tmux window to this chat's server
+    const srvList = listServers();
+    const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(url));
+    if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
+    st.busy = true;
+    const myTaskId = ++st.taskId;
+    log.debug(`  → /note: starting background processing (task ${myTaskId})`);
+    processMessageAsync(chatId, noteText, url, !!st.activeSessionId, st.activeSessionId, myTaskId, null, chatState.threadId);
+  };
+
+  const cmds = { ...COMMANDS, status: cmdStatus, cancel: cmdCancel, note: cmdNote };
+  if (DEV_MODE) cmds.shutdown = cmdShutdown;
+
+  let offset = 0;
+
+  // Restore chat↔server connections from persistent state
+  let savedData;
+  let connByOldId = {};
+  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
+  if (savedData && Array.isArray(savedData.connections)) {
+    // Phase 1: restore chat states and populate serverOwners
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      connByOldId[String(chatId)] = { chatId, threadId, dir };
+    }
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
+        cs.serverBase = state.url;
+        // Prefer non-thread (private chat) as owner over topic threads
+        const existing = serverOwners[state.url];
+        if (!existing || (!threadId && existing.threadId)) {
+          serverOwners[state.url] = { chatId, threadId };
+        }
+      }
+    }
+    // Phase 2: prune secondary connections per URL (only owner survives)
+    for (const key of Object.keys(chatStates)) {
+      const state = chatStates[key];
+      if (!state.serverBase) continue;
+      const owner = serverOwners[state.serverBase];
+      if (!owner) continue;
+      if (String(owner.chatId) !== String(state.chatId) || owner.threadId !== state.threadId) {
+        const url = state.serverBase;
+        state.serverBase = null;
+        removeConnection(state.chatId, state.threadId);
+        log.info(`[chat ${state.chatId}] Pruned secondary connection to server: ${url}`);
+      }
+    }
+    // Phase 3: send startup notification only to the surviving owner per URL
+    const notifiedUrls = new Set();
+    for (const { chatId, threadId, dir } of savedData.connections) {
+      if (!dir) continue;
+      const cs = getChatState(chatId, threadId);
+      if (!cs.serverBase) continue;
+      const sf = statefileFor(dir);
+      const state = readState(sf);
+      if (state && state.url) {
+        if (notifiedUrls.has(state.url)) {
+          log.info(`[chat ${chatId}] Skipping startup notification for ${dir} (already notified for this URL)`);
+          continue;
+        }
+        notifiedUrls.add(state.url);
+        const alive = await isServerAlive(state.url);
+        if (alive) {
+          const lines = [
+            '✅ Bot started.',
+            '**Server:**',
+            '  • **Path:** `' + dir + '`',
+            '  • **URL:** `' + state.url + '`',
+            '  • **Status:** ✅ restored',
+          ];
+          try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
+          log.info(`Restored connection: chat ${chatId} → ${dir}`);
+        } else {
+          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.url} is unreachable`);
+          try {
+            await sendLongMessage(token, cs,
+              '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
+              '⚠️ The server at `' + state.url + '` is not reachable.\n' +
+              'Use `/resurrect` to restart it, or `/server <name>` to connect elsewhere.');
+          } catch (_) {}
+        }
+      }
+    }
+  }
+
+  // ── Group migration handler ──────────────────────────────────────
+  // When a regular group is promoted to a supergroup (or topics enabled),
+  // Telegram changes the chat ID. This function updates the stored
+  // connections and allowlist so the bot continues to work transparently.
+  async function handleGroupMigration(oldId, newId) {
+    if (oldId === newId) return;
+    log.info(`Group migration detected: chat ${oldId} → ${newId}`);
+
+    // Update allowlist if the old ID is in it
+    if (allowedChatIds) {
+      const idx = allowedChatIds.indexOf(oldId);
+      if (idx !== -1) {
+        allowedChatIds[idx] = newId;
+        log.info(`Updated allowlist: ${oldId} → ${newId}`);
+      }
+    }
+
+    // Update connections.json: replace all references to oldId with newId
+    try {
+      const data = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+      if (Array.isArray(data.connections)) {
+        let changed = false;
+        for (const conn of data.connections) {
+          if (String(conn.chatId) === oldId) {
+            conn.chatId = newId;
+            changed = true;
+          }
+        }
+        if (changed) {
+          fs.writeFileSync(CONNECTIONS_FILE, JSON.stringify(data, null, 2));
+          log.info(`Updated connection: ${oldId} → ${newId}`);
+        }
+      }
+    } catch (_) {}
+
+    // Update in-memory chat state key (the existing state remains, just
+    // the key changes — new messages from newId will hit a new state)    
+  }
+
+  // Drain stale updates from previous sessions before entering the poll loop.
+  // Using timeout=1 to return immediately without long-polling.
+  try {
+    const drainResult = await getUpdates(token, 0, 1);
+    if (drainResult && drainResult.ok && drainResult.result) {
+      for (const u of drainResult.result) {
+        offset = Math.max(offset, u.update_id + 1);
+      }
+      log.info(`Drained ${drainResult.result.length} stale update(s), offset ${offset}`);
+    }
+  } catch (_) {}
+
+  // Poll for updates and forward each text message to OpenCode, sending the answer back.
+  while (true) {
+    let result;
+    try {
+      result = await getUpdates(token, offset, 30);
+    } catch (err) {
+      log.error(`Polling error: ${err.message}`);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+
+    if (!result.ok) {
+      log.error(`Telegram API error: ${result.description || JSON.stringify(result)}`);
+      await new Promise((r) => setTimeout(r, 5000));
+      continue;
+    }
+
+    for (const update of result.result) {
+      offset = update.update_id + 1;
+
+      const msg = update.message;
+      if (!msg) continue;
+
+      // Handle group → supergroup migration (e.g., when topics are enabled)
+      if (msg.migrate_to_chat_id) {
+        await handleGroupMigration(String(msg.chat.id), String(msg.migrate_to_chat_id));
+        continue;
+      }
+      if (msg.migrate_from_chat_id) {
+        await handleGroupMigration(String(msg.migrate_from_chat_id), String(msg.chat.id));
+        continue;
+      }
+
+      const chatId = String(msg.chat.id);
+      const threadId = msg.message_thread_id || null;
+      const replyTo = msg.message_id;
+      const from = msg.from?.username
+        ? `@${msg.from.username}`
+        : [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || 'unknown';
+
+      // Enforce chat allowlist if configured
+      if (allowedChatIds && !allowedChatIds.includes(chatId)) {
+        const chatLabel = msg.chat?.title ? ` (${msg.chat.title})` : '';
+        log.debug(`[chat ${chatId}]${chatLabel} ${from}: blocked (not in allowlist)`);
+        // Log a hint if the old chat ID is known in connections.json
+        const blockedDebug = `[chat ${chatId}]${chatLabel} ${from}: blocked (not in allowlist)`;
+        const known = Object.keys(connByOldId);
+        if (known.length > 0) {
+          log.debug(`  Known connections: ${known.join(', ')}. Chat may have been migrated (enable topics → supergroup changes chat ID).`);
+        }
+        continue;
+      }
+
+      // Per-chat state: get or create for this chat (thread-aware)
+      const cs = getChatState(chatId, threadId);
+
+      // Handle file uploads (documents and photos)
+      if (msg.document || msg.photo) {
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server. Upload ignored.');
+          continue;
+        }
+        const projectDir = serverDir(cs.serverBase);
+        if (!projectDir) {
+          await sendLongMessage(token, cs, '❌ Could not find project directory for this server.');
+          continue;
+        }
+        try {
+          const notification = await handleFileUpload(token, msg, projectDir);
+          const userText = msg.caption || msg.text || '';
+          const fullMessage = notification + (userText ? '\n\nUser message: ' + userText : '');
+          log.debug(`[chat ${chatId}] ${from}: [file upload]`);
+          msgLog('in', chatId, from, '[file upload]');
+
+          // Buffer the upload notification for /record
+          bufferMessage(chatId, threadId, 'user', fullMessage);
+
+          const st = getState(cs.serverBase);
+          if (st.serverDead) {
+            const alive = await isServerAlive(cs.serverBase);
+            if (alive) st.serverDead = false;
+          }
+          if (st.serverDead) {
+            if (!st.messageQueue) st.messageQueue = [];
+            st.messageQueue.push({ text: fullMessage, replyTo });
+            const qlen = st.messageQueue.length;
+            await sendLongMessage(token, cs,
+              `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
+              `Your file upload has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
+              `**Options:**\n` +
+              `• Restart it: \`/resurrect\`\n` +
+              `• Switch to another server: \`/server <name>\`\n` +
+              `• Flush the queue: \`/flush\``);
+            continue;
+          }
+
+          if (st.busy) {
+            if (!st.messageQueue) st.messageQueue = [];
+            st.messageQueue.push({ text: fullMessage, replyTo });
+            await sendLongMessage(token, cs, `⏳ Server is busy. File upload queued (#${st.messageQueue.length}).`);
+            continue;
+          }
+
+          // Auto-switch tmux window
+          const srvList = listServers();
+          const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+          if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
+          st.busy = true;
+          const myTaskId = ++st.taskId;
+          log.debug(`  → processing file upload notification (task ${myTaskId})`);
+          processMessageAsync(chatId, fullMessage, cs.serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId, replyTo, threadId);
+        } catch (err) {
+          log.error(`File upload error: ${err.message}`);
+          await sendLongMessage(token, cs, `❌ File upload failed: ${err.message}`);
+        }
+        continue;
+      }
+
+      if (typeof msg.text !== 'string') continue;
+
+      let text = msg.text;
+
+      // !! wildcard: replace with the previous user message text
+      if (text.includes('!!')) {
+        const prevMsg = msg.reply_to_message;
+        if (prevMsg && prevMsg.text) {
+          text = text.replace(/!!/g, prevMsg.text);
+        } else {
+          // Fallback: look up the last user message from the ring buffer
+          const ring = getChatState(chatId, threadId).ring;
+          const lastUserMsg = ring.messages.slice().reverse().find(m => m.role === 'user');
+          if (lastUserMsg) {
+            text = text.replace(/!!/g, lastUserMsg.text);
+          } else {
+            await sendLongMessage(token, cs, '⚠️ No previous message found to replace !!');
+            continue;
+          }
+        }
+      }
+
+      log.debug(`[chat ${chatId}] ${from}: ${text}`);
+      msgLog('in', chatId, from, text);
+
+      // Build reply context if this message is a Telegram reply
+      const replyContext = quoteReply(msg);
+
+      // Download on reply: if the user replies to a file message, download it
+      if (msg.reply_to_message && (msg.reply_to_message.document || msg.reply_to_message.photo)) {
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server. Cannot download file.');
+        } else {
+          const projectDir = serverDir(cs.serverBase);
+          if (!projectDir) {
+            await sendLongMessage(token, cs, '❌ Could not find project directory for this server.');
+          } else {
+            try {
+              const replyMsg = msg.reply_to_message;
+              let fileId, fileName, fileSize;
+              if (replyMsg.document) {
+                fileId = replyMsg.document.file_id;
+                fileName = replyMsg.document.file_name || 'download.bin';
+                fileSize = replyMsg.document.file_size || 0;
+              } else if (replyMsg.photo) {
+                const largest = replyMsg.photo[replyMsg.photo.length - 1];
+                fileId = largest.file_id;
+                fileName = 'photo.jpg';
+                fileSize = largest.file_size || 0;
+              }
+              const sizeStr = fileSize > 0 ? ` (${formatFileSize(fileSize)})` : '';
+              const notification = `📎 File available: \`${fileName}\`${sizeStr}\n` +
+                `Use \`[Telegram]{"command":"download","fileId":"${fileId}","path":"<destination>"}\` to save it.`;
+              await sendLongMessage(token, cs, notification);
+              // Also send the notification to the agent's session so it knows the fileId
+              const st = getState(cs.serverBase);
+              if (st.activeSessionId) {
+                sendToSession(cs.serverBase, st.activeSessionId,
+                  '[Telegram] ' + notification).catch(() => {});
+              }
+            } catch (err) {
+              log.error(`Download on reply error: ${err.message}`);
+              await sendLongMessage(token, cs, `❌ File download failed: ${err.message}`);
+            }
+          }
+        }
+        continue;
+      }
+
+      // Intercept //commands (raw TUI passthrough via tmux send-keys)
+      if (text.startsWith('//')) {
+        const tuiCmd = text.slice(1);
+        if (!cs.serverBase) {
+          await sendLongMessage(token, cs, '🔌 Not connected to any server.');
+          continue;
+        }
+        const st = getState(cs.serverBase);
+        if (st.busy) {
+          await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel first.');
+          continue;
+        }
+        const srvList = listServers();
+        const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+        if (!srvMatch) {
+          await sendLongMessage(token, cs, '❌ Server not found in tmux.');
+          continue;
+        }
+        activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+        const paneId = tuiPaneId(srvMatch.index);
+        if (!paneId) {
+          await sendLongMessage(token, cs, '❌ TUI pane not found.');
+          continue;
+        }
+        st.busy = true;
+        try {
+          const answer = await executeTuiCommand(paneId, cs.serverBase, tuiCmd);
+          if (answer && answer.trim()) {
+            const cleaned = await processTelegramCommands(answer.trim(), cs.serverBase, token, cs);
+            if (cleaned) {
+              await sendLongMessage(token, cs, cleaned);
+            } else {
+              await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+            }
+          } else {
+            await sendLongMessage(token, cs, `✅ \`${tuiCmd}\` submitted.`);
+          }
+        } catch (err) {
+          log.error(`Error executing TUI command ${tuiCmd}: ${err.message}`);
+          try { await sendLongMessage(token, cs, `Error executing \`${tuiCmd}\`: ${err.message}`); } catch (_) {}
+        } finally {
+          st.busy = false;
+        }
+        continue;
+      }
+
+      // Intercept /commands
+      if (text.startsWith('/')) {
+        const parts = text.slice(1).split(' ');
+        const cmd = parts[0].toLowerCase();
+        const cmdArgs = parts.slice(1);
+        const handler = cmds[cmd];
+        if (handler) {
+          // Disconnected guard: /help, /servers, /server, /start, /comment, /shutdown, /serve, /new, and /resurrect work without a server
+          if (!cs.serverBase && cmd !== 'help' && cmd !== 'servers' && cmd !== 'server' && cmd !== 'start' && cmd !== 'comment' && cmd !== 'shutdown' && cmd !== 'serve' && cmd !== 'new' && cmd !== 'resurrect') {
+            await sendLongMessage(token, cs,
+              '🔌 Not connected to any server.\n\n' +
+              'Use `/servers` to see available servers and `/server <name>` to connect.');
+            continue;
+          }
+          try {
+            const replyToMsgId = msg.reply_to_message ? msg.reply_to_message.message_id : 0;
+            await handler(token, chatId, cmdArgs, cs, setServerForChat, setActiveSessionForChat, replyTo, replyToMsgId);
+          } catch (err) {
+            log.error(`Error handling /${cmd}: ${err.message}`);
+            try { await sendLongMessage(token, cs, `Error: ${err.message}`); } catch (_) {}
+          }
+        } else {
+          await sendLongMessage(token, cs,
+            `Unknown command: /${cmd}\n\nAvailable commands: /help, /status, /servers, /server, /sessions, /session, /agents, /agent, /models, /model, /think, /record, /queue, /flush, /note, /comment, /disconnect, /serve, /new, /markdown`);
+        }
+        continue;
+      }
+
+      // Disconnected guard for non-command messages
+      if (!cs.serverBase) {
+        await sendLongMessage(token, cs,
+          '🔌 Not connected to any server.\n\n' +
+          'Use `/servers` to see available servers and `/server <name>` to connect.');
+        continue;
+      }
+
+      // Buffer user messages for /record
+      bufferMessage(chatId, threadId, 'user', replyContext + text);
+
+      // Non-command message ─ process in background
+      const st = getState(cs.serverBase);
+
+      // Server health check: detect dead servers and auto-reconnect
+      if (st.serverDead) {
+        const alive = await isServerAlive(cs.serverBase);
+        if (alive) {
+          st.serverDead = false;
+          log.info(`Server ${cs.serverBase} is back online`);
+        }
+      }
+      if (st.serverDead) {
+        // Server is dead ─ auto-queue and notify
+        if (!st.messageQueue) st.messageQueue = [];
+        st.messageQueue.push({ text: replyContext + text, replyTo });
+        const qlen = st.messageQueue.length;
+        const servers = listServers();
+        const suggestions = [];
+        suggestions.push(`• Restart it: \`/resurrect\``);
+        if (servers.length > 0) {
+          suggestions.push(`• Switch to another server: \`/server <name>\``);
+        }
+        suggestions.push(`• Flush the queue: \`/flush\``);
+        await sendLongMessage(token, cs,
+          `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
+          `Your message has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
+          `**Options:**\n${suggestions.join('\n')}`);
+        continue;
+      }
+
+      if (st.busy) {
+        await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel or `/queue <message>` to queue your message.');
+        continue;
+      }
+
+      // Auto-switch tmux window to this chat's server
+      const srvList = listServers();
+      const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
+      if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
+
+      st.busy = true;
+      const myTaskId = ++st.taskId;
+      log.debug(`  → started background processing (task ${myTaskId})`);
+      processMessageAsync(chatId, replyContext + text, cs.serverBase, !!st.activeSessionId, st.activeSessionId, myTaskId, replyTo, threadId);
+    }
+  }
+}
+
+process.on('SIGINT', () => {
+  log.info('tgagentp stopped.');
+  process.exit(0);
+});
+
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('Error:', err.message);
+    process.exit(1);
+  });
+}
+
+module.exports = { processTelegramCommands, parseTelegramLine, getHelpText, normalizeUrl };

@@ -231,21 +231,28 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 ### Slash commands
 
 | Command | Action |
-|---|---|
+|---|---|---|
 | `/help [topic]` | Show general help or help for a topic (`servers`, `sessions`, `agents`, `models`, `allow`, `think`, `record`, `queue`) |
 | `/servers` | List all ocmux-served projects (▶ active, 🔌 disconnected, 💀 dead) |
-| `/servers switch <name> [--force]` | Switch active server; matches by full path, basename, or substring; `--force` takes over from another chat |
+| `/server <name>` | Switch active server; matches by full path, basename, or substring |
+| `/server --force <name>` | Take over a server from another chat |
 | `/resurrect [path]` | Restart a crashed server from its `.ocmux.json`; accepts optional directory path |
+| `/sessions` | List sessions (numbered, newest first) |
+| `/session <name-or-number>` | Switch to a session by name or position |
+| `/session new [name]` | Create a new session |
+| `/session rename <name>` | Rename the active session |
+| `/agents` | List available agents/models |
+| `/agent <name>` | Switch the active agent for subsequent messages (synced to server via API) |
+| `/models` | List providers and models (▶ marks current) |
+| `/model <providerID/modelID>` | Switch session model |
 | `/allow` | Approve a permission request once |
 | `/reject` | Deny a permission request |
 | `/always` | Approve and remember for the session |
 | `/answer <number>` | Respond to a question asked by the AI (structured multiple-choice) |
 | `/markdown` | Send the original markdown of the last response as a `.md` file; reply to a message to get that specific response |
-| `/agents list` | List available agents/models |
-| `/agents switch <name>` | Switch the active agent for subsequent messages (synced to server via API) |
 | `/shutdown [force\|clear]` | (requires `--dev`) Stop tgagentp; `clear` also wipes saved connections |
 
-> **Note on model/agent switching:** Changing the model in the OpenCode TUI's prompt dropdown is a **local UI action** — it only takes effect server-side after a message is sent *through the TUI*. If you change the model in the TUI and then send a prompt via `agentp` or Telegram, the old model will still be used. Use `/agents switch <name>` from Telegram (or `tgagentp`) to change models — this explicitly calls the API and syncs correctly.
+> **Note on model/agent switching:** Changing the model in the OpenCode TUI's prompt dropdown is a **local UI action** — it only takes effect server-side after a message is sent *through the TUI*. If you change the model in the TUI and then send a prompt via `agentp` or Telegram, the old model will still be used. Use `/agent <name>` or `/model <providerID/modelID>` from Telegram (or `tgagentp`) to change models — this explicitly calls the API and syncs correctly.
 
 #### TUI Command Passthrough
 
@@ -255,7 +262,7 @@ Messages starting with `//` are forwarded to the OpenCode TUI as raw keystrokes 
 
 ### Chat-server ownership
 
-Each server can be owned by at most one chat at a time. New chats start disconnected. Use `/servers switch <name>` to connect; `--force` takes over and notifies the previous owner. Connections are persisted to `/tmp/tgagentp-connections.json` and restored automatically on restart (server URL is re-discovered from `.ocmux.json`).
+Each server can be owned by at most one chat at a time. New chats start disconnected. Use `/server <name>` to connect; `--force` takes over and notifies the previous owner. Connections are persisted to `/tmp/tgagentp-connections.json` and restored automatically on restart (server URL is re-discovered from `.ocmux.json`).
 
 ### Per-server state
 
@@ -287,7 +294,7 @@ tgagentp starts a tiny HTTP server on `127.0.0.1` that accepts `POST /send` requ
 - Port is written to `/tmp/tgagentp-port` for agentp discovery.
 - Authentication reuses `OPENCODE_SERVER_PASSWORD`.
 - Messages for the owning chat's active server are delivered immediately.
-- Messages for non-active servers are queued per-server with debounced notifications (configurable via `TGAGENTP_DEBOUNCE_MS`); delivered on `/servers switch`.
+- Messages for non-active servers are queued per-server with debounced notifications (configurable via `TGAGENTP_DEBOUNCE_MS`); delivered on `/server <name>`.
 - Server health detection pre-sends: if a server is unreachable, messages are auto-queued and delivered when it comes back. `/flush` clears all queues.
 - When [/record](#tgagentp) is active, the gateway response includes the recorded conversation buffer. `agentp --qa` prepends this buffer (with rulers) to its stdout so the full Telegram context is available to OpenCode. Use `agentp --qa --flush` to flush the buffer without prepending.
 
