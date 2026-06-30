@@ -130,10 +130,16 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 |---|---|
 | `/help` | Show available commands |
 | `/status` | Show current server, session, agent, and health |
-| `/servers` | List/switch between ocmux projects |
-| `/sessions` | List/switch/create/rename sessions |
-| `/agents` | List/switch active agent |
-| `/models` | List providers and models |
+| `/servers` | List all servers (▶ active, 🔌 disconnected, 💀 dead) |
+| `/server <name>` | Switch to a server by directory or basename; `--force` takes over from another chat |
+| `/sessions` | List sessions (numbered, newest first, grouped by recency) |
+| `/session <name-or-number>` | Switch to a session by name or position |
+| `/session new [name]` | Create a new session |
+| `/session rename <name>` | Rename the active session |
+| `/agents` | List primary agents (▶ marks the active one) |
+| `/agent <name>` | Switch the active agent for subsequent messages |
+| `/models` | List providers (▶ on current) — drill down with `/models <provider>` |
+| `/model <providerID/modelID>` | Switch the session model (also resolves partial names like `go` → `opencode-go`) |
 | `/serve <path>` | Start a server in an existing project (requires `TGAGENTP_ROOT`) |
 | `/new <path>` | Create a directory, init git, and start a server (requires `TGAGENTP_ROOT`) |
 | `/allow` | Approve a tool permission once |
@@ -150,7 +156,6 @@ TGAGENTP_ALLOWED_CHAT_IDS="123,-456" tgagentp  # restrict to specific chats
 | `/think` | Toggle real-time thinking message forwarding |
 | `/cancel` | Abort the running prompt |
 | `/disconnect` | Disconnect from current server, clear ownership and connection file |
-| `/force-switch <server>` | Switch server bypassing ownership check (two-phase matching) |
 | `/resurrect` | Restart a crashed server and reconnect the chat to the new instance |
 
 Permission prompts from OpenCode (tool access requests) are forwarded automatically — respond with `/allow`, `/reject`, or `/always` directly in the chat.
@@ -191,7 +196,7 @@ The killer integration: `agentp` and `tgagentp` talk to each other through a tin
 - **`/record`** — buffers the Telegram conversation. On the next `agentp` call, the gateway returns the buffer, and `--qa` prepends it to stdout with rulers — so OpenCode sees the full Telegram thread as context. Retroactively buffer past messages with `/record N`.
 - **`agentp --flush`** — clears the buffer without prepending.
 - **`agentp --getLast 5`** — retrieves the last 5 assistant answers from session history (or QA pairs with `--getLast 5 --qa`).
-- **Exclusive ownership** — each server belongs to at most one chat. New chats start disconnected. `/servers switch <name> --force` takes over and notifies the previous owner.
+- **Exclusive ownership** — each server belongs to at most one chat. New chats start disconnected. `/server --force <name>` takes over and notifies the previous owner.
 - **Auto-queue** — when a server is unreachable, messages are automatically queued and delivered when it comes back. `/flush` clears the queue.
 - **Server health detection** — tgagentp periodically checks server connectivity. Dead servers are shown as ❌ unreachable in `/status`.
 - **Multi-chat** — each Telegram chat or forum thread has independent server, session, and recorder state. Perfect for teams sharing one bot.
