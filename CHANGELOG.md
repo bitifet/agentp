@@ -2,28 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.11.11] - 2026-06-30
+## [0.12.0-pre01] - 2026-06-30
 
-### New Commands
+### Breaking Changes
 
-- **`/model <providerID/modelID>`** — switch the active session model from Telegram. Resolves partial provider names (e.g. `go` → `opencode-go`). Uses `POST /session/:id/prompt_async` with `model` + `noReply: true` — fires the internal `ModelSwitchedEvent` to persist the change on the server.
-- **`/server <name>`** — switch to a server (replaces `/servers switch <name>`). Add `--force` to take over from another chat.
-- **`/session <name-or-number>`** — switch to a session by name or position (replaces `/sessions switch <name>`). Subcommands: `new [name]`, `rename <name>`.
-- **`/agent <name>`** — switch the active agent (replaces `/agents switch <name>`).
-- **`/shutdown <exitCode>`** — accept optional numeric exit code (default 0) for use in `while cmd ; do ... ; done` loops.
-
-### Command API Consistency
-
-All commands now follow the pattern: **singular for switching/acting, plural for listing/querying**:
+The Telegram command API now follows a consistent pattern: **singular for switching/acting, plural for listing/querying**.
 
 | Plural (list) | Singular (switch) |
 |---|---|
 | `/servers` | `/server <name>` |
 | `/sessions` | `/session <name>` |
 | `/agents` | `/agent <name>` |
-| `/models` | `/model <name>` |
+| `/models` | `/model <name>` (already in 0.11.11) |
 
-Old subcommand syntax (`/servers switch`, `/sessions new`, `/agents switch`) still works via backward-compatible redirects. `/force-switch` replaced by `/server --force`.
+**Migrations:**
+- `/servers switch <name>` → `/server <name>` (or `/server --force <name>` for force-switch)
+- `/sessions switch <name>` → `/session <name>` or `/session new [name]` or `/session rename <name>`
+- `/agents switch <name>` → `/agent <name>`
+- `/force-switch <name>` → `/server --force <name>`
+
+Old subcommand syntax still works via backward-compatible redirects. `/force-switch` removed.
+
+### New Commands
+
+- **`/server <name>`** — switch to a server (replaces `/servers switch <name>`). Add `--force` to take over from another chat.
+- **`/session <name-or-number>`** — switch to a session by name or position (replaces `/sessions switch <name>`). Subcommands: `new [name]`, `rename <name>`.
+- **`/agent <name>`** — switch the active agent (replaces `/agents switch <name>`).
+
+### Bug Fixes
+
+- **`/resurrect` killing the wrong window:** `resurrectServer` now checks the `kill-window` return value and throws on failure. Also skips kill when the stored window index doesn't match the directory and no window is found for it — preventing accidental kills of unrelated project servers.
+- **Port collision after resurrect:** `startServer` now captures the new tmux window index from `new-window -P` output directly, instead of calling `windowByDir()` which could return a stale old-window index if the old window wasn't properly killed. This prevented two windows from sharing the same `.ocmux.json` (same URL/port in `/servers` list).
+- **Verification loop:** After killing the old window, `resurrectServer` waits up to 2 seconds for it to actually disappear before starting the new server.
+
+### Improvements
+
+- `/help server`, `/help agent`, `/help session` — dedicated help topics for all new singular commands.
+- Main `/help` screen updated with all new commands, old aliases removed.
+
+### Changed
+
+- `cmdForceSwitch` removed (replaced by `cmdServer` with `--force` flag).
+- All `/help X` topics updated to reference new commands.
+
+## [0.11.11] - 2026-06-30
+
+### New Commands
+
+- **`/model <providerID/modelID>`** — switch the active session model from Telegram. Resolves partial provider names (e.g. `go` → `opencode-go`). Uses `POST /session/:id/prompt_async` with `model` + `noReply: true` — fires the internal `ModelSwitchedEvent` to persist the change on the server.
+- **`/shutdown <exitCode>`** — accept optional numeric exit code (default 0) for use in `while cmd ; do ... ; done` loops.
 
 ### Improvements
 
@@ -35,8 +62,7 @@ Old subcommand syntax (`/servers switch`, `/sessions new`, `/agents switch`) sti
   - Model info: context limit, input/output costs in parentheses
   - Uses `listSessions()` for detection instead of `GET /session/{id}` (faster, auth-compatible)
 - **Startup stale-update drain** — skips stale Telegram updates from previous sessions at startup.
-- **`/help model`, `/help server`, `/help agent`, `/help session`** — dedicated help topics for all singular commands.
-- **New `/help` main screen** updated with all new commands and removed old aliases.
+- **`/help model`** topic — documents the new `/model` command.
 
 ### Bug Fixes
 
@@ -46,7 +72,6 @@ Old subcommand syntax (`/servers switch`, `/sessions new`, `/agents switch`) sti
 ### Changed
 
 - `sendToSessionAsync()` accepts optional `model` and `noReply` parameters.
-- `cmdForceSwitch` removed (replaced by `cmdServer` with `--force` flag).
 
 ## [0.11.10] - 2026-06-27
 
