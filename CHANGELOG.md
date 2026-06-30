@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.11.11-pre01] - 2026-06-30
+
+### New Commands
+
+- **`/model <providerID/modelID>`** — switch the active session model from Telegram. Resolves partial provider names (e.g. `go` → `opencode-go`). Uses `POST /session/:id/prompt_async` with `model` + `noReply: true` — fires the internal `ModelSwitchedEvent` to persist the change on the server.
+- **`/shutdown <exitCode>`** — accept optional numeric exit code (default 0) for use in `while cmd ; do ... ; done` loops.
+
+### Improvements
+
+- **Persistent per-session SSE monitor:** A long-lived SSE listener (`startSessionMonitor`) now catches `question.asked`, `permission_asked`, `permission_replied` events from any source (tgagentp, `agentp --tg`, TUI). Previously only tgagentp's own prompts forwarded these events.
+- **`/models` rewrite:**
+  - Provider list with model counts per provider
+  - Drill-down: `/models <provider>` lists all models for that provider
+  - Current model marked with ▶ (detected from `listSessions()` → session model, with fallback to agent's explicit model)
+  - Model info: context limit, input/output costs in parentheses
+  - Uses `listSessions()` for detection instead of `GET /session/{id}` (faster, auth-compatible)
+- **Startup stale-update drain** — skips stale Telegram updates from previous sessions at startup.
+- **`/help model`** topic — documents the new `/model` command.
+
+### Bug Fixes
+
+- **Session model field detection:** The API returns `{ providerID, id }` not `{ providerID, modelID }` on session objects. Fixed `cmdModels` to use `m.modelID || m.id`.
+- **Auto-discovery on demand:** `cmdModels` and `cmdModel` auto-discover the active session when `activeSessionId` is null, fixing "No active session" after connection restoration.
+
+### Changed
+
+- `sendToSessionAsync()` accepts optional `model` and `noReply` parameters.
+
 ## [0.11.10] - 2026-06-27
 
 ### Bug Fixes
