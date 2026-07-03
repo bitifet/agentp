@@ -1017,20 +1017,38 @@ async function processTelegramCommands(text, server, token, chatState) {
   const filesSent = [];
   const dir = serverDir(server);
 
+  // Resolve a file path: absolute paths used directly, relative paths resolved
+  // against the server's working directory. Returns null and sends an error
+  // message if the resolved path is outside the server's working directory.
+  function resolveUploadPath(p, errPrefix) {
+    const absolute = path.isAbsolute(p) ? p : path.resolve(dir || '', p);
+    if (!dir) return absolute; // no server dir — trust the path
+    let realDir, realPath;
+    try { realDir = fs.realpathSync(dir); } catch { realDir = dir; }
+    try { realPath = fs.realpathSync(absolute); } catch { realPath = absolute; }
+    if (!realPath.startsWith(realDir + path.sep) && realPath !== realDir) {
+      sendLongMessage(token, chatState,
+        `❌ ${errPrefix}: path outside project directory.\n` +
+        `  Path: \`${p}\`\n` +
+        `  Project: \`${realDir}\`\n\n` +
+        `Use a full path (starting with /) or a path relative to the project root.`).catch(() => {});
+      return null;
+    }
+    return absolute;
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const payload = parseTelegramLine(lines[i]);
     if (!payload) continue;
 
     if (payload.command === 'upload' && payload.path) {
       toStrip.add(i);
-      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
-      if (dir && !resolved.startsWith(dir + path.sep)) {
-        log.error(`processTelegramCommands: path outside project rejected: ${payload.path}`);
-        continue;
-      }
+      const resolved = resolveUploadPath(payload.path, 'Upload');
+      if (!resolved) continue;
       try {
         if (!fs.existsSync(resolved)) {
-          log.error(`processTelegramCommands: file not found: ${resolved}`);
+          await sendLongMessage(token, chatState,
+            `❌ File not found: \`${resolved}\``);
           continue;
         }
         const fileData = fs.readFileSync(resolved);
@@ -1039,22 +1057,21 @@ async function processTelegramCommands(text, server, token, chatState) {
         await sendTelegramDocument(token, chatState, fileData, fileName, caption);
         filesSent.push(fileName);
       } catch (err) {
-        log.error(`processTelegramCommands: failed to send file ${resolved}: ${err.message}`);
+        await sendLongMessage(token, chatState,
+          `❌ Failed to upload \`${resolved}\`: ${err.message}`);
       }
     } else if (payload.command === 'download' && payload.fileId && payload.path) {
       toStrip.add(i);
-      const resolved = dir ? path.resolve(dir, payload.path) : path.resolve(payload.path);
-      if (dir && !resolved.startsWith(dir + path.sep)) {
-        log.error(`processTelegramCommands: download path outside project rejected: ${payload.path}`);
-        continue;
-      }
+      const resolved = resolveUploadPath(payload.path, 'Download');
+      if (!resolved) continue;
       try {
         const fileData = await downloadTelegramFile(token, payload.fileId);
         fs.mkdirSync(path.dirname(resolved), { recursive: true });
         fs.writeFileSync(resolved, fileData);
         filesSent.push(path.basename(resolved));
       } catch (err) {
-        log.error(`processTelegramCommands: failed to download file: ${err.message}`);
+        await sendLongMessage(token, chatState,
+          `❌ Failed to download file to \`${resolved}\`: ${err.message}`);
       }
     } else if (payload.command === 'help') {
       toStrip.add(i);
