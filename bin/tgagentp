@@ -2174,6 +2174,7 @@ async function main() {
     const monRef = { current: null };
     st._monitorRef = monRef;
     st._monitorStarted = true;
+    st._monitoredSessionId = sessionId;
 
     const notifiedPerms = new Set();
 
@@ -2239,6 +2240,7 @@ async function main() {
       if (getState(server)._monitorRef === monRef) {
         getState(server)._monitorRef = null;
         getState(server)._monitorStarted = false;
+        getState(server)._monitoredSessionId = null;
       }
     });
   }
@@ -2271,6 +2273,20 @@ async function main() {
 
   async function processMessageAsync(chatId, text, url, useSession, sessionId, myTaskId, replyTo, threadId) {
     const st = getState(url);
+    // Auto-discover active session if not set
+    if (!sessionId) {
+      try {
+        const discovered = await discoverActiveSession(url);
+        if (discovered) {
+          st.activeSessionId = discovered.id;
+          st.activeSessionName = discovered.name;
+          sessionId = discovered.id;
+          useSession = true;
+        }
+      } catch (err) {
+        log.debug(`processMessageAsync: auto-discover error: ${err.message}`);
+      }
+    }
     const isCancelled = () => getState(url).taskId !== myTaskId;
     const cancelRef = { current: null };
     const chatState = { chatId, threadId };
@@ -2281,11 +2297,12 @@ async function main() {
     st._cancelRef = cancelRef;
     st._sessionReq = sessionCancelRef;
 
-    // Ensure the persistent session monitor is running so question/permission
-    // events from any source (agentp, tgagentp, TUI) are caught, not just
-    // those triggered by this message's per-request SSE listener.
-    if (useSession && sessionId && !st._monitorStarted) {
-      startSessionMonitor(url, sessionId);
+    // Ensure the persistent session monitor is running and tracking the current session.
+    // Always restart when sessionId changes so TUI-initiated session switches are followed.
+    if (useSession && sessionId) {
+      if (!st._monitorStarted || st._monitoredSessionId !== sessionId) {
+        startSessionMonitor(url, sessionId);
+      }
     }
 
     try {
