@@ -2154,8 +2154,13 @@ async function main() {
     'Do NOT use CLI tools to generate them — just include them directly in your response:\n\n' +
     'To send a file to the user:\n' +
     '[Telegram]{"command":"upload","path":"<relative-path>","msg":"<optional caption>"}\n\n' +
+    '**Important:** `path` is relative to the project root (the OpenCode server\'s working directory).\n' +
+    'If the project uses a git worktree, the worktree directory IS the project root.\n' +
+    'Use CLI commands like `cat ./path/to/file` to verify the file exists before uploading.\n\n' +
     'To download a file the user sent:\n' +
     '[Telegram]{"command":"download","fileId":"<id>","path":"<relative-destination>"}\n\n' +
+    '**Important:** `path` is also relative to the project root (the OpenCode server\'s working directory).\n' +
+    'Use `ls` or `pwd` to confirm the current working directory before specifying download paths.\n\n' +
     'For more details about a command:\n' +
     '[Telegram]{"command":"help","topic":"<upload|download|help>"}';
 
