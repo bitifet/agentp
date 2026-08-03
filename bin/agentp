@@ -2,6 +2,9 @@
 
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
 const readline = require('readline');
 const child_process = require('child_process');
 const { version } = require('../package.json');
@@ -60,6 +63,51 @@ function notifyAgentpGateway(port, server, text) {
   });
 }
 
+function isFileLocked(filePath) {
+  const lockPath = filePath + '.lock';
+  try {
+    if (!fs.existsSync(lockPath)) return false;
+    const pid = parseInt(fs.readFileSync(lockPath, 'utf8').trim(), 10);
+    if (isNaN(pid)) return false;
+    // Check if process is still alive
+    try {
+      process.kill(pid, 0);
+      return true; // Process exists, file is locked
+    } catch (err) {
+      // Process doesn't exist, lock is stale
+      fs.unlinkSync(lockPath);
+      return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function lockFile(filePath) {
+  const lockPath = filePath + '.lock';
+  fs.writeFileSync(lockPath, String(process.pid));
+}
+
+function unlockFile(filePath) {
+  const lockPath = filePath + '.lock';
+  try {
+    fs.unlinkSync(lockPath);
+  } catch {
+    // Ignore errors
+  }
+}
+
+function generateTempFilename() {
+  const now = new Date();
+  const timestamp = now.getFullYear().toString() +
+    String(now.getMonth() + 1).padStart(2, '0') +
+    String(now.getDate()).padStart(2, '0') + '_' +
+    String(now.getHours()).padStart(2, '0') +
+    String(now.getMinutes()).padStart(2, '0');
+  const hash = crypto.randomBytes(2).toString('hex').slice(0, 4);
+  return path.join(os.tmpdir(), `agentp_deferred_${timestamp}_${hash}.tmp`);
+}
+
 async function readAllStdin() {
   let text = '';
   const rl = readline.createInterface({ input: process.stdin });
@@ -78,6 +126,10 @@ async function main() {
   let serverBase = 'http://localhost:4096';
   let qaMode = false;
   let flushMode = false;
+  let deferMode = false;
+  let deferChildMode = false;
+  let promptFile = null;
+  let outputFile = null;
   let sessionName = null;
   let newSession = false;
   // tgMode: false = disabled, 'auto' = auto-detect, true = explicit --tg
@@ -96,6 +148,7 @@ async function main() {
       console.error('Options:');
       console.error('  --version   Show version');
       console.error('  --qa        Print the original prompt and answer with labels (useful as a filter)');
+      console.error('  --defer     Deferred execution: write prompt to temp file, return path immediately');
       console.error('  --tg        Forward the answer to Telegram via agentp gateway (error if unavailable)');
       console.error('  --no-tg     Do not forward to Telegram');
       console.error('  --flush     Flush tgagentp\'s recorded buffer without prepending it to output');
@@ -139,6 +192,16 @@ async function main() {
       process.exit(0);
     } else if (args[i] === '--qa') {
       qaMode = true;
+    } else if (args[i] === '--defer') {
+      deferMode = true;
+    } else if (args[i] === '--defer-child') {
+      deferChildMode = true;
+    } else if (args[i] === '--prompt-file') {
+      i++;
+      promptFile = args[i];
+    } else if (args[i] === '--output-file') {
+      i++;
+      outputFile = args[i];
     } else if (args[i] === '--flush') {
       flushMode = true;
     } else if (args[i] === '--session') {
@@ -289,6 +352,93 @@ async function main() {
 
   const promptText = await readAllStdin();
 
+  // Handle --defer mode
+  if (deferMode) {
+    // Check if stdin is a deferred reference
+    const deferredMatch = promptText.match(/<agentp-deferred>(.*?)<\/agentp-deferred>/);
+    
+    if (deferredMatch) {
+      // This is a deferred reference - retrieve the result
+      const deferredPath = deferredMatch[1].trim();
+      
+      if (!fs.existsSync(deferredPath)) {
+        // File doesn't exist - error
+        process.stdout.write(`Error: deferred file not found: ${deferredPath}\n`);
+        process.exit(1);
+      }
+      
+      if (isFileLocked(deferredPath)) {
+        // File is locked (still processing) - identity filter
+        process.stdout.write(promptText);
+        process.exit(0);
+      }
+      
+      // File exists and not locked - read and delete
+      try {
+        const content = fs.readFileSync(deferredPath, 'utf8');
+        fs.unlinkSync(deferredPath);
+        process.stdout.write(content);
+        process.exit(0);
+      } catch (err) {
+        process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+        process.exit(1);
+      }
+    } else {
+      // This is a regular prompt - create deferred execution
+      const tempPath = generateTempFilename();
+      const promptTempPath = tempPath + '.prompt';
+      
+      // Write prompt to temp file for child process
+      fs.writeFileSync(promptTempPath, promptText);
+      
+      // Create and lock the output file
+      fs.writeFileSync(tempPath, '');
+      lockFile(tempPath);
+      
+      // Output the deferred reference
+      process.stdout.write(`<agentp-deferred>${tempPath}</agentp-deferred>\n`);
+      
+      // Spawn detached child process
+      const childArgs = [
+        __filename,
+        '--defer-child',
+        '--prompt-file', promptTempPath,
+        '--output-file', tempPath,
+      ];
+      
+      // Pass through other flags
+      if (qaMode) childArgs.push('--qa');
+      if (tgMode === true) childArgs.push('--tg');
+      if (tgMode === false) childArgs.push('--no-tg');
+      if (flushMode) childArgs.push('--flush');
+      if (sessionName) {
+        childArgs.push('--session', sessionName);
+        if (newSession) childArgs.push('--new');
+      }
+      childArgs.push(serverBase);
+      
+      const child = child_process.spawn(process.execPath, childArgs, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      
+      process.exit(0);
+    }
+  }
+
+  // Handle --defer-child mode (child process)
+  let actualPromptText = promptText;
+  if (deferChildMode && promptFile) {
+    try {
+      actualPromptText = fs.readFileSync(promptFile, 'utf8');
+      fs.unlinkSync(promptFile);
+    } catch (err) {
+      console.error('Error reading prompt file:', err.message);
+      process.exit(1);
+    }
+  }
+
   // Find most recent session or create one
   let sessions;
   try {
@@ -359,7 +509,7 @@ async function main() {
 
   let answer;
   try {
-    answer = await sendToSession(serverBase, sessionId, promptText);
+    answer = await sendToSession(serverBase, sessionId, actualPromptText);
   } catch (err) {
     console.error('Error sending prompt:', err.message);
     process.exit(1);
@@ -368,7 +518,7 @@ async function main() {
   // Build the message to send to Telegram (QA pair with rulers)
   let tgMessage = answer;
   if (qaMode) {
-    tgMessage = HUMAN_ROW + promptText + AGENT_ROW + answer;
+    tgMessage = HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
     if (!answer.endsWith('\n')) tgMessage += '\n';
     tgMessage += FINAL_ROW;
   }
@@ -384,18 +534,32 @@ async function main() {
     }
   }
 
-  // Build stdout output (prepend recorded context if any, unless --flush)
+  // Build output (prepend recorded context if any, unless --flush)
+  let output = '';
   if (qaMode) {
     if (!flushMode && buffered.length > 0) {
       for (const msg of buffered) {
         const row = msg.role === 'user' ? HUMAN_ROW : AGENT_ROW;
-        process.stdout.write(row + msg.text + '\n');
+        output += row + msg.text + '\n';
       }
     }
-    process.stdout.write(tgMessage);
+    output += tgMessage;
   } else {
-    process.stdout.write(tgMessage);
-    if (!tgMessage.endsWith('\n')) process.stdout.write('\n');
+    output = tgMessage;
+    if (!tgMessage.endsWith('\n')) output += '\n';
+  }
+
+  // Write output to file (child mode) or stdout (normal mode)
+  if (deferChildMode && outputFile) {
+    try {
+      fs.writeFileSync(outputFile, output);
+      unlockFile(outputFile);
+    } catch (err) {
+      console.error('Error writing output file:', err.message);
+      process.exit(1);
+    }
+  } else {
+    process.stdout.write(output);
   }
 
   // Warnings at the end (stderr)
