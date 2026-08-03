@@ -22,6 +22,8 @@ It is designed for prompt-driven workflows where you want to do things like:
 
 These tools are built for my own daily workflow. They are heavily AI-assisted — including the tests — and I review things before shipping, but the real test is using them every day. Bugs happen; I value a working feature more than a flawless one. MIT license, no warranty. Issues, suggestions, and PRs are welcome.
 
+**Stability note:** `agentp` and `ocmux` are stable and used daily. `tgagentp` is still in a highly experimental stage — expect breaking changes and occasional bugs.
+
 ## Install
 
 From npm:
@@ -57,6 +59,7 @@ agentp [options] [url]
 Options:
 
 - `--qa`: print the original prompt and answer with labels (useful when used as a filter)
+- `--defer`: deferred execution — submit prompt, get immediate ticket, retrieve result later
 - `--tg`: forward the answer to Telegram via tgagentp gateway (error if unreachable)
 - `--no-tg`: do not forward to Telegram
 - `--flush`: flush tgagentp's recorded buffer without prepending it to output
@@ -141,6 +144,39 @@ From Vim/Neovim, flush the recorded buffer without prepending context:
 
 Useful when you've finished a conversation thread and want to reset the recorded
 context for a new topic.
+
+Deferred execution with `--defer`:
+
+Submit a prompt and get an immediate ticket to retrieve the result later:
+
+```bash
+# Submit a prompt and get a deferred reference
+DEFERRED=$(printf "Refactor the authentication module" | agentp --defer)
+# Output: <agentp-deferred>/tmp/agentp_deferred_20260803_1430_a1b2.tmp</agentp-deferred>
+
+# Continue working... retrieve the result when ready
+printf '%s\n' "$DEFERRED" | agentp --defer
+# Output: (the agent's response)
+```
+
+Works as a Vim/Neovim filter with deferred execution:
+
+```vim
+" Submit selection, get ticket immediately, continue editing
+:'<,'>!agentp --defer --qa
+
+" Later, retrieve the result
+:r !printf '%s\n' "<agentp-deferred>/tmp/agentp_deferred_...tmp</agentp-deferred>" | agentp --defer
+```
+
+The deferred workflow:
+1. Submit prompt with `--defer` → get immediate ticket (`<agentp-deferred>...</agentp-deferred>`)
+2. Continue working (the agent processes in background)
+3. When ready, pipe the ticket back to `agentp --defer` to retrieve the result
+4. If the agent is still processing, you get your input back (identity filter)
+4. If complete, you get the agent's response and the temp file is cleaned up
+
+Useful for long-running tasks where you don't want to block your editor.
 
 Retrieve the last 3 assistant answers from session history:
 

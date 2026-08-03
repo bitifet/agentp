@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.1] - 2026-08-03
+
+### New Features
+
+- **`agentp --defer`** — Deferred execution mode for non-blocking prompt execution
+  - Submit a prompt and get an immediate ticket (`<agentp-deferred>path</agentp-deferred>`)
+  - Continue working while the agent processes in the background
+  - Retrieve the result later by piping the ticket back to `agentp --defer`
+  - Identity filter when still processing (returns input unchanged)
+  - Works with all existing flags (`--qa`, `--tg`, `--session`, `--flush`, etc.)
+  - Works as a Vim/Neovim filter for non-blocking editor integration
+
+### Bug Fixes
+
+- **Deferred execution reliability:** Fixed race condition where empty output files were treated as ready
+  - Empty output files now treated as "still processing" (identity filter)
+  - Proper error handling in child process: errors written to output file and lock released
+  - Lock file cleanup on errors to prevent stale locks
+
+### Documentation
+
+- Updated README with `--defer` usage examples and Author's note clarifying stability levels
+- Updated help text and command reference
+
 ## [0.12.0-pre01] - 2026-06-30
 
 ### Breaking Changes

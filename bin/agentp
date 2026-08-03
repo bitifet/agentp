@@ -367,15 +367,23 @@ async function main() {
         process.exit(1);
       }
       
-      if (isFileLocked(deferredPath)) {
-        // File is locked (still processing) - identity filter
+      // Check if file is locked (still processing) or empty (not ready yet)
+      const isLocked = isFileLocked(deferredPath);
+      let content = '';
+      try {
+        content = fs.readFileSync(deferredPath, 'utf8');
+      } catch {
+        content = '';
+      }
+      
+      if (isLocked || content === '') {
+        // File is locked (still processing) or empty (not ready yet) - identity filter
         process.stdout.write(promptText);
         process.exit(0);
       }
       
-      // File exists and not locked - read and delete
+      // File exists, not locked, and has content - read and delete
       try {
-        const content = fs.readFileSync(deferredPath, 'utf8');
         fs.unlinkSync(deferredPath);
         process.stdout.write(content);
         process.exit(0);
@@ -434,128 +442,145 @@ async function main() {
       actualPromptText = fs.readFileSync(promptFile, 'utf8');
       fs.unlinkSync(promptFile);
     } catch (err) {
-      console.error('Error reading prompt file:', err.message);
+      const errMsg = `Error reading prompt file: ${err.message}\n`;
+      if (outputFile) { fs.writeFileSync(outputFile, errMsg); unlockFile(outputFile); }
+      process.stdout.write(errMsg);
       process.exit(1);
     }
   }
 
-  // Find most recent session or create one
-  let sessions;
-  try {
-    sessions = await listSessions(serverBase);
-  } catch (err) {
-    console.error('Error connecting to server:', err.message);
-    process.exit(1);
-  }
+  // Wrap main processing in try-catch for deferChildMode to write errors to output file
+  async function runMain() {
+    // Find most recent session or create one
+    let sessions;
+    try {
+      sessions = await listSessions(serverBase);
+    } catch (err) {
+      throw new Error(`Error connecting to server: ${err.message}`);
+    }
 
-  let sessionId = null;
+    let sessionId = null;
 
-  if (sessionName) {
-    // Find session by name
-    const matches = sessions.filter(s => {
-      const title = s.title || s.slug || s.id;
-      return title.toLowerCase() === sessionName.toLowerCase();
-    });
-    if (matches.length === 0) {
-      // Try partial match
-      const partial = sessions.filter(s => {
+    if (sessionName) {
+      // Find session by name
+      const matches = sessions.filter(s => {
         const title = s.title || s.slug || s.id;
-        return title.toLowerCase().includes(sessionName.toLowerCase());
+        return title.toLowerCase() === sessionName.toLowerCase();
       });
-      if (partial.length === 1) {
-        sessionId = partial[0].id;
-      } else if (partial.length > 1) {
-        console.error(`Error: multiple sessions match "${sessionName}":`);
-        partial.forEach(s => console.error(`  - ${s.title || s.slug || s.id}`));
-        process.exit(1);
-      } else if (newSession) {
-        // Create new session
-        try {
-          const session = await createSession(serverBase, sessionName);
-          sessionId = session.id;
-          await selectSession(serverBase, sessionId);
-        } catch (err) {
-          console.error('Error creating session:', err.message);
-          process.exit(1);
+      if (matches.length === 0) {
+        // Try partial match
+        const partial = sessions.filter(s => {
+          const title = s.title || s.slug || s.id;
+          return title.toLowerCase().includes(sessionName.toLowerCase());
+        });
+        if (partial.length === 1) {
+          sessionId = partial[0].id;
+        } else if (partial.length > 1) {
+          throw new Error(`Error: multiple sessions match "${sessionName}"`);
+        } else if (newSession) {
+          // Create new session
+          try {
+            const session = await createSession(serverBase, sessionName);
+            sessionId = session.id;
+            await selectSession(serverBase, sessionId);
+          } catch (err) {
+            throw new Error(`Error creating session: ${err.message}`);
+          }
+        } else {
+          throw new Error(`Error: no session found matching "${sessionName}"`);
         }
       } else {
-        console.error(`Error: no session found matching "${sessionName}"`);
-        console.error('Use --new to create a new session with this name');
-        process.exit(1);
+        sessionId = matches[0].id;
       }
+    } else if (sessions && sessions.length > 0) {
+      const sorted = sessions
+        .filter(s => s.time && (s.time.updated || s.time.created))
+        .sort((a, b) => {
+          const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
+          const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
+          return bTime - aTime;
+        });
+      if (sorted.length > 0) sessionId = sorted[0].id;
+    }
+
+    if (!sessionId) {
+      try {
+        const session = await createSession(serverBase, 'agentp');
+        sessionId = session.id;
+      } catch (err) {
+        throw new Error(`Error creating session: ${err.message}`);
+      }
+    }
+
+    let answer;
+    try {
+      answer = await sendToSession(serverBase, sessionId, actualPromptText);
+    } catch (err) {
+      throw new Error(`Error sending prompt: ${err.message}`);
+    }
+
+    // Build the message to send to Telegram (QA pair with rulers)
+    let tgMessage = answer;
+    if (qaMode) {
+      tgMessage = HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
+      if (!answer.endsWith('\n')) tgMessage += '\n';
+      tgMessage += FINAL_ROW;
+    }
+
+    // Post-send: notify tgagentp, get recorded context back
+    let buffered = [];
+    let tgError = null;
+    if (tgPort) {
+      try {
+        buffered = await notifyAgentpGateway(tgPort, serverBase, tgMessage);
+      } catch (err) {
+        tgError = err;
+      }
+    }
+
+    // Build output (prepend recorded context if any, unless --flush)
+    let output = '';
+    if (qaMode) {
+      if (!flushMode && buffered.length > 0) {
+        for (const msg of buffered) {
+          const row = msg.role === 'user' ? HUMAN_ROW : AGENT_ROW;
+          output += row + msg.text + '\n';
+        }
+      }
+      output += tgMessage;
     } else {
-      sessionId = matches[0].id;
+      output = tgMessage;
+      if (!tgMessage.endsWith('\n')) output += '\n';
     }
-  } else if (sessions && sessions.length > 0) {
-    const sorted = sessions
-      .filter(s => s.time && (s.time.updated || s.time.created))
-      .sort((a, b) => {
-        const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
-        const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
-        return bTime - aTime;
-      });
-    if (sorted.length > 0) sessionId = sorted[0].id;
+
+    return output;
   }
 
-  if (!sessionId) {
-    try {
-      const session = await createSession(serverBase, 'agentp');
-      sessionId = session.id;
-    } catch (err) {
-      console.error('Error creating session:', err.message);
-      process.exit(1);
-    }
-  }
-
-  let answer;
-  try {
-    answer = await sendToSession(serverBase, sessionId, actualPromptText);
-  } catch (err) {
-    console.error('Error sending prompt:', err.message);
-    process.exit(1);
-  }
-
-  // Build the message to send to Telegram (QA pair with rulers)
-  let tgMessage = answer;
-  if (qaMode) {
-    tgMessage = HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
-    if (!answer.endsWith('\n')) tgMessage += '\n';
-    tgMessage += FINAL_ROW;
-  }
-
-  // Post-send: notify tgagentp, get recorded context back
-  let buffered = [];
-  let tgError = null;
-  if (tgPort) {
-    try {
-      buffered = await notifyAgentpGateway(tgPort, serverBase, tgMessage);
-    } catch (err) {
-      tgError = err;
-    }
-  }
-
-  // Build output (prepend recorded context if any, unless --flush)
+  // Execute main processing with error handling for child mode
   let output = '';
-  if (qaMode) {
-    if (!flushMode && buffered.length > 0) {
-      for (const msg of buffered) {
-        const row = msg.role === 'user' ? HUMAN_ROW : AGENT_ROW;
-        output += row + msg.text + '\n';
-      }
+  try {
+    output = await runMain();
+  } catch (err) {
+    const errMsg = err.message + '\n';
+    if (deferChildMode && outputFile) {
+      fs.writeFileSync(outputFile, errMsg);
+      unlockFile(outputFile);
+    } else {
+      process.stdout.write(errMsg);
     }
-    output += tgMessage;
-  } else {
-    output = tgMessage;
-    if (!tgMessage.endsWith('\n')) output += '\n';
+    process.exit(1);
   }
 
   // Write output to file (child mode) or stdout (normal mode)
+  let finalOutput = output;
   if (deferChildMode && outputFile) {
     try {
       fs.writeFileSync(outputFile, output);
       unlockFile(outputFile);
     } catch (err) {
-      console.error('Error writing output file:', err.message);
+      const errMsg = `Error writing output file: ${err.message}\n`;
+      try { fs.writeFileSync(outputFile, errMsg); } catch {}
+      unlockFile(outputFile);
       process.exit(1);
     }
   } else {
