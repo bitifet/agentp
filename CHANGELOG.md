@@ -31,7 +31,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- README: `--defer [N]` usage and `agentp_ticket` format, `$(ocmux)` URL hint, `ocmux switch`, and a note documenting `--tgnotify` as consciously unimplemented (with the unresolved design questions)
+- README: `--defer [N]` usage and `agentp_ticket` format, `$(ocmux)` URL hint, `ocmux switch`, and `--defer --tg` as the supported pattern for Telegram notifications from deferred jobs
 - `docs/specification.md`: `--defer [N]` behavior, ticket format, `ocmux switch` behavior
 - Updated `--help` text in `bin/agentp` and `bin/ocmux`
 

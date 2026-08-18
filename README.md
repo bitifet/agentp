@@ -73,14 +73,12 @@ Options:
 By default, `--qa` auto-detects tgagentp (silently degrades if unavailable); standalone mode implies `--no-tg`.
 With `--tg`, errors if tgagentp is unavailable.
 
-> **`--tgnotify` is not implemented.** A notification-only mode (send to Telegram
-> when a `--defer` job completes, without routing a prompt through the agent)
-> was considered and deliberately left out. It needs two open questions resolved
-> first: (1) which chat should receive the notification when no chat owns the
-> server (tgagentp tracks a single owner chat per server, which may be a group),
-> and (2) what should happen when the tgagentp gateway is unreachable at
-> completion time. If you need this, the current workaround is `agentp --defer`
-> from a shell plus `--tg`/`agentp --tg` (or a cron/`&&` chain) to forward results.
+> **Telegram notification from deferred jobs:** Use `--defer --tg` (or
+> `--defer N --tg`) to forward the answer to Telegram automatically when the
+> background job completes. The detached child process runs the full `--tg`
+> flow, including gateway detection and notification. If the gateway is
+> unreachable at completion time, a warning is printed on stderr; the answer
+> is still saved in the temp file and retrievable via ticket re-submission.
 
 Arguments:
 
