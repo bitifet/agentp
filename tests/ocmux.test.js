@@ -28,12 +28,11 @@ function mockExecSync() { execSyncCalled = true; }
 
 // ── Mock infrastructure for fs ─────────────────────────────────────
 let mockFiles = {};           // path → content
+let originalReadFileSync = fs.readFileSync;
 
 function mockReadFileSync(p, encoding) {
   if (mockFiles[p] !== undefined) return mockFiles[p];
-  const err = new Error(`ENOENT: ${p}`);
-  err.code = 'ENOENT';
-  throw err;
+  return originalReadFileSync(p, encoding);
 }
 
 function mockExistsSync(p) { return mockFiles[p] !== undefined; }
@@ -545,5 +544,108 @@ describe('resurrectServer', { concurrency: false }, () => {
     const parsed = JSON.parse(sw.data);
     assert.ok(parsed.url);
     assert.strictEqual(parsed.window_index, 9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bin/ocmux CLI — switch subcommand guard paths
+// ---------------------------------------------------------------------------
+
+describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
+  let origExit, origArgv, origIsTTY, origStderrWrite, origStdoutWrite;
+  let stderrOutput, exitThrown;
+
+  function setupProcessMocks() {
+    origExit = process.exit;
+    origArgv = process.argv;
+    origIsTTY = process.stdin.isTTY;
+    origStderrWrite = process.stderr.write;
+    origStdoutWrite = process.stdout.write;
+    stderrOutput = [];
+    exitThrown = null;
+
+    process.exit = (code) => { exitThrown = code; throw new Error('EXIT:' + code); };
+    process.stderr.write = (chunk) => {
+      stderrOutput.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdout.write = () => true;
+    process.stdin.isTTY = true;
+  }
+
+  function tearDownProcessMocks() {
+    process.exit = origExit;
+    process.argv = origArgv;
+    process.stdin.isTTY = origIsTTY;
+    process.stderr.write = origStderrWrite;
+    process.stdout.write = origStdoutWrite;
+  }
+
+  function requireMain() {
+    delete require.cache[require.resolve('../bin/ocmux')];
+    const { main } = require('../bin/ocmux');
+    try {
+      main();
+    } catch (e) {
+      if (!e.message || !e.message.startsWith('EXIT:')) throw e;
+    }
+  }
+
+  beforeEach(() => {
+    setupMocks();
+    setupProcessMocks();
+  });
+
+  afterEach(() => {
+    tearDownProcessMocks();
+    delete require.cache[require.resolve('../bin/ocmux')];
+    tearDownMocks();
+  });
+
+  it('errors when no servers are running', () => {
+    tmuxHandler = () => tmuxFail(1);
+    process.argv = ['node', 'ocmux', 'switch'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('No opencode servers running')));
+  });
+
+  it('errors when stdin is not a TTY', () => {
+    process.stdin.isTTY = false;
+    process.argv = ['node', 'ocmux', 'switch'];
+    nodeMock.method(ocmux, 'listServers', () => [
+      { url: 'http://localhost:4096', dir: '/proj', index: 1, status: 'alive' },
+    ]);
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('requires a TTY')));
+  });
+
+  it('rejects --git flag with switch', () => {
+    process.argv = ['node', 'ocmux', '--git', 'switch'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("--git' and '--GIT' are only valid with 'serve'")));
+  });
+
+  it('rejects --GIT flag with switch', () => {
+    process.argv = ['node', 'ocmux', '--GIT', 'switch'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("--git' and '--GIT' are only valid with 'serve'")));
+  });
+
+  it('rejects --print-logs flag with switch', () => {
+    process.argv = ['node', 'ocmux', '--print-logs', 'switch'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("'--print-logs' is only valid with 'serve'")));
+  });
+
+  it('rejects a directory path argument with switch', () => {
+    process.argv = ['node', 'ocmux', 'switch', '/tmp'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('does not accept a directory path')));
   });
 });
