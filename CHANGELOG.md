@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **`agentp --defer` refinement** — new `agentp_ticket` format, optional timeout, and pretty printing
+  - `--defer [N]` now accepts an optional numeric timeout in seconds (default `0`): wait up to N seconds for the answer and print it if it arrives in time; otherwise return a ticket immediately
+  - New ticket format: `agentp_ticket` + JSON `{ctime, path, elapsed, defer}` (replaces the old `<agentp-deferred>path</agentp-deferred>` marker)
+  - Tickets are printed as pretty-printed (multi-line) JSON for easier reading/editing; `--onlineTicket` prints the same ticket on a single line (both formats are accepted when piping a ticket back)
+  - `ctime` tracks creation time; `elapsed` is only printed on re-submission (0 when `ctime` is missing/unparseable)
+  - `defer` is printed only when the submission timeout was > 0
+  - Re-submitting a ticket ignores the CLI `--defer` value and uses the ticket's own `defer`; a ready answer is returned and the temp file removed; otherwise the ticket is re-printed with updated `elapsed`
+
+### New Features
+
+- **`ocmux switch`** — interactive session picker
+  - Shows all running servers in an interactive menu (alt screen, TTY required) with columns `dirname | status | url | full path`
+  - `j`/`k` or arrow keys move the cursor; `Enter`/`Space` switches to the selected server's tmux window while keeping the menu open; `q`/`Ctrl+C` exits
+  - The row matching the tmux-active window is highlighted across the full line width; it is re-queried from tmux on every redraw, so the highlight tracks both menu activations and external window switches
+  - Prints the URL of the last selected server on exit
+  - Errors (exit 1) when no TTY or no servers
+
+### Bug Fixes
+
+- **Broken non-deferred runs:** `tgError is not defined` (a scoping regression from the deferred-execution refactor) broke every run without `--defer`; error messages were also incorrectly written to stdout instead of stderr. Both fixed in `bin/agentp`.
+- **Stale test expectation:** `tests/agentp.test.js` hardcoded version `0.12.0`; now reads `package.json` version.
+- **Flaky `npm test`:** the agentp test harness forwarded captured stdout writes to the real stdout, which could interleave with the test runner's own stdout framing under parallel load and corrupt its IPC parse (`Unable to deserialize cloned data...`, ~1/3 of `npm test` runs). Captured stdout is now swallowed, making the suite deterministic.
+
+### Documentation
+
+- README: `--defer [N]` usage and `agentp_ticket` format, `$(ocmux)` URL hint, `ocmux switch`, and a note documenting `--tgnotify` as consciously unimplemented (with the unresolved design questions)
+- `docs/specification.md`: `--defer [N]` behavior, ticket format, `ocmux switch` behavior
+- Updated `--help` text in `bin/agentp` and `bin/ocmux`
+
 ## [1.12.1] - 2026-08-03
 
 ### New Features

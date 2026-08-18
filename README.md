@@ -59,7 +59,8 @@ agentp [options] [url]
 Options:
 
 - `--qa`: print the original prompt and answer with labels (useful when used as a filter)
-- `--defer`: deferred execution — submit prompt, get immediate ticket, retrieve result later
+- `--defer [N]`: deferred execution — submit a prompt and get a ticket immediately (or wait up to N seconds for the answer and print it if it arrives); pipe the ticket back to retrieve the result later
+- `--onlineTicket`: print deferred tickets on a single line (default: pretty-printed JSON)
 - `--tg`: forward the answer to Telegram via tgagentp gateway (error if unreachable)
 - `--no-tg`: do not forward to Telegram
 - `--flush`: flush tgagentp's recorded buffer without prepending it to output
@@ -72,9 +73,19 @@ Options:
 By default, `--qa` auto-detects tgagentp (silently degrades if unavailable); standalone mode implies `--no-tg`.
 With `--tg`, errors if tgagentp is unavailable.
 
+> **`--tgnotify` is not implemented.** A notification-only mode (send to Telegram
+> when a `--defer` job completes, without routing a prompt through the agent)
+> was considered and deliberately left out. It needs two open questions resolved
+> first: (1) which chat should receive the notification when no chat owns the
+> server (tgagentp tracks a single owner chat per server, which may be a group),
+> and (2) what should happen when the tgagentp gateway is unreachable at
+> completion time. If you need this, the current workaround is `agentp --defer`
+> from a shell plus `--tg`/`agentp --tg` (or a cron/`&&` chain) to forward results.
+
 Arguments:
 
 - `url`: OpenCode TUI server URL or port number (defaults to `4096`). Examples: `4096`, `http://localhost:4096`, `http://192.168.1.50:4096`
+- Tip: `$(ocmux)` expands to the URL of the current project's server, so you can run `agentp $(ocmux)` from any shell.
 
 ## Examples
 
@@ -147,17 +158,51 @@ context for a new topic.
 
 Deferred execution with `--defer`:
 
-Submit a prompt and get an immediate ticket to retrieve the result later:
+Submit a prompt and get a ticket to retrieve the result later:
 
 ```bash
-# Submit a prompt and get a deferred reference
+# Submit a prompt and get a deferred ticket (optionally wait up to N seconds)
 DEFERRED=$(printf "Refactor the authentication module" | agentp --defer)
-# Output: <agentp-deferred>/tmp/agentp_deferred_20260803_1430_a1b2.tmp</agentp-deferred>
+# Output: agentp_ticket {
+#            "ctime": "2026-08-03T14:30:00.000Z",
+#            "path": "/tmp/agentp_deferred_20260803_1430_a1b2.tmp"
+#          }
+
+# Or wait up to 60s for the answer; only get a ticket if it's not ready in time
+DEFERRED=$(printf "Refactor the authentication module" | agentp --defer 60)
 
 # Continue working... retrieve the result when ready
 printf '%s\n' "$DEFERRED" | agentp --defer
 # Output: (the agent's response)
 ```
+
+`--defer` takes an optional numeric timeout in seconds (default `0`). With a
+timeout, the invocation blocks until the answer arrives or the timeout expires:
+if the answer arrives in time it is printed immediately; otherwise a ticket is
+returned and the agent keeps working in the background.
+
+The ticket is `agentp_ticket` followed by a JSON object with these fields:
+
+- `ctime` — creation timestamp (ISO 8601). Only used to compute `elapsed`.
+- `path` — path to the temp file holding the result.
+- `elapsed` — seconds since `ctime`, included only when the ticket is re-printed (not on first print).
+- `defer` — the timeout requested at submission, included only when it was > 0.
+
+Tickets are printed as pretty-printed (multi-line) JSON for easier reading and
+editing; pass `--onlineTicket` to print them on a single line instead:
+
+```bash
+printf "Refactor the auth module" | agentp --defer --onlineTicket
+# Output: agentp_ticket {"ctime":"...","path":"/tmp/agentp_deferred_....tmp"}
+```
+
+Both formats are accepted when piping a ticket back to `agentp --defer`.
+
+Piping a ticket back to `agentp --defer` ignores the `--defer` argument and uses
+the ticket's own `defer` value as the timeout (default `0`):
+
+- If the answer is ready, it is returned and the temp file is removed.
+- If not, the ticket is re-printed with the elapsed time updated.
 
 Works as a Vim/Neovim filter with deferred execution:
 
@@ -166,15 +211,18 @@ Works as a Vim/Neovim filter with deferred execution:
 :'<,'>!agentp --defer --qa
 
 " Later, retrieve the result
-:r !printf '%s\n' "<agentp-deferred>/tmp/agentp_deferred_...tmp</agentp-deferred>" | agentp --defer
+:r !printf '%s\n' "$(cat <<'EOF'
+agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/agentp_deferred_...tmp"}
+EOF
+)" | agentp --defer
 ```
 
 The deferred workflow:
-1. Submit prompt with `--defer` → get immediate ticket (`<agentp-deferred>...</agentp-deferred>`)
+1. Submit prompt with `--defer` → get a ticket (`agentp_ticket {...}`)
 2. Continue working (the agent processes in background)
 3. When ready, pipe the ticket back to `agentp --defer` to retrieve the result
-4. If the agent is still processing, you get your input back (identity filter)
-4. If complete, you get the agent's response and the temp file is cleaned up
+4. If the agent is still processing, you get the ticket back with the elapsed time updated
+5. If complete, you get the agent's response and the temp file is cleaned up
 
 Useful for long-running tasks where you don't want to block your editor.
 
@@ -204,6 +252,7 @@ Subcommands:
   - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr in the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`resurrect [--print-logs] [dir]`** — Recover a dead/crashed server: reads `.ocmux.json`, kills old tmux window, removes state file, then creates a fresh server + TUI in the same directory. Works even if no tmux window exists (stale state file).
+- **`switch`** — Interactive session picker: an interactive menu of all running servers (columns: dirname, status, url, full path). Arrow keys or `j`/`k` move the selection; `Enter`/`Space` switches to the selected server's tmux window (the menu stays open, so you can hop between servers); `q` or `Ctrl+C` exits. The currently active server (queried live from tmux on every redraw) is highlighted across the full line width. Prints the URL of the last selected server on exit. Requires a TTY.
 - **`list`** — List all running servers with their directories, URLs, and status.
 
 Options:

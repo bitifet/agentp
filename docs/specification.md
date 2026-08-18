@@ -31,12 +31,23 @@ Reads stdin, sends to the most recent or named OpenCode session, streams answer 
 **Options:**
 
 | Flag | Effect |
-|---|---|
+|---|---|---|
 | `--qa` | Print prompt/answer with rulers; auto-detect tgagentp |
+| `--defer [N]` | Deferred execution — submit a prompt and get a ticket immediately, or wait up to N seconds (default `0`) for the answer; piping the ticket back retrieves the result later |
+| `--onlineTicket` | Print deferred tickets on a single line (default: pretty-printed JSON) |
 | `--tg` | Forward answer via tgagentp gateway (error if unavailable) |
 | `--no-tg` | Explicitly disable Telegram forwarding |
 | `--flush` | Flush recorded buffer without prepending |
 | `--getLast N` | Retrieve last N assistant answers from session history |
+
+**Deferred tickets (`--defer`):**
+
+Ticket format on stdout: `agentp_ticket` followed by a JSON object `{ ctime, path, elapsed, defer }`, printed as pretty-printed (multi-line) JSON by default or on a single line with `--onlineTicket`. Both formats are accepted when piping a ticket back.
+
+- First print omits `elapsed`; `defer` is included only when it was `> 0`.
+- Re-prints (answer not ready yet) include `elapsed` computed from `ctime` (0 when `ctime` is missing/unparseable).
+- A ticket piped back to `agentp --defer` ignores the CLI `--defer` value and uses the ticket's own `defer` (default 0): ready → print answer + delete temp file; not ready → re-print the ticket with updated `elapsed`; file missing → error, exit 1.
+- New run with `--defer N` (N > 0): wait up to N seconds polling the temp file; answer arrives in time → print + delete; else print the ticket and keep the background child alive.
 
 **Protocol:**
 
@@ -63,8 +74,11 @@ Manages per-project OpenCode servers in a persistent `Opencode` tmux session.
 | `new [dir]` | Alias for `serve` (deprecated) |
 | `kill [dir]` | Kill server, remove tmux window + `.ocmux.json` |
 | `resurrect [dir]` | Recover dead server: kill old window, remove state file, create fresh server + TUI |
+| `switch` | Interactive session picker (TTY required) |
 | `list [-l]` | List all running servers |
 | _(no arg)_ | Switch to existing server (searches upward for `.ocmux.json`) |
+
+**`switch` behavior:** Renders an interactive menu of all running servers on an alt screen with columns `dirname | status | url | full path`. `j`/`k` or arrow keys move the cursor; `Enter`/`Space` activates the selected server (switches its tmux window) and keeps the menu open; `q`/`Ctrl+C` exits and prints the URL of the last selected server (if any). The row matching the tmux-active window (queried live from tmux via `activeWindowIndex()` on every redraw) is highlighted across the full line width, so the highlight tracks both local activations and external tmux window switches. Errors (exit 1) when no TTY or no servers. Rejects `--git`, `--GIT`, `--print-logs`, and directory arguments.
 
 **Flags:** `--git`, `--GIT`, `--print-logs`, `-l`, `--version`
 

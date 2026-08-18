@@ -24,6 +24,7 @@ const {
   resurrectServer,
   startServer,
   getActiveServer,
+  activateServer,
 } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
@@ -182,6 +183,9 @@ function printHelp() {
   console.error('            Works even if no tmux window exists (stale state file).');
   console.error('            --print-logs  Pass --print-logs to the new opencode serve.');
   console.error('  list      List all running servers with their directories and URLs.');
+  console.error('  switch    Interactively select a server to switch to.');
+  console.error('            j/k or arrows to move, Enter/Space selects (menu stays open),');
+  console.error('            q or Ctrl+C quits. Prints the URL of the last selected server on exit.');
   console.error('');
   console.error('  --         Treat the next argument as a directory even if it matches');
   console.error('            a subcommand name (e.g. "ocmux -- kill").');
@@ -251,6 +255,116 @@ function cmdSwitch(statefile, longMode) {
 
   ensureTuiZoomed(winIdx);
   outputUrl(url, serverDir, longMode);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: switch — interactive session selection
+// ---------------------------------------------------------------------------
+
+function cmdSwitchMenu(longMode) {
+  const rows = listServers();
+  if (rows.length === 0) {
+    console.error('No opencode servers running.');
+    process.exit(1);
+  }
+  if (!process.stdin.isTTY) {
+    console.error('Error: "switch" is interactive and requires a TTY.');
+    console.error('Use "ocmux list" to list servers, or run "ocmux <dir>" to switch directly.');
+    process.exit(1);
+  }
+
+  const cols = process.stderr.columns || 80;
+  const nameW = Math.max(...rows.map(r => path.basename(r.dir).length), 4);
+  const stsW = Math.max(...rows.map(r => r.status.length), 6);
+  const urlW = Math.max(...rows.map(r => r.url.length), 3);
+  const dirW = Math.max(...rows.map(r => r.dir.length), 9);
+  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+  const lineWidth = Math.max(cols, nameW + 2 + stsW + 2 + urlW + 2 + dirW);
+
+  let cursor = 0;
+  let activeRow = 0;
+  let lastUrl = null;
+  let lastDir = null;
+  let exited = false;
+
+  // Query tmux for the currently active window and map it to a row. Called at
+  // init and on every draw, so the highlight always reflects tmux's real state.
+  const refreshActive = () => {
+    const idx = activeWindowIndex();
+    if (idx == null) return;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i].index === idx) { activeRow = i; return; }
+    }
+  };
+
+  const cleanup = () => {
+    process.stderr.write('\x1b[?25h');
+    process.stderr.write('\x1b[?1049l');
+    try { process.stdin.setRawMode(false); } catch {}
+  };
+
+  const finish = () => {
+    if (exited) return;
+    exited = true;
+    cleanup();
+    process.stdin.pause();
+    if (lastUrl) outputUrl(lastUrl, lastDir, longMode);
+    process.exit(0);
+  };
+
+  const draw = () => {
+    refreshActive();
+    let out = '\x1b[2J\x1b[H';
+    out += 'ocmux switch — j/k or arrows: move, Enter/Space: select (keep switching), q/Ctrl+C: quit\n\n';
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const marker = i === cursor ? '▶ ' : '  ';
+      const line = `${marker}${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(row.url, urlW)}  ${pad(row.dir, dirW)}`;
+      if (i === activeRow) {
+        out += '\x1b[7m' + pad(line, lineWidth) + '\x1b[0m\n';
+      } else {
+        out += line + '\n';
+      }
+    }
+    process.stderr.write(out);
+  };
+
+  const activate = (i) => {
+    const row = rows[i];
+    try {
+      activateServer(row.dir, row.index, row.url);
+      lastUrl = row.url;
+      lastDir = row.dir;
+    } catch (err) {
+      process.stderr.write(`\nError: ${err.message}\n`);
+    }
+    draw();
+  };
+
+  process.stdin.on('keypress', (str, key) => {
+    if (key.ctrl && key.name === 'c') return finish();
+    if (key.name === 'q') return finish();
+    if (key.name === 'up' || str === 'k') {
+      cursor = (cursor + rows.length - 1) % rows.length;
+      draw();
+    } else if (key.name === 'down' || str === 'j') {
+      cursor = (cursor + 1) % rows.length;
+      draw();
+    } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+      activate(cursor);
+    }
+  });
+
+  process.on('SIGINT', finish);
+  process.on('SIGTERM', finish);
+
+  readline.emitKeypressEvents(process.stdin);
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stderr.write('\x1b[?1049h\x1b[?25l');
+  refreshActive();
+  cursor = activeRow;
+  draw();
 }
 
 // ---------------------------------------------------------------------------
@@ -506,7 +620,7 @@ function main() {
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect') {
+    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect' || arg === 'switch') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
@@ -566,6 +680,21 @@ function main() {
       process.exit(1);
     }
     cmdList();
+  } else if (subcommand === 'switch') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (printLogs) {
+      console.error("Error: '--print-logs' is only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (targetDir !== process.cwd()) {
+      console.error("Error: 'switch' does not accept a directory path.");
+      process.exit(1);
+    }
+    ensureSession();
+    cmdSwitchMenu(longMode);
   } else if (subcommand === 'kill') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");

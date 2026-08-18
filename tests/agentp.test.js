@@ -4,6 +4,9 @@ const { describe, it, before, after, beforeEach, afterEach, mock: nodeMock } = r
 const assert = require('node:assert');
 const http = require('http');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const child_process = require('child_process');
 const { Readable, Writable } = require('stream');
 
 const opencode = require('../lib/opencode');
@@ -96,14 +99,13 @@ function setupProcessMocks() {
   originalError = console.error;
   originalReadFileSync = fs.readFileSync;
 
-  // Replace stdout with a Writable that captures AND passes through.
-  // Object.defineProperty is needed because process.stdout has a getter (no setter).
-  // Direct stdout.write mock breaks node:test's describe/suite detection.
-  const rwOut = process.stdout.write.bind(process.stdout);
+  // Replace stdout with a Writable that captures (and does NOT pass through):
+  // forwarding chunks to the real stdout can interleave with the test runner's
+  // own stdout framing under parallel load, corrupting the parent's IPC parse.
   const capOut = new Writable({
     write(chunk, encoding, callback) {
       stdout.push(typeof chunk === 'string' ? chunk : chunk.toString());
-      rwOut(chunk, encoding, callback);
+      callback();
     }
   });
   Object.defineProperty(process, 'stdout', {
@@ -222,7 +224,7 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(logs.length, 1);
-            assert.ok(logs[0].includes('0.12.0'));
+      assert.ok(logs[0].includes(require('../package.json').version));
     });
 
     it('--help prints help and exits', async () => {
@@ -465,6 +467,227 @@ describe('agentp CLI', () => {
         notifyAgentpGateway(12345, 'http://localhost:4096', 'test'),
         /Connection timed out/
       );
+    });
+  });
+
+  describe('deferred execution', () => {
+    beforeEach(() => {
+      // Mock child spawn so no real detached process runs. When _spawnAnswer
+      // is set, simulate a completed child: write the answer and release the lock.
+      nodeMock.method(child_process, 'spawn', (cmd, args, opts) => {
+        mockCfg._spawn = { cmd, args, opts };
+        if (mockCfg._spawnAnswer !== undefined) {
+          const outIdx = args.indexOf('--output-file');
+          if (outIdx !== -1) {
+            const out = args[outIdx + 1];
+            fs.writeFileSync(out, mockCfg._spawnAnswer);
+            try { fs.unlinkSync(out + '.lock'); } catch {}
+          }
+        }
+        return { unref() {} };
+      });
+    });
+
+    function cleanupSpawnFiles() {
+      if (!mockCfg._spawn) return;
+      const args = mockCfg._spawn.args;
+      for (const flag of ['--prompt-file', '--output-file']) {
+        const idx = args.indexOf(flag);
+        if (idx !== -1) {
+          try { fs.unlinkSync(args[idx + 1]); } catch {}
+          try { fs.unlinkSync(args[idx + 1] + '.lock'); } catch {}
+        }
+      }
+    }
+
+    function parseTicketOutput() {
+      const out = stdout.join('');
+      assert.ok(out.startsWith('agentp_ticket '), `expected ticket, got: ${out}`);
+      return JSON.parse(out.slice('agentp_ticket '.length).trim());
+    }
+
+    it('--defer returns a ticket immediately', async () => {
+      setArgv(['--defer']);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(typeof t.ctime, 'string');
+      assert.strictEqual(typeof t.path, 'string');
+      assert.ok(!('elapsed' in t));
+      assert.ok(!('defer' in t));
+      assert.ok(mockCfg._spawn.args.includes('--defer-child'));
+      cleanupSpawnFiles();
+    });
+
+    it('--defer N includes the defer field in the ticket', async () => {
+      setArgv(['--defer', '1']);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(t.defer, 1);
+      assert.ok(!('elapsed' in t));
+      cleanupSpawnFiles();
+    });
+
+    it('--onlineTicket prints a compact single-line ticket', async () => {
+      setArgv(['--defer', '--onlineTicket']);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const out = stdout.join('').trim();
+      assert.ok(out.startsWith('agentp_ticket {'), `expected single-line ticket, got: ${out}`);
+      assert.ok(!out.includes('\n'), `expected single line, got: ${out}`);
+      const t = parseTicketOutput();
+      assert.strictEqual(typeof t.path, 'string');
+      cleanupSpawnFiles();
+    });
+
+    it('--defer N returns the answer when it arrives within the timeout', async () => {
+      setArgv(['--defer', '5']);
+      provideStdin('hello');
+      mockCfg._spawnAnswer = 'the fast answer';
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const out = stdout.join('');
+      assert.ok(out.includes('the fast answer'));
+      assert.ok(!out.includes('agentp_ticket'));
+      cleanupSpawnFiles();
+    });
+
+    it('retrieves the answer from a ticket and removes the temp file', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_retrieve_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'the stored answer');
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.ok(stdout.join('').includes('the stored answer'));
+      assert.ok(!fs.existsSync(tmp));
+    });
+
+    it('re-prints the ticket with elapsed when the answer is not ready', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_wait_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.ok(t.elapsed >= 0);
+      assert.ok(!('defer' in t));
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('ignores the --defer argument for tickets and uses the ticket defer property', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_override_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      // CLI says --defer 999; the ticket says defer 0 — must not wait or error.
+      setArgv(['--defer', '999']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","defer":0}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.ok(t.elapsed >= 0);
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('errors when the deferred file is missing', async () => {
+      setArgv(['--defer']);
+      provideStdin('agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/agentp_nope_123.tmp"}');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:1/);
+      assert.ok(stdout.join('').includes('deferred file not found'));
+    });
+  });
+
+  describe('deferred ticket helpers', () => {
+    it('parses a valid ticket', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      const t = parseDeferredTicket('agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/x.tmp","defer":5}');
+      assert.deepStrictEqual(t, {
+        ctime: '2026-08-03T14:30:00.000Z',
+        path: '/tmp/x.tmp',
+        defer: 5,
+      });
+    });
+
+    it('trims surrounding whitespace and newlines', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      const t = parseDeferredTicket('\n  agentp_ticket {"path":"/tmp/x.tmp"}  \n');
+      assert.deepStrictEqual(t, { ctime: null, path: '/tmp/x.tmp', defer: 0 });
+    });
+
+    it('defaults defer to 0 when absent', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      const t = parseDeferredTicket('agentp_ticket {"path":"/tmp/x.tmp"}');
+      assert.strictEqual(t.defer, 0);
+    });
+
+    it('returns null for non-ticket input', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      assert.strictEqual(parseDeferredTicket('hello world'), null);
+      assert.strictEqual(parseDeferredTicket('<agentp-deferred>/tmp/x.tmp</agentp-deferred>'), null);
+    });
+
+    it('returns null for invalid JSON', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      assert.strictEqual(parseDeferredTicket('agentp_ticket {not json'), null);
+    });
+
+    it('formats a first-print ticket as pretty JSON without elapsed', () => {
+      const { formatTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 });
+      assert.ok(s.includes('\n'), 'expected pretty-printed multi-line JSON');
+      const data = JSON.parse(s.slice('agentp_ticket '.length));
+      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 });
+    });
+
+    it('includes elapsed on re-print', () => {
+      const { formatTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 0 }, 42);
+      const data = JSON.parse(s.slice('agentp_ticket '.length));
+      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', elapsed: 42 });
+    });
+
+    it('omits defer when 0', () => {
+      const { formatTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 0 });
+      assert.ok(!s.includes('defer'));
+    });
+
+    it('prints a compact single-line ticket with compact=true', () => {
+      const { formatTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 }, undefined, true);
+      assert.strictEqual(s, 'agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/x.tmp","defer":5}');
+    });
+
+    it('parses a pretty-printed multi-line ticket', () => {
+      const { parseDeferredTicket } = require('../bin/agentp');
+      const pretty = 'agentp_ticket {\n  "ctime": "2026-08-03T14:30:00.000Z",\n  "path": "/tmp/x.tmp",\n  "defer": 5\n}';
+      assert.deepStrictEqual(parseDeferredTicket(pretty), {
+        ctime: '2026-08-03T14:30:00.000Z',
+        path: '/tmp/x.tmp',
+        defer: 5,
+      });
+    });
+
+    it('waitForDeferredResult returns null after timeout', async () => {
+      const { waitForDeferredResult } = require('../bin/agentp');
+      const t0 = Date.now();
+      const result = await waitForDeferredResult('/nonexistent/agentp/result.tmp', 50);
+      assert.strictEqual(result, null);
+      assert.ok(Date.now() - t0 >= 40);
+    });
+
+    it('waitForDeferredResult returns content once available', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_waitready_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'done');
+      const { waitForDeferredResult } = require('../bin/agentp');
+      const result = await waitForDeferredResult(tmp, 50);
+      assert.strictEqual(result, 'done');
+      try { fs.unlinkSync(tmp); } catch {}
     });
   });
 });

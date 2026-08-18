@@ -108,6 +108,69 @@ function generateTempFilename() {
   return path.join(os.tmpdir(), `agentp_deferred_${timestamp}_${hash}.tmp`);
 }
 
+// Poll interval for --defer waiting (ms). Overridable for tests.
+const DEFER_POLL_MS = 250;
+
+// Parse an `agentp_ticket <json>` reference from input text.
+// The ticket may be wrapped in whitespace/newlines. Returns
+// { ctime, path, defer } or null if input is not a ticket.
+function parseDeferredTicket(text) {
+  const trimmed = String(text).trim();
+  if (!trimmed.startsWith('agentp_ticket')) return null;
+  let data;
+  try {
+    data = JSON.parse(trimmed.slice('agentp_ticket'.length).trim());
+  } catch {
+    return null;
+  }
+  if (!data || typeof data.path !== 'string' || !data.path) return null;
+  return {
+    ctime: typeof data.ctime === 'string' ? data.ctime : null,
+    path: data.path,
+    defer: typeof data.defer === 'number' && data.defer > 0 ? data.defer : 0,
+  };
+}
+
+// Format a deferred ticket for printing. `elapsed` is only included on
+// re-prints; `defer` only when a timeout > 0 was requested. Pretty-printed
+// JSON by default (easier to read/edit); pass `compact` for a single line.
+function formatTicket(ticket, elapsed, compact) {
+  const fields = { ctime: ticket.ctime, path: ticket.path };
+  if (elapsed !== undefined) fields.elapsed = elapsed;
+  if (ticket.defer > 0) fields.defer = ticket.defer;
+  return 'agentp_ticket ' + (compact ? JSON.stringify(fields) : JSON.stringify(fields, null, 2));
+}
+
+// Read the deferred output file. Returns the answer string, or null if the
+// answer is not ready yet (file missing, still locked, or still empty).
+function readDeferredResult(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  if (isFileLocked(filePath)) return null;
+  let content = '';
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+  return content === '' ? null : content;
+}
+
+// Poll up to timeoutMs for a ready deferred result. Returns the answer or null.
+async function waitForDeferredResult(filePath, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = readDeferredResult(filePath);
+    if (result !== null) return result;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    await sleepMs(Math.min(DEFER_POLL_MS, remaining));
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function readAllStdin() {
   let text = '';
   const rl = readline.createInterface({ input: process.stdin });
@@ -127,7 +190,9 @@ async function main() {
   let qaMode = false;
   let flushMode = false;
   let deferMode = false;
+  let deferSeconds = 0;
   let deferChildMode = false;
+  let onlineTicket = false;
   let promptFile = null;
   let outputFile = null;
   let sessionName = null;
@@ -148,7 +213,11 @@ async function main() {
       console.error('Options:');
       console.error('  --version   Show version');
       console.error('  --qa        Print the original prompt and answer with labels (useful as a filter)');
-      console.error('  --defer     Deferred execution: write prompt to temp file, return path immediately');
+      console.error('  --defer [N] Deferred execution: submit prompt, get a ticket immediately');
+      console.error('              (or wait up to N seconds for the answer and print it if it arrives)');
+      console.error('              Pipe the ticket back to agentp --defer to retrieve the result later');
+      console.error('  --onlineTicket');
+      console.error('              Print deferred tickets on a single line (default: pretty-printed JSON)');
       console.error('  --tg        Forward the answer to Telegram via agentp gateway (error if unavailable)');
       console.error('  --no-tg     Do not forward to Telegram');
       console.error('  --flush     Flush tgagentp\'s recorded buffer without prepending it to output');
@@ -174,7 +243,7 @@ async function main() {
       console.error('Arguments:');
       console.error('  url        OpenCode server URL or port number (default: 4096)');
       console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
-      console.error('             Use `ocmux` (with no args) to get the URL of the current project\'s server.');
+      console.error('             Tip: $(ocmux) expands to the URL of the current project\'s server.');
       console.error('');
       console.error('See also: tgagentp -- Telegram bridge (tgagentp --help), ocmux -- manage OpenCode tmux sessions (ocmux --help)');
       console.error('');
@@ -194,8 +263,17 @@ async function main() {
       qaMode = true;
     } else if (args[i] === '--defer') {
       deferMode = true;
+      const next = args[i + 1];
+      if (next !== undefined && /^\d+$/.test(next)) {
+        deferSeconds = parseInt(next, 10);
+        i++;
+      } else {
+        deferSeconds = 0;
+      }
     } else if (args[i] === '--defer-child') {
       deferChildMode = true;
+    } else if (args[i] === '--onlineTicket') {
+      onlineTicket = true;
     } else if (args[i] === '--prompt-file') {
       i++;
       promptFile = args[i];
@@ -354,85 +432,104 @@ async function main() {
 
   // Handle --defer mode
   if (deferMode) {
-    // Check if stdin is a deferred reference
-    const deferredMatch = promptText.match(/<agentp-deferred>(.*?)<\/agentp-deferred>/);
-    
-    if (deferredMatch) {
-      // This is a deferred reference - retrieve the result
-      const deferredPath = deferredMatch[1].trim();
-      
+    // Check if stdin is a deferred ticket
+    const ticket = parseDeferredTicket(promptText);
+
+    if (ticket) {
+      // This is a ticket — retrieve the result. The --defer argument is
+      // ignored; the ticket's own "defer" timeout is used instead (default 0).
+      const deferredPath = ticket.path;
+
       if (!fs.existsSync(deferredPath)) {
-        // File doesn't exist - error
         process.stdout.write(`Error: deferred file not found: ${deferredPath}\n`);
         process.exit(1);
       }
-      
-      // Check if file is locked (still processing) or empty (not ready yet)
-      const isLocked = isFileLocked(deferredPath);
-      let content = '';
-      try {
-        content = fs.readFileSync(deferredPath, 'utf8');
-      } catch {
-        content = '';
-      }
-      
-      if (isLocked || content === '') {
-        // File is locked (still processing) or empty (not ready yet) - identity filter
-        process.stdout.write(promptText);
+
+      const result = await waitForDeferredResult(deferredPath, ticket.defer * 1000);
+
+      if (result !== null) {
+        // Answer available — return it and remove the temp file
+        try {
+          fs.unlinkSync(deferredPath);
+        } catch (err) {
+          process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+          process.exit(1);
+        }
+        try { fs.unlinkSync(deferredPath + '.lock'); } catch {}
+        process.stdout.write(result);
         process.exit(0);
       }
-      
-      // File exists, not locked, and has content - read and delete
-      try {
-        fs.unlinkSync(deferredPath);
-        process.stdout.write(content);
-        process.exit(0);
-      } catch (err) {
-        process.stdout.write(`Error reading deferred file: ${err.message}\n`);
-        process.exit(1);
-      }
-    } else {
-      // This is a regular prompt - create deferred execution
-      const tempPath = generateTempFilename();
-      const promptTempPath = tempPath + '.prompt';
-      
-      // Write prompt to temp file for child process
-      fs.writeFileSync(promptTempPath, promptText);
-      
-      // Create and lock the output file
-      fs.writeFileSync(tempPath, '');
-      lockFile(tempPath);
-      
-      // Output the deferred reference
-      process.stdout.write(`<agentp-deferred>${tempPath}</agentp-deferred>\n`);
-      
-      // Spawn detached child process
-      const childArgs = [
-        __filename,
-        '--defer-child',
-        '--prompt-file', promptTempPath,
-        '--output-file', tempPath,
-      ];
-      
-      // Pass through other flags
-      if (qaMode) childArgs.push('--qa');
-      if (tgMode === true) childArgs.push('--tg');
-      if (tgMode === false) childArgs.push('--no-tg');
-      if (flushMode) childArgs.push('--flush');
-      if (sessionName) {
-        childArgs.push('--session', sessionName);
-        if (newSession) childArgs.push('--new');
-      }
-      childArgs.push(serverBase);
-      
-      const child = child_process.spawn(process.execPath, childArgs, {
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-      
+
+      // Answer not available yet — re-print the ticket with updated elapsed
+      const elapsed = ticket.ctime
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(ticket.ctime)) / 1000))
+        : 0;
+      process.stdout.write(formatTicket(ticket, elapsed, onlineTicket) + '\n');
       process.exit(0);
     }
+
+    // This is a regular prompt — create deferred execution
+    const tempPath = generateTempFilename();
+    const promptTempPath = tempPath + '.prompt';
+
+    // Write prompt to temp file for child process
+    fs.writeFileSync(promptTempPath, promptText);
+
+    // Create and lock the output file
+    fs.writeFileSync(tempPath, '');
+    lockFile(tempPath);
+
+    const newTicket = {
+      ctime: new Date().toISOString(),
+      path: tempPath,
+      defer: deferSeconds,
+    };
+
+    // Spawn detached child process
+    const childArgs = [
+      __filename,
+      '--defer-child',
+      '--prompt-file', promptTempPath,
+      '--output-file', tempPath,
+    ];
+
+    // Pass through other flags
+    if (qaMode) childArgs.push('--qa');
+    if (tgMode === true) childArgs.push('--tg');
+    if (tgMode === false) childArgs.push('--no-tg');
+    if (flushMode) childArgs.push('--flush');
+    if (sessionName) {
+      childArgs.push('--session', sessionName);
+      if (newSession) childArgs.push('--new');
+    }
+    childArgs.push(serverBase);
+
+    const child = child_process.spawn(process.execPath, childArgs, {
+      detached: true,
+      stdio: 'ignore',
+    });
+    child.unref();
+
+    // If a timeout was given, block until the answer arrives or the timeout
+    // expires. Return the response when it arrives; otherwise print a ticket.
+    if (deferSeconds > 0) {
+      const result = await waitForDeferredResult(tempPath, deferSeconds * 1000);
+      if (result !== null) {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (err) {
+          process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+          process.exit(1);
+        }
+        try { fs.unlinkSync(tempPath + '.lock'); } catch {}
+        process.stdout.write(result);
+        process.exit(0);
+      }
+    }
+
+    // Output the deferred ticket
+    process.stdout.write(formatTicket(newTicket, undefined, onlineTicket) + '\n');
+    process.exit(0);
   }
 
   // Handle --defer-child mode (child process)
@@ -450,6 +547,7 @@ async function main() {
   }
 
   // Wrap main processing in try-catch for deferChildMode to write errors to output file
+  let tgError = null;
   async function runMain() {
     // Find most recent session or create one
     let sessions;
@@ -529,7 +627,6 @@ async function main() {
 
     // Post-send: notify tgagentp, get recorded context back
     let buffered = [];
-    let tgError = null;
     if (tgPort) {
       try {
         buffered = await notifyAgentpGateway(tgPort, serverBase, tgMessage);
@@ -566,7 +663,7 @@ async function main() {
       fs.writeFileSync(outputFile, errMsg);
       unlockFile(outputFile);
     } else {
-      process.stdout.write(errMsg);
+      console.error(err.message);
     }
     process.exit(1);
   }
@@ -605,5 +702,5 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, notifyAgentpGateway, readAllStdin };
+module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, formatTicket, waitForDeferredResult };
 
