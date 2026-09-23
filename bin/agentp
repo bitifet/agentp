@@ -10,6 +10,7 @@ const child_process = require('child_process');
 const { version } = require('../package.json');
 const {
   sendToSession,
+  sendToSessionAsync,
   listSessions,
   createSession,
   getSession,
@@ -110,25 +111,73 @@ function generateTempFilename() {
 
 // Poll interval for --defer waiting (ms). Overridable for tests.
 const DEFER_POLL_MS = 250;
+const FOLLOWUP_ROW = '📝 —————————————————\n';
 
-// Parse an `agentp_ticket <json>` reference from input text.
-// The ticket may be wrapped in whitespace/newlines. Returns
-// { ctime, path, defer } or null if input is not a ticket.
-function parseDeferredTicket(text) {
+function stripFollowupRow(text) {
+  return text.startsWith(FOLLOWUP_ROW) ? text.slice(FOLLOWUP_ROW.length) : text;
+}
+
+// Parse an `agentp_ticket <json>` reference from the start of input text.
+// The ticket may be wrapped in whitespace/newlines and may be followed by
+// additional text, which is returned separately for queued follow-ups.
+function parseDeferredTicketInput(text) {
   const trimmed = String(text).trim();
   if (!trimmed.startsWith('agentp_ticket')) return null;
+  const afterPrefix = trimmed.slice('agentp_ticket'.length).trimStart();
+  if (!afterPrefix.startsWith('{')) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let jsonEnd = -1;
+  for (let i = 0; i < afterPrefix.length; i++) {
+    const ch = afterPrefix[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === '\\') {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+      if (depth === 0) {
+        jsonEnd = i + 1;
+        break;
+      }
+    }
+  }
+  if (jsonEnd === -1) return null;
   let data;
   try {
-    data = JSON.parse(trimmed.slice('agentp_ticket'.length).trim());
+    data = JSON.parse(afterPrefix.slice(0, jsonEnd));
   } catch {
     return null;
   }
   if (!data || typeof data.path !== 'string' || !data.path) return null;
+  const rest = afterPrefix.slice(jsonEnd);
+  const followupText = rest.trim() ? stripFollowupRow(rest.trimStart()) : '';
   return {
     ctime: typeof data.ctime === 'string' ? data.ctime : null,
     path: data.path,
     defer: typeof data.defer === 'number' && data.defer > 0 ? data.defer : 0,
+    server: typeof data.server === 'string' ? data.server : null,
+    sessionId: typeof data.sessionId === 'string' ? data.sessionId : null,
+    followupText,
   };
+}
+
+function parseDeferredTicket(text) {
+  const parsed = parseDeferredTicketInput(text);
+  if (!parsed) return null;
+  const { followupText, ...ticket } = parsed;
+  return ticket;
 }
 
 // Format a deferred ticket for printing. `elapsed` is only included on
@@ -136,9 +185,62 @@ function parseDeferredTicket(text) {
 // JSON by default (easier to read/edit); pass `compact` for a single line.
 function formatTicket(ticket, elapsed, compact) {
   const fields = { ctime: ticket.ctime, path: ticket.path };
+  if (ticket.server) fields.server = ticket.server;
+  if (ticket.sessionId) fields.sessionId = ticket.sessionId;
   if (elapsed !== undefined) fields.elapsed = elapsed;
   if (ticket.defer > 0) fields.defer = ticket.defer;
   return 'agentp_ticket ' + (compact ? JSON.stringify(fields) : JSON.stringify(fields, null, 2));
+}
+
+async function resolveTargetSession(serverBase, sessionName, newSession) {
+  let sessions;
+  try {
+    sessions = await listSessions(serverBase);
+  } catch (err) {
+    throw new Error(`Error connecting to server: ${err.message}`);
+  }
+
+  if (sessionName) {
+    const matches = sessions.filter(s => {
+      const title = s.title || s.slug || s.id;
+      return title.toLowerCase() === sessionName.toLowerCase();
+    });
+    if (matches.length === 0) {
+      const partial = sessions.filter(s => {
+        const title = s.title || s.slug || s.id;
+        return title.toLowerCase().includes(sessionName.toLowerCase());
+      });
+      if (partial.length === 1) return partial[0].id;
+      if (partial.length > 1) throw new Error(`Error: multiple sessions match "${sessionName}"`);
+      if (!newSession) throw new Error(`Error: no session found matching "${sessionName}"`);
+      try {
+        const session = await createSession(serverBase, sessionName);
+        await selectSession(serverBase, session.id);
+        return session.id;
+      } catch (err) {
+        throw new Error(`Error creating session: ${err.message}`);
+      }
+    }
+    return matches[0].id;
+  }
+
+  if (sessions && sessions.length > 0) {
+    const sorted = sessions
+      .filter(s => s.time && (s.time.updated || s.time.created))
+      .sort((a, b) => {
+        const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
+        const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
+        return bTime - aTime;
+      });
+    if (sorted.length > 0) return sorted[0].id;
+  }
+
+  try {
+    const session = await createSession(serverBase, 'agentp');
+    return session.id;
+  } catch (err) {
+    throw new Error(`Error creating session: ${err.message}`);
+  }
 }
 
 // Read the deferred output file. Returns the answer string, or null if the
@@ -171,6 +273,52 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function appendUnusedFollowup(result, followupText) {
+  if (!followupText) return result;
+  return result + (result.endsWith('\n') ? '' : '\n') + followupText;
+}
+
+function queuedFollowupsPath(filePath) {
+  return filePath + '.followups';
+}
+
+function readQueuedFollowups(filePath) {
+  try {
+    const text = fs.readFileSync(queuedFollowupsPath(filePath), 'utf8');
+    const parsed = JSON.parse(text);
+    return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string' && item) : [];
+  } catch {
+    return [];
+  }
+}
+
+function appendQueuedFollowup(filePath, followupText) {
+  if (!followupText) return;
+  const followups = readQueuedFollowups(filePath);
+  followups.push(followupText);
+  fs.writeFileSync(queuedFollowupsPath(filePath), JSON.stringify(followups, null, 2));
+}
+
+function removeQueuedFollowups(filePath) {
+  try { fs.unlinkSync(queuedFollowupsPath(filePath)); } catch {}
+}
+
+function injectQueuedFollowups(result, followups) {
+  if (!followups.length) return result;
+  const addition = followups.map(text => FOLLOWUP_ROW + text + (text.endsWith('\n') ? '' : '\n')).join('');
+  const idx = result.indexOf(AGENT_ROW);
+  if (idx === -1) return appendUnusedFollowup(result, addition.trimEnd());
+  const before = result.slice(0, idx);
+  const after = result.slice(idx);
+  return before + (before.endsWith('\n') ? '' : '\n') + addition + after;
+}
+
+function formatDeferredResult(filePath, result, qaMode, unusedFollowupText) {
+  const followups = qaMode ? readQueuedFollowups(filePath) : [];
+  const output = qaMode ? injectQueuedFollowups(result, followups) : result;
+  return appendUnusedFollowup(output, unusedFollowupText);
+}
+
 async function readAllStdin() {
   let text = '';
   const rl = readline.createInterface({ input: process.stdin });
@@ -196,6 +344,7 @@ async function main() {
   let promptFile = null;
   let outputFile = null;
   let sessionName = null;
+  let resolvedSessionId = null;
   let newSession = false;
   // tgMode: false = disabled, 'auto' = auto-detect, true = explicit --tg
   let tgMode = null;
@@ -287,6 +436,13 @@ async function main() {
       sessionName = args[i];
       if (!sessionName) {
         console.error('Error: --session requires a session name');
+        process.exit(1);
+      }
+    } else if (args[i] === '--resolved-session-id') {
+      i++;
+      resolvedSessionId = args[i];
+      if (!resolvedSessionId) {
+        console.error('Error: --resolved-session-id requires a session id');
         process.exit(1);
       }
     } else if (args[i] === '--new') {
@@ -433,7 +589,7 @@ async function main() {
   // Handle --defer mode
   if (deferMode) {
     // Check if stdin is a deferred ticket
-    const ticket = parseDeferredTicket(promptText);
+    const ticket = parseDeferredTicketInput(promptText);
 
     if (ticket) {
       // This is a ticket — retrieve the result. The --defer argument is
@@ -445,7 +601,9 @@ async function main() {
         process.exit(1);
       }
 
-      const result = await waitForDeferredResult(deferredPath, ticket.defer * 1000);
+      let result = ticket.followupText
+        ? readDeferredResult(deferredPath)
+        : await waitForDeferredResult(deferredPath, ticket.defer * 1000);
 
       if (result !== null) {
         // Answer available — return it and remove the temp file
@@ -456,8 +614,39 @@ async function main() {
           process.exit(1);
         }
         try { fs.unlinkSync(deferredPath + '.lock'); } catch {}
-        process.stdout.write(result);
+        process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, ticket.followupText));
+        removeQueuedFollowups(deferredPath);
         process.exit(0);
+      }
+
+      if (ticket.followupText) {
+        if (!ticket.server || !ticket.sessionId) {
+          process.stdout.write('Error: deferred ticket does not include server/sessionId; cannot queue follow-up text. Re-submit only the ticket to check the result.\n');
+          process.exit(1);
+        }
+        try {
+          await sendToSessionAsync(ticket.server, ticket.sessionId, ticket.followupText);
+          appendQueuedFollowup(deferredPath, ticket.followupText);
+        } catch (err) {
+          process.stdout.write(`Error queueing follow-up prompt: ${err.message}\n`);
+          process.exit(1);
+        }
+      }
+
+      if (result === null && ticket.defer > 0) {
+        result = await waitForDeferredResult(deferredPath, ticket.defer * 1000);
+        if (result !== null) {
+          try {
+            fs.unlinkSync(deferredPath);
+          } catch (err) {
+            process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+            process.exit(1);
+          }
+          try { fs.unlinkSync(deferredPath + '.lock'); } catch {}
+          process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, ''));
+          removeQueuedFollowups(deferredPath);
+          process.exit(0);
+        }
       }
 
       // Answer not available yet — re-print the ticket with updated elapsed
@@ -472,6 +661,14 @@ async function main() {
     const tempPath = generateTempFilename();
     const promptTempPath = tempPath + '.prompt';
 
+    let targetSessionId;
+    try {
+      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+
     // Write prompt to temp file for child process
     fs.writeFileSync(promptTempPath, promptText);
 
@@ -483,6 +680,8 @@ async function main() {
       ctime: new Date().toISOString(),
       path: tempPath,
       defer: deferSeconds,
+      server: serverBase,
+      sessionId: targetSessionId,
     };
 
     // Spawn detached child process
@@ -502,6 +701,7 @@ async function main() {
       childArgs.push('--session', sessionName);
       if (newSession) childArgs.push('--new');
     }
+    childArgs.push('--resolved-session-id', targetSessionId);
     childArgs.push(serverBase);
 
     const child = child_process.spawn(process.execPath, childArgs, {
@@ -549,66 +749,7 @@ async function main() {
   // Wrap main processing in try-catch for deferChildMode to write errors to output file
   let tgError = null;
   async function runMain() {
-    // Find most recent session or create one
-    let sessions;
-    try {
-      sessions = await listSessions(serverBase);
-    } catch (err) {
-      throw new Error(`Error connecting to server: ${err.message}`);
-    }
-
-    let sessionId = null;
-
-    if (sessionName) {
-      // Find session by name
-      const matches = sessions.filter(s => {
-        const title = s.title || s.slug || s.id;
-        return title.toLowerCase() === sessionName.toLowerCase();
-      });
-      if (matches.length === 0) {
-        // Try partial match
-        const partial = sessions.filter(s => {
-          const title = s.title || s.slug || s.id;
-          return title.toLowerCase().includes(sessionName.toLowerCase());
-        });
-        if (partial.length === 1) {
-          sessionId = partial[0].id;
-        } else if (partial.length > 1) {
-          throw new Error(`Error: multiple sessions match "${sessionName}"`);
-        } else if (newSession) {
-          // Create new session
-          try {
-            const session = await createSession(serverBase, sessionName);
-            sessionId = session.id;
-            await selectSession(serverBase, sessionId);
-          } catch (err) {
-            throw new Error(`Error creating session: ${err.message}`);
-          }
-        } else {
-          throw new Error(`Error: no session found matching "${sessionName}"`);
-        }
-      } else {
-        sessionId = matches[0].id;
-      }
-    } else if (sessions && sessions.length > 0) {
-      const sorted = sessions
-        .filter(s => s.time && (s.time.updated || s.time.created))
-        .sort((a, b) => {
-          const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
-          const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
-          return bTime - aTime;
-        });
-      if (sorted.length > 0) sessionId = sorted[0].id;
-    }
-
-    if (!sessionId) {
-      try {
-        const session = await createSession(serverBase, 'agentp');
-        sessionId = session.id;
-      } catch (err) {
-        throw new Error(`Error creating session: ${err.message}`);
-      }
-    }
+    const sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession);
 
     let answer;
     try {
@@ -702,5 +843,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, formatTicket, waitForDeferredResult };
-
+module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult };

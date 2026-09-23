@@ -168,6 +168,10 @@ function setupOpencodeMocks() {
     mockCfg._sendToSessionCalled = { server, sessionId, text };
     return mockCfg.answer || 'test answer';
   });
+  nodeMock.method(opencode, 'sendToSessionAsync', async (server, sessionId, text) => {
+    mockCfg._sendToSessionAsyncCalled = { server, sessionId, text };
+    if (mockCfg._sendToSessionAsyncHook) await mockCfg._sendToSessionAsyncHook(server, sessionId, text);
+  });
   nodeMock.method(opencode, 'getSession', async (server, sessionId) => {
     mockCfg._getSessionCalled = { server, sessionId };
     return mockCfg.session || null;
@@ -516,6 +520,8 @@ describe('agentp CLI', () => {
       assert.strictEqual(typeof t.path, 'string');
       assert.ok(!('elapsed' in t));
       assert.ok(!('defer' in t));
+      assert.strictEqual(t.server, 'http://localhost:4096');
+      assert.strictEqual(t.sessionId, 'new-session-id');
       assert.ok(mockCfg._spawn.args.includes('--defer-child'));
       cleanupSpawnFiles();
     });
@@ -527,6 +533,8 @@ describe('agentp CLI', () => {
       await assert.rejects(main(), /EXIT:0/);
       const t = parseTicketOutput();
       assert.strictEqual(t.defer, 1);
+      assert.strictEqual(t.server, 'http://localhost:4096');
+      assert.strictEqual(t.sessionId, 'new-session-id');
       assert.ok(!('elapsed' in t));
       cleanupSpawnFiles();
     });
@@ -580,6 +588,123 @@ describe('agentp CLI', () => {
       try { fs.unlinkSync(tmp); } catch {}
     });
 
+    it('queues follow-up text from a not-ready ticket to the original session', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}\nPlease also consider edge cases.\n`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._sendToSessionAsyncCalled, {
+        server: 'http://localhost:9999',
+        sessionId: 's42',
+        text: 'Please also consider edge cases.',
+      });
+      const t = parseTicketOutput();
+      assert.strictEqual(t.server, 'http://localhost:9999');
+      assert.strictEqual(t.sessionId, 's42');
+      assert.ok(t.elapsed >= 0);
+      assert.ok(!stdout.join('').includes('Please also consider edge cases.'));
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(tmp + '.followups', 'utf8')), ['Please also consider edge cases.']);
+      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(tmp + '.followups'); } catch {}
+    });
+
+    it('stores but does not print queued follow-up text after a not-ready ticket in QA mode', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_qa_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv(['--defer', '--qa']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}\nPlease also consider edge cases.\n`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._sendToSessionAsyncCalled, {
+        server: 'http://localhost:9999',
+        sessionId: 's42',
+        text: 'Please also consider edge cases.',
+      });
+      const out = stdout.join('');
+      assert.ok(!out.includes('Please also consider edge cases.'));
+      const t = parseTicketOutput();
+      assert.strictEqual(t.server, 'http://localhost:9999');
+      assert.strictEqual(t.sessionId, 's42');
+      assert.ok(t.elapsed >= 0);
+      assert.deepStrictEqual(JSON.parse(fs.readFileSync(tmp + '.followups', 'utf8')), ['Please also consider edge cases.']);
+      try { fs.unlinkSync(tmp); } catch {}
+      try { fs.unlinkSync(tmp + '.followups'); } catch {}
+    });
+
+    it('does not queue follow-up text when the ticket answer is ready and preserves it after the answer', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_ready_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'done');
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}\nToo late.\n`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._sendToSessionAsyncCalled, undefined);
+      assert.strictEqual(stdout.join(''), 'done\nToo late.');
+      assert.ok(!fs.existsSync(tmp));
+    });
+
+    it('preserves ready-ticket follow-up text after QA output final ruler', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_ready_qa_${Date.now()}.tmp`);
+      const qaOutput = '👤: —————————————————\nQuestion\n🤖: —————————————————\nAnswer\n    —————————————————\n';
+      fs.writeFileSync(tmp, qaOutput);
+      setArgv(['--defer', '--qa']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}\nNext prompt draft.\n`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._sendToSessionAsyncCalled, undefined);
+      assert.strictEqual(stdout.join(''), qaOutput + 'Next prompt draft.');
+      assert.ok(!fs.existsSync(tmp));
+    });
+
+    it('injects stored follow-up text into final QA output prompt block', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_final_qa_${Date.now()}.tmp`);
+      const qaOutput = '👤: —————————————————\nQuestion\n🤖: —————————————————\nAnswer\n    —————————————————\n';
+      fs.writeFileSync(tmp, qaOutput);
+      fs.writeFileSync(tmp + '.followups', JSON.stringify(['First extra.', 'Second extra.']));
+      setArgv(['--defer', '--qa']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(stdout.join(''), '👤: —————————————————\nQuestion\n📝 —————————————————\nFirst extra.\n📝 —————————————————\nSecond extra.\n🤖: —————————————————\nAnswer\n    —————————————————\n');
+      assert.ok(!fs.existsSync(tmp));
+      assert.ok(!fs.existsSync(tmp + '.followups'));
+    });
+
+    it('does not print stored follow-up text in final non-QA output', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_final_plain_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'plain answer');
+      fs.writeFileSync(tmp + '.followups', JSON.stringify(['Hidden extra.']));
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(stdout.join(''), 'plain answer');
+      assert.ok(!fs.existsSync(tmp));
+      assert.ok(!fs.existsSync(tmp + '.followups'));
+    });
+
+    it('queues follow-up text before applying the ticket defer wait', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_followup_wait_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      mockCfg._sendToSessionAsyncHook = async () => {
+        fs.writeFileSync(tmp, 'done after follow-up');
+      };
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42","defer":5}\nHurry up.\n`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._sendToSessionAsyncCalled, {
+        server: 'http://localhost:9999',
+        sessionId: 's42',
+        text: 'Hurry up.',
+      });
+      assert.strictEqual(stdout.join(''), 'done after follow-up');
+      assert.ok(!fs.existsSync(tmp));
+      assert.ok(!fs.existsSync(tmp + '.followups'));
+    });
+
     it('ignores the --defer argument for tickets and uses the ticket defer property', async () => {
       const tmp = path.join(os.tmpdir(), `agentp_test_override_${Date.now()}.tmp`);
       fs.writeFileSync(tmp, '');
@@ -610,13 +735,15 @@ describe('agentp CLI', () => {
         ctime: '2026-08-03T14:30:00.000Z',
         path: '/tmp/x.tmp',
         defer: 5,
+        server: null,
+        sessionId: null,
       });
     });
 
     it('trims surrounding whitespace and newlines', () => {
       const { parseDeferredTicket } = require('../bin/agentp');
       const t = parseDeferredTicket('\n  agentp_ticket {"path":"/tmp/x.tmp"}  \n');
-      assert.deepStrictEqual(t, { ctime: null, path: '/tmp/x.tmp', defer: 0 });
+      assert.deepStrictEqual(t, { ctime: null, path: '/tmp/x.tmp', defer: 0, server: null, sessionId: null });
     });
 
     it('defaults defer to 0 when absent', () => {
@@ -670,7 +797,28 @@ describe('agentp CLI', () => {
         ctime: '2026-08-03T14:30:00.000Z',
         path: '/tmp/x.tmp',
         defer: 5,
+        server: null,
+        sessionId: null,
       });
+    });
+
+    it('parses a ticket with trailing follow-up text', () => {
+      const { parseDeferredTicketInput } = require('../bin/agentp');
+      const parsed = parseDeferredTicketInput('agentp_ticket {"path":"/tmp/x.tmp","server":"http://localhost:4096","sessionId":"s1"}\nAdd this detail.\n');
+      assert.deepStrictEqual(parsed, {
+        ctime: null,
+        path: '/tmp/x.tmp',
+        defer: 0,
+        server: 'http://localhost:4096',
+        sessionId: 's1',
+        followupText: 'Add this detail.',
+      });
+    });
+
+    it('strips the displayed follow-up separator when parsing ticket input', () => {
+      const { parseDeferredTicketInput } = require('../bin/agentp');
+      const parsed = parseDeferredTicketInput('agentp_ticket {"path":"/tmp/x.tmp","server":"http://localhost:4096","sessionId":"s1"}\n📝 —————————————————\nAdd this detail.\n');
+      assert.strictEqual(parsed.followupText, 'Add this detail.');
     });
 
     it('waitForDeferredResult returns null after timeout', async () => {

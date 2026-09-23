@@ -163,7 +163,9 @@ Submit a prompt and get a ticket to retrieve the result later:
 DEFERRED=$(printf "Refactor the authentication module" | agentp --defer)
 # Output: agentp_ticket {
 #            "ctime": "2026-08-03T14:30:00.000Z",
-#            "path": "/tmp/agentp_deferred_20260803_1430_a1b2.tmp"
+#            "path": "/tmp/agentp_deferred_20260803_1430_a1b2.tmp",
+#            "server": "http://localhost:4096",
+#            "sessionId": "ses_abc123"
 #          }
 
 # Or wait up to 60s for the answer; only get a ticket if it's not ready in time
@@ -183,6 +185,8 @@ The ticket is `agentp_ticket` followed by a JSON object with these fields:
 
 - `ctime` — creation timestamp (ISO 8601). Only used to compute `elapsed`.
 - `path` — path to the temp file holding the result.
+- `server` — OpenCode server URL used by the deferred job.
+- `sessionId` — OpenCode session ID used by the deferred job.
 - `elapsed` — seconds since `ctime`, included only when the ticket is re-printed (not on first print).
 - `defer` — the timeout requested at submission, included only when it was > 0.
 
@@ -195,6 +199,33 @@ printf "Refactor the auth module" | agentp --defer --onlineTicket
 ```
 
 Both formats are accepted when piping a ticket back to `agentp --defer`.
+
+You can also append follow-up text after a not-yet-ready ticket to queue more
+input into the original running task, similar to typing into the OpenCode TUI
+while the agent is busy:
+
+```bash
+cat <<'EOF' | agentp --defer
+agentp_ticket {
+  "ctime": "2026-08-03T14:30:00.000Z",
+  "path": "/tmp/agentp_deferred_...tmp",
+  "server": "http://localhost:4096",
+  "sessionId": "ses_abc123"
+}
+Also make sure the migration is reversible.
+EOF
+```
+
+If the answer is already ready, the appended text is not sent to OpenCode; it is
+printed after the returned answer so you can edit and re-submit it if needed. In
+`--qa` output, it appears after the final ruler. If the answer is not ready, the
+appended text is sent through OpenCode's async prompt endpoint for the ticket's
+`server`/`sessionId`, stored with the ticket, and the ticket is re-printed with
+updated `elapsed` without echoing the extra text in that interim output. When
+the final answer is later retrieved with `--qa`, all stored follow-ups are
+printed inside the prompt block under `📝` separators. Without `--qa`, stored
+follow-ups are not printed. Older tickets without `server` and `sessionId` can
+still retrieve results, but cannot queue follow-up text.
 
 Piping a ticket back to `agentp --defer` ignores the `--defer` argument and uses
 the ticket's own `defer` value as the timeout (default `0`):
@@ -210,7 +241,7 @@ Works as a Vim/Neovim filter with deferred execution:
 
 " Later, retrieve the result
 :r !printf '%s\n' "$(cat <<'EOF'
-agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/agentp_deferred_...tmp"}
+agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/agentp_deferred_...tmp","server":"http://localhost:4096","sessionId":"ses_abc123"}
 EOF
 )" | agentp --defer
 ```

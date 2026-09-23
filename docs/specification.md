@@ -42,11 +42,12 @@ Reads stdin, sends to the most recent or named OpenCode session, streams answer 
 
 **Deferred tickets (`--defer`):**
 
-Ticket format on stdout: `agentp_ticket` followed by a JSON object `{ ctime, path, elapsed, defer }`, printed as pretty-printed (multi-line) JSON by default or on a single line with `--onlineTicket`. Both formats are accepted when piping a ticket back.
+Ticket format on stdout: `agentp_ticket` followed by a JSON object `{ ctime, path, server, sessionId, elapsed, defer }`, printed as pretty-printed (multi-line) JSON by default or on a single line with `--onlineTicket`. Both formats are accepted when piping a ticket back.
 
 - First print omits `elapsed`; `defer` is included only when it was `> 0`.
 - Re-prints (answer not ready yet) include `elapsed` computed from `ctime` (0 when `ctime` is missing/unparseable).
 - A ticket piped back to `agentp --defer` ignores the CLI `--defer` value and uses the ticket's own `defer` (default 0): ready → print answer + delete temp file; not ready → re-print the ticket with updated `elapsed`; file missing → error, exit 1.
+- If a ticket is followed by additional text and the answer is not ready, `agentp --defer` sends that text to the ticket's `server`/`sessionId` with `sendToSessionAsync()` (`POST /session/:id/prompt_async`), stores it in a ticket sidecar file, and re-prints the ticket without echoing the extra text. When the final answer is retrieved with `--qa`, stored follow-ups are injected into the prompt block under `📝` separators; without `--qa`, they are omitted from output. If the answer is ready, appended text is not sent and is printed after the returned answer. Older tickets without `server`/`sessionId` can retrieve results but cannot queue follow-up text.
 - New run with `--defer N` (N > 0): wait up to N seconds polling the temp file; answer arrives in time → print + delete; else print the ticket and keep the background child alive.
 
 **Protocol:**

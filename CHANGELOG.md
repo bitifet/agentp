@@ -6,13 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
-- **`agentp --defer` refinement** — new `agentp_ticket` format, optional timeout, and pretty printing
+- **`agentp --defer` refinement** — new `agentp_ticket` format, optional timeout, pretty printing, and follow-up prompt support
   - `--defer [N]` now accepts an optional numeric timeout in seconds (default `0`): wait up to N seconds for the answer and print it if it arrives in time; otherwise return a ticket immediately
-  - New ticket format: `agentp_ticket` + JSON `{ctime, path, elapsed, defer}` (replaces the old `<agentp-deferred>path</agentp-deferred>` marker)
+  - New ticket format: `agentp_ticket` + JSON `{ctime, path, server, sessionId, elapsed, defer}` (replaces the old `<agentp-deferred>path</agentp-deferred>` marker)
   - Tickets are printed as pretty-printed (multi-line) JSON for easier reading/editing; `--onlineTicket` prints the same ticket on a single line (both formats are accepted when piping a ticket back)
   - `ctime` tracks creation time; `elapsed` is only printed on re-submission (0 when `ctime` is missing/unparseable)
   - `defer` is printed only when the submission timeout was > 0
   - Re-submitting a ticket ignores the CLI `--defer` value and uses the ticket's own `defer`; a ready answer is returned and the temp file removed; otherwise the ticket is re-printed with updated `elapsed`
+  - A ticket followed by additional text queues that text into the original running session via OpenCode's async prompt endpoint when the deferred answer is not ready yet
+  - Queued deferred follow-ups are stored with the ticket and injected into the final `--qa` prompt block under `📝` separators when the answer is retrieved; interim ticket output does not echo them
+  - If the answer is already ready, appended text is not sent to OpenCode and is printed after the returned answer so it can be edited/re-submitted
 
 ### New Features
 
@@ -31,7 +34,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- README: `--defer [N]` usage and `agentp_ticket` format, `$(ocmux)` URL hint, `ocmux switch`, and `--defer --tg` as the supported pattern for Telegram notifications from deferred jobs
+- README: `--defer [N]` usage, `agentp_ticket` format, deferred follow-ups, `$(ocmux)` URL hint, `ocmux switch`, and `--defer --tg` as the supported pattern for Telegram notifications from deferred jobs
 - `docs/specification.md`: `--defer [N]` behavior, ticket format, `ocmux switch` behavior
 - Updated `--help` text in `bin/agentp` and `bin/ocmux`
 
