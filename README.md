@@ -295,6 +295,7 @@ Notes:
 
 - If `<directory>` is not a valid path, `ocmux` tries to match it against the basenames of existing sessions (exact unique match).
 - When using `--git`/`--GIT`, `ocmux` refuses to create a new server above an existing `.ocmux.json` found while searching for the git root.
+- In default mode, if no server is found, the primary error line is printed to stdout. This intentionally makes `agentp $(ocmux)` fail instead of silently falling back to `agentp`'s default `localhost:4096` server.
 
 ### Requirements
 

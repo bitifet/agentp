@@ -735,7 +735,7 @@ function main() {
     // Default mode — find an existing server and switch to it
     let sf = findParentStatefile(targetDir);
     if (!sf) {
-      console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
+      console.log(`Error: no opencode server found in ${targetDir} or any of its parents.`);
       console.error("Run 'ocmux serve' to create a new server.");
       process.exit(1);
     }

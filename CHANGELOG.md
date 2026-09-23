@@ -25,6 +25,7 @@ All notable changes to this project will be documented in this file.
   - The row matching the tmux-active window is highlighted across the full line width; it is re-queried from tmux on every redraw, so the highlight tracks both menu activations and external window switches
   - Prints the URL of the last selected server on exit
   - Errors (exit 1) when no TTY or no servers
+- **`ocmux` command-substitution safety** — default no-server lookup now prints the primary error line to stdout, so `agentp $(ocmux)` fails safely instead of falling back to `agentp`'s default server when no project server exists
 
 ### Bug Fixes
 
@@ -34,7 +35,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
-- README: `--defer [N]` usage, `agentp_ticket` format, deferred follow-ups, `$(ocmux)` URL hint, `ocmux switch`, and `--defer --tg` as the supported pattern for Telegram notifications from deferred jobs
+- README: `--defer [N]` usage, `agentp_ticket` format, deferred follow-ups, `$(ocmux)` URL hint, command-substitution safety, `ocmux switch`, and `--defer --tg` as the supported pattern for Telegram notifications from deferred jobs
 - `docs/specification.md`: `--defer [N]` behavior, ticket format, `ocmux switch` behavior
 - Updated `--help` text in `bin/agentp` and `bin/ocmux`
 

@@ -81,6 +81,8 @@ Manages per-project OpenCode servers in a persistent `Opencode` tmux session.
 
 **`switch` behavior:** Renders an interactive menu of all running servers on an alt screen with columns `dirname | status | url | full path`. `j`/`k` or arrow keys move the cursor; `Enter`/`Space` activates the selected server (switches its tmux window) and keeps the menu open; `q`/`Ctrl+C` exits and prints the URL of the last selected server (if any). The row matching the tmux-active window (queried live from tmux via `activeWindowIndex()` on every redraw) is highlighted across the full line width, so the highlight tracks both local activations and external tmux window switches. Errors (exit 1) when no TTY or no servers. Rejects `--git`, `--GIT`, `--print-logs`, and directory arguments.
 
+**Default no-server behavior:** When no `.ocmux.json` is found for the current/target directory or any parent, default mode prints the primary `Error: no opencode server found...` line to stdout and the `Run 'ocmux serve'...` hint to stderr. This makes command substitution (`agentp $(ocmux)`) fail safely instead of passing no argument and falling back to `agentp`'s default server.
+
 **Flags:** `--git`, `--GIT`, `--print-logs`, `-l`, `--version`
 
 **Window layout:**

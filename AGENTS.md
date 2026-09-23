@@ -3,9 +3,9 @@
 ## File layout
 
 ```
-bin/agentp          — stdin → opencode session (350 lines)
-bin/ocmux           — tmux server manager (582 lines)
-bin/tgagentp        — Telegram bot ↔ opencode TUI (~2500 lines)
+bin/agentp          — stdin → opencode session (846 lines)
+bin/ocmux           — tmux server manager (764 lines)
+bin/tgagentp        — Telegram bot ↔ opencode TUI (3050 lines)
 lib/opencode.js     — HTTP session API client (shared by agentp + tgagentp)
 lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
 lib/tui-cmd.js      — tmux send-keys for TUI command passthrough (used by tgagentp)
@@ -26,7 +26,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 208 tests (44 + 64 + 41 + 8 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 218 tests (53 + 64 + 42 + 8 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops

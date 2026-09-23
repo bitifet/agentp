@@ -553,7 +553,7 @@ describe('resurrectServer', { concurrency: false }, () => {
 
 describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
   let origExit, origArgv, origIsTTY, origStderrWrite, origStdoutWrite;
-  let stderrOutput, exitThrown;
+  let stderrOutput, stdoutOutput, exitThrown;
 
   function setupProcessMocks() {
     origExit = process.exit;
@@ -562,6 +562,7 @@ describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
     origStderrWrite = process.stderr.write;
     origStdoutWrite = process.stdout.write;
     stderrOutput = [];
+    stdoutOutput = [];
     exitThrown = null;
 
     process.exit = (code) => { exitThrown = code; throw new Error('EXIT:' + code); };
@@ -569,7 +570,10 @@ describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
       stderrOutput.push(typeof chunk === 'string' ? chunk : chunk.toString());
       return true;
     };
-    process.stdout.write = () => true;
+    process.stdout.write = (chunk) => {
+      stdoutOutput.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return true;
+    };
     process.stdin.isTTY = true;
   }
 
@@ -647,5 +651,13 @@ describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
     requireMain();
     assert.strictEqual(exitThrown, 1);
     assert.ok(stderrOutput.some(s => s.includes('does not accept a directory path')));
+  });
+
+  it('prints default no-server error line to stdout', () => {
+    process.argv = ['node', 'ocmux'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stdoutOutput.some(s => s.includes('Error: no opencode server found')));
+    assert.ok(stderrOutput.some(s => s.includes("Run 'ocmux serve'")));
   });
 });
