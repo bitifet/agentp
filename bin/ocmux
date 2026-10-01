@@ -25,6 +25,7 @@ const {
   startServer,
   getActiveServer,
   activateServer,
+  tuiAttachCommand,
 } = require('../lib/ocmux');
 
 // ---------------------------------------------------------------------------
@@ -238,13 +239,13 @@ function cmdSwitch(statefile, longMode) {
       const panesR = tmux(['list-panes', '-t', `${SESSION}:${winIdx}`, '-F', '#{pane_id}']);
       const panes = panesR.stdout.trim().split('\n').filter(Boolean);
       const lastPane = panes[panes.length - 1];
-      const respawnR = tmux(['respawn-pane', '-k', '-t', lastPane, `opencode attach --continue '${url}'`]);
+      const respawnR = tmux(['respawn-pane', '-k', '-t', lastPane, tuiAttachCommand(url)]);
       if (respawnR.status !== 0) {
-        tmux(['send-keys', '-t', lastPane, `opencode attach --continue '${url}'`, 'Enter']);
+        tmux(['send-keys', '-t', lastPane, tuiAttachCommand(url), 'Enter']);
       }
     } else {
       tmux(['split-window', '-v', '-t', `${SESSION}:${winIdx}`, '-c', serverDir,
-        `opencode attach --continue '${url}'`]);
+        tuiAttachCommand(url)]);
     }
   }
 
@@ -478,7 +479,7 @@ function doNew(targetDir, longMode, printLogs) {
   const tuiPane = splitResult.stdout.trim();
   sleep(0.2);
   tmux(['send-keys', '-t', tuiPane,
-    `opencode attach --continue '${url}'`, 'Enter']);
+    tuiAttachCommand(url), 'Enter']);
   sleep(0.5);
   if (tuiPane) tmux(['resize-pane', '-Z', '-t', tuiPane]);
 

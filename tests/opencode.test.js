@@ -6,6 +6,10 @@ const http = require('http');
 
 const opencode = require('../lib/opencode');
 
+// Existing suites exercise the legacy (pre-v2) protocol. Pin it so they run
+// without the v2-detection probe request changing their request counts.
+opencode._setApiVersion('legacy');
+
 // ── SSE event helper ───────────────────────────────────────────────
 function sse(json) {
   return `data: ${JSON.stringify(json)}\n\n`;
@@ -904,5 +908,429 @@ describe('question.asked SSE event', { concurrency: false }, () => {
     const answer = 'Option A';
     await opencode.respondToQuestion(url, 'ses_test', 'q_test_123', answer);
     assert.ok(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// OpenCode v2 protocol
+// ═══════════════════════════════════════════════════════════════════════
+
+// ── detectV2 probing (auto-detect, no override) ───────────────────────
+describe('detectV2', { concurrency: false }, () => {
+  let ctrl;
+
+  before(() => { opencode._resetApiCache(); opencode._setApiVersion(null); });
+  after(() => { opencode._setApiVersion('legacy'); opencode._resetApiCache(); });
+
+  it('detects a v2 server from /api/info', async () => {
+    ctrl = setupMock({ status: 200, body: JSON.stringify({ version: '2.0.21', pid: 1 }) });
+    assert.strictEqual(await opencode.detectV2('http://localhost:7001'), true);
+    tearDownMock();
+  });
+
+  it('detects a legacy server when /api/info returns HTML', async () => {
+    ctrl = setupMock({ status: 200, body: '<!doctype html><html></html>' });
+    assert.strictEqual(await opencode.detectV2('http://localhost:7002'), false);
+    tearDownMock();
+  });
+
+  it('treats an auth failure on /api/info as v2', async () => {
+    ctrl = setupMock({ status: 401, body: '' });
+    assert.strictEqual(await opencode.detectV2('http://localhost:7003'), true);
+    tearDownMock();
+  });
+
+  it('treats a network error as legacy', async () => {
+    ctrl = setupMock({ netError: new Error('ECONNREFUSED') });
+    assert.strictEqual(await opencode.detectV2('http://localhost:7004'), false);
+    tearDownMock();
+  });
+});
+
+// ── parseBody v2 unwrap ───────────────────────────────────────────────
+describe('parseBody (v2 envelope)', { concurrency: false }, () => {
+  it('returns .data for v2', () => {
+    const r = opencode.parseBody('{"data":[{"id":"s1"}]}', true);
+    assert.deepStrictEqual(r, [{ id: 's1' }]);
+  });
+
+  it('returns parsed body as-is for legacy', () => {
+    const r = opencode.parseBody('{"foo":1}', false);
+    assert.deepStrictEqual(r, { foo: 1 });
+  });
+});
+
+// ── v2 CRUD helpers ───────────────────────────────────────────────────
+describe('v2 listSessions', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '[]' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('hits /api/session and unwraps {data}', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: [{ id: 's1' }] }) });
+    const r = await opencode.listSessions('http://localhost:4096');
+    assert.ok(Array.isArray(r));
+    assert.strictEqual(r[0].id, 's1');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session');
+  });
+});
+
+describe('v2 createSession', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('POSTs /api/session and unwraps the created session', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { id: 's_new', title: 'T' } }) });
+    const r = await opencode.createSession('http://localhost:4096', 'T');
+    assert.strictEqual(r.id, 's_new');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session');
+    assert.strictEqual(ctrl.lastReq().opts.method, 'POST');
+  });
+});
+
+describe('v2 updateSession', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '{}' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('PATCHes title to /api/session/:id', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { id: 's1', title: 'Renamed' } }) });
+    const r = await opencode.updateSession('http://localhost:4096', 's1', 'Renamed');
+    assert.strictEqual(r.title, 'Renamed');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session/s1');
+    assert.strictEqual(ctrl.lastReq().opts.method, 'PATCH');
+  });
+
+  it('sets agent via the dedicated agent endpoint, then fetches the session', async () => {
+    let idx = 0;
+    const paths = [];
+    ctrl.reset({
+      status: 200, body: '',
+      factory: (i, opts) => {
+        idx = i;
+        paths.push(opts.path);
+        if (i === 1) return { status: 204, body: '' }; // POST /agent
+        return { status: 200, body: JSON.stringify({ data: { id: 's1', agent: 'a1' } }) }; // GET session
+      },
+    });
+    const r = await opencode.updateSession('http://localhost:4096', 's1', null, 'a1');
+    assert.strictEqual(r.agent, 'a1');
+    assert.deepStrictEqual(paths, ['/api/session/s1/agent', '/api/session/s1']);
+  });
+});
+
+describe('v2 sendToSessionAsync', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '{}' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('enqueues via prompt with queue delivery', async () => {
+    ctrl.reset({ status: 200, body: '{}' });
+    await opencode.sendToSessionAsync('http://localhost:4096', 's1', 'note');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session/s1/prompt');
+    const written = JSON.parse(ctrl.lastReq().req._written.join(''));
+    assert.strictEqual(written.delivery, 'queue');
+    assert.strictEqual(written.text, 'note');
+  });
+});
+
+describe('v2 respondToPermission', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('replies with a v2 decision to /permission/:id/reply', async () => {
+    ctrl.reset({ status: 200, body: '' });
+    await opencode.respondToPermission('http://localhost:4096', 's1', 'p1', 'once');
+    const req = ctrl.lastReq();
+    assert.match(req.opts.path, /\/api\/session\/s1\/permission\/p1\/reply/);
+    const body = JSON.parse(req.req._written.join(''));
+    assert.deepStrictEqual(body, { decision: 'once' });
+  });
+
+  it('maps allow+remember to always', async () => {
+    ctrl.reset({ status: 200, body: '' });
+    await opencode.respondToPermission('http://localhost:4096', 's1', 'p1', 'allow', true);
+    const body = JSON.parse(ctrl.lastReq().req._written.join(''));
+    assert.deepStrictEqual(body, { decision: 'always' });
+  });
+});
+
+describe('v2 selectSession', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('is a no-op (no requests)', async () => {
+    await opencode.selectSession('http://localhost:4096', 's1');
+    assert.strictEqual(ctrl.callIdx(), 0);
+  });
+});
+
+describe('v2 listAgents / listProviders', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('listAgents unwraps {data}', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: [{ name: 'a1' }] }) });
+    const r = await opencode.listAgents('http://localhost:4096');
+    assert.strictEqual(r[0].name, 'a1');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/agent');
+  });
+
+  it('listProviders unwraps {data}', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: [{ id: 'openai' }] }) });
+    const r = await opencode.listProviders('http://localhost:4096');
+    assert.strictEqual(r[0].id, 'openai');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/provider');
+  });
+});
+
+describe('v2 getSession', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('fetches /api/session/:id and unwraps', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { id: 's1' } }) });
+    const r = await opencode.getSession('http://localhost:4096', 's1');
+    assert.strictEqual(r.id, 's1');
+    assert.strictEqual(ctrl.callIdx(), 1);
+  });
+});
+
+describe('v2 isServerAlive', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '[]' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('hits /api/session', async () => {
+    ctrl.reset({ status: 200, body: '[]' });
+    const r = await opencode.isServerAlive('http://localhost:4096');
+    assert.strictEqual(r, true);
+    assert.strictEqual(ctrl.callIdx(), 1);
+  });
+});
+
+// ── v2 SSE listeners ──────────────────────────────────────────────────
+describe('v2 listenForFinalAnswer', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ sseChunks: [] }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('collects text across deltas and ends on execution.succeeded', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.delta', data: { delta: 'foo' } }),
+        sse({ id: 'b', type: 'session.text.delta', data: { delta: 'bar' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: {} }),
+      ],
+    });
+    const r = await opencode.listenForFinalAnswer('http://localhost:4096');
+    assert.strictEqual(r, 'foobar');
+  });
+
+  it('calls onText for each delta', async () => {
+    const parts = [];
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.delta', data: { delta: 'x' } }),
+        sse({ id: 'b', type: 'session.text.delta', data: { delta: 'y' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: {} }),
+      ],
+    });
+    await opencode.listenForFinalAnswer('http://localhost:4096', (t) => parts.push(t));
+    assert.deepStrictEqual(parts, ['x', 'y']);
+  });
+
+  it('rejects on 401', async () => {
+    ctrl.reset({ status: 401 });
+    await assert.rejects(
+      () => opencode.listenForFinalAnswer('http://localhost:4096'),
+      /authentication failed/,
+    );
+  });
+
+  it('uses text payload when only session.text.ended arrives', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.ended', data: { text: 'PONG' } }),
+        sse({ id: 'b', type: 'session.execution.succeeded', data: {} }),
+      ],
+    });
+    const r = await opencode.listenForFinalAnswer('http://localhost:4096');
+    assert.strictEqual(r, 'PONG');
+  });
+});
+
+describe('v2 listenForSessionEvents', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ sseChunks: [] }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('collects text, filters other sessions, resolves on completion', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.delta', data: { sessionID: 'other', delta: 'wrong' } }),
+        sse({ id: 'b', type: 'session.text.delta', data: { sessionID: 's1', delta: 'right' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: { sessionID: 's1' } }),
+      ],
+    });
+    const r = await opencode.listenForSessionEvents('http://localhost:4096', 's1', {});
+    assert.strictEqual(r, 'right');
+  });
+
+  it('routes reasoning deltas to onThinking and text to onText', async () => {
+    const texts = [];
+    const think = [];
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.reasoning.delta', data: { sessionID: 's1', delta: 'hmm' } }),
+        sse({ id: 'b', type: 'session.text.delta', data: { sessionID: 's1', delta: 'A' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: { sessionID: 's1' } }),
+      ],
+    });
+    await opencode.listenForSessionEvents('http://localhost:4096', 's1', {
+      onText: (t) => texts.push(t),
+      onThinking: (t) => think.push(t),
+    });
+    assert.deepStrictEqual(texts, ['A']);
+    assert.deepStrictEqual(think, ['hmm']);
+  });
+
+  it('routes permission.asked to onPermission and form.created to onQuestion', async () => {
+    const perms = [];
+    const questions = [];
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'permission.asked', data: { sessionID: 's1', id: 'per_1', action: 'read' } }),
+        sse({ id: 'b', type: 'form.created', data: { sessionID: 's1', id: 'frm_1', title: 'Pick' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: { sessionID: 's1' } }),
+      ],
+    });
+    await opencode.listenForSessionEvents('http://localhost:4096', 's1', {
+      onPermission: (p) => perms.push(p),
+      onQuestion: (q) => questions.push(q),
+    });
+    assert.strictEqual(perms.length, 1);
+    assert.strictEqual(perms[0].action, 'read');
+    assert.strictEqual(questions.length, 1);
+    assert.strictEqual(questions[0].title, 'Pick');
+  });
+
+  it('resolves on execution.failed with whatever was collected', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'part' } }),
+        sse({ id: 'b', type: 'session.execution.failed', data: { sessionID: 's1', error: {} } }),
+      ],
+    });
+    const r = await opencode.listenForSessionEvents('http://localhost:4096', 's1', {});
+    assert.strictEqual(r, 'part');
+  });
+
+  it('supports cancelRef', async () => {
+    const cancelRef = { current: null };
+    ctrl.reset({
+      asyncSSE: true,
+      sseChunks: [sse({ id: 'a', type: 'session.execution.succeeded', data: { sessionID: 's1' } })],
+    });
+    const p = opencode.listenForSessionEvents('http://localhost:4096', 's1', {}, cancelRef);
+    assert.ok(cancelRef.current);
+    await p;
+    assert.strictEqual(cancelRef.current, null);
+  });
+});
+
+// ── v2 sendToSession end-to-end (real server: SSE first, then prompt) ─
+function startV2PromptServer() {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/event') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders(); // send headers now so the client attaches before events flow
+        const state = { promptReceived: false };
+        state.tryStart = () => {
+          if (state.promptReceived) {
+            res.write(`data: ${JSON.stringify({ id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'PONG' } })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id: 'b', type: 'session.execution.succeeded', data: { sessionID: 's1' } })}\n\n`);
+            res.end();
+          }
+        };
+        server._sseState = state;
+        res.on('close', () => { server._sseState = null; });
+        // hold open until the prompt arrives
+      } else if (req.url === '/api/session/s1/prompt') {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: { id: 'msg_1', type: 'user' } }));
+          if (server._sseState) {
+            server._sseState.promptReceived = true;
+            server._sseState.tryStart();
+          }
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    server.listen(0, '127.0.0.1', () => resolve(server));
+  });
+}
+
+describe('v2 sendToSession', { concurrency: false }, () => {
+  let mockServer;
+  before(async () => {
+    opencode._setApiVersion('v2');
+    mockServer = await startV2PromptServer();
+  });
+  after(() => {
+    mockServer.close();
+    opencode._setApiVersion('legacy');
+  });
+
+  it('sends a prompt and returns the streamed answer', async () => {
+    const addr = mockServer.address();
+    const url = `http://${addr.address}:${addr.port}`;
+    const r = await opencode.sendToSession(url, 's1', 'ping');
+    assert.strictEqual(r, 'PONG');
+  });
+
+  it('returns partial text when execution fails', async () => {
+    const server2 = http.createServer((req, res) => {
+      if (req.url === '/api/event') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders();
+        const state = { promptReceived: true };
+        state.tryStart = () => {
+          if (state.promptReceived) {
+            res.write(`data: ${JSON.stringify({ id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'partial' } })}\n\n`);
+            res.write(`data: ${JSON.stringify({ id: 'b', type: 'session.execution.failed', data: { sessionID: 's1', error: { type: 'provider.auth' } } })}\n\n`);
+            res.end();
+          }
+        };
+        state.tryStart();
+      } else if (req.url === '/api/session/s1/prompt') {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: { id: 'msg_1', type: 'user' } }));
+        });
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise((r) => server2.listen(0, '127.0.0.1', r));
+    const addr2 = server2.address();
+    const url2 = `http://${addr2.address}:${addr2.port}`;
+    const r = await opencode.sendToSession(url2, 's1', 'ping');
+    server2.close();
+    assert.strictEqual(r, 'partial');
   });
 });

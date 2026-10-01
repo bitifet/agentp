@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **agentp / tgagentp now support OpenCode v2 servers** — the v2 HTTP API broke the legacy protocol in three ways: endpoints moved under `/api`, responses are wrapped in a `{data}` envelope, and the SSE event schema changed from `{type, properties}` to `{id, type, data}` (text streams via `session.text.delta`, completion via `session.execution.succeeded|failed|interrupted`). `lib/opencode.js` now auto-detects v2 (one `GET /api/info` probe per server, cached) and speaks both protocols:
+  - v2: `listSessions`/`createSession` unwrap `{data}`; `sendToSession` attaches to the event stream first, then posts to `/session/{id}/prompt` and returns the streamed answer; `updateSession` routes agent/model through the dedicated `/agent` and `/model` endpoints; `respondToPermission` uses `/session/{id}/permission/{requestID}/reply` with the v2 `decision` enum; async delivery uses `delivery: "queue"`; `respondToQuestion` uses the form reply endpoint; TUI navigation (`selectSession`) is a no-op on v2 (no HTTP equivalent)
+  - legacy (0.x/1.x) code paths are untouched — servers running older OpenCode behave exactly as before
+  - `sendText` on v2 delivers to the active session (no `/tui/*` endpoints exist)
+  - Added `detectV2`, `apiBase`, `parseBody`, `listenV2` exports; `_setApiVersion`/`_resetApiCache` test hooks
+- Updated test count in `AGENTS.md` (now 255 tests: 53 + 8 + 50 + 93 + 12 + 22 + 17)
+
+### Bug Fixes
+
+- **`ocmux` broken with OpenCode v2** — starting a new server+TUI window failed after updating OpenCode
+  - `opencode serve` now prints `server listening on http://...` (the `opencode ` prefix is gone); the URL regex now accepts both formats
+  - OpenCode v2 removed the `attach` subcommand; the TUI is started with `opencode --server <url> --continue` on v2 while older versions keep using `opencode attach --continue <url>` (detected via `opencode --version`, with legacy fallback when undetectable)
+  - Servers started with `opencode serve` now require HTTP Basic auth; with `OPENCODE_SERVER_PASSWORD` exported, the serve/TUI panes inherit it and no extra handling is needed
+- **agentp failed to connect to OpenCode v2 servers** with `Unexpected token '<' ... is not valid JSON` because v2 serves the web UI (HTML) at the legacy API paths — resolved by the v2 protocol support above
+
 ## [1.13.0] - 2026-08-12
 
 ### Changed

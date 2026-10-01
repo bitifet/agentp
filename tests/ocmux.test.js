@@ -11,12 +11,16 @@ const ocmux = require('../lib/ocmux');
 // ── Mock infrastructure for spawnSync (tmux) ───────────────────────
 let tmuxHandler = null;       // (args, opts) => { status, stdout, stderr }
 let spawnSyncCalls = [];
+let opencodeVersion = null;   // stdout for `opencode --version`; null → no version
 
 function mockSpawnSync(cmd, args, opts) {
   spawnSyncCalls.push({ cmd, args });
   if (cmd === 'tmux' && tmuxHandler) {
     const result = tmuxHandler(args, opts);
     if (result) return result;
+  }
+  if (cmd === 'opencode' && args && args[0] === '--version') {
+    return { status: 0, stdout: opencodeVersion || '', stderr: '' };
   }
   return { status: 0, stdout: '', stderr: '' };
 }
@@ -52,6 +56,7 @@ function mockTruncateSync(p) { fsTruncates.push(p); }
 function setupMocks() {
   tmuxHandler = null;
   spawnSyncCalls = [];
+  opencodeVersion = null;
   execSyncCalled = false;
   mockFiles = {};
   fsWrites = [];
@@ -71,6 +76,7 @@ function tearDownMocks() {
   nodeMock.restoreAll();
   tmuxHandler = null;
   spawnSyncCalls = [];
+  opencodeVersion = null;
   execSyncCalled = false;
   mockFiles = {};
   fsWrites = [];
@@ -544,6 +550,113 @@ describe('resurrectServer', { concurrency: false }, () => {
     const parsed = JSON.parse(sw.data);
     assert.ok(parsed.url);
     assert.strictEqual(parsed.window_index, 9);
+  });
+
+  it('succeeds with v2 serve log format and uses --server for the TUI', () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] = JSON.stringify({ url: 'http://old:4096', window_index: 1 });
+    opencodeVersion = 'opencode v2.0.21\n';
+    let callIdx = 0;
+    const newStateFile = ocmux.statefileFor('/proj');
+    const logFile = ocmux.logfileFor('/proj');
+
+    tmuxHandler = () => {
+      callIdx++;
+      // Normal resurrection flow (same shape as the success test above)
+      if (callIdx === 1) return tmuxOk();                   // has-session
+      if (callIdx === 2) return tmuxOk('1\t/proj');          // windowNameByIndex
+      if (callIdx === 3) return tmuxOk();                    // select-window
+      if (callIdx === 4) return tmuxOk();                    // send-keys C-c
+      if (callIdx === 5) return tmuxOk();                    // kill-window
+      if (callIdx === 6) return tmuxOk();                    // windowByDir (verify kill, loop)
+      if (callIdx === 7) return tmuxOk();                    // windowByDir (verify kill, final check)
+      if (callIdx === 8) return tmuxOk();                    // ensureSession → has-session
+      if (callIdx === 9) return tmuxOk();                    // new-window
+      if (callIdx === 10) return tmuxOk('9\t/proj');         // windowByDir (fallback in startServer)
+      if (callIdx === 11) return tmuxOk();                   // pinWindowName
+      if (callIdx === 12) return tmuxOk();                   // send-keys server start
+      if (callIdx === 13) return tmuxOk('%2\n');             // split-window (returns pane id)
+      if (callIdx === 14) return tmuxOk();                   // send-keys for TUI
+      if (callIdx === 15) return tmuxOk();                   // resize-pane
+      if (callIdx === 16) return tmuxOk('9\t0\n10\t1\n');    // activeWindowIndex
+      if (callIdx === 17) return tmuxOk();                   // select-window
+      return tmuxOk();
+    };
+
+    // v2 format: no `opencode ` prefix
+    mockFiles[logFile] = 'server listening on http://localhost:4097\n';
+
+    const result = ocmux.resurrectServer('/proj');
+    assert.strictEqual(result.url, 'http://localhost:4097');
+
+    const sw = fsWrites.find(w => w.path === newStateFile);
+    assert.ok(sw, 'state file should be written');
+
+    const tuiSend = spawnSyncCalls.find(
+      c => c.args[0] === 'send-keys' && c.args.some(a => typeof a === 'string' && a.includes('--continue')),
+    );
+    assert.ok(tuiSend, 'TUI send-keys should be issued');
+    assert.ok(tuiSend.args.some(a => a === "opencode --server 'http://localhost:4097' --continue"));
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// URL_RE — both legacy and v2 serve output formats
+// ───────────────────────────────────────────────────────────────────
+describe('URL_RE', () => {
+  it('matches legacy "opencode server listening on" format', () => {
+    const m = 'opencode server listening on http://localhost:4096\n'.match(ocmux.URL_RE);
+    assert.ok(m);
+    assert.strictEqual(m[1], 'http://localhost:4096');
+  });
+
+  it('matches v2 "server listening on" format', () => {
+    const m = 'server listening on http://127.0.0.1:4096\n'.match(ocmux.URL_RE);
+    assert.ok(m);
+    assert.strictEqual(m[1], 'http://127.0.0.1:4096');
+  });
+
+  it('does not match when no URL is present', () => {
+    assert.strictEqual('some log output without URL'.match(ocmux.URL_RE), null);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// tuiAttachCommand — version-dependent TUI attach command
+// ───────────────────────────────────────────────────────────────────
+describe('tuiAttachCommand', { concurrency: false }, () => {
+  beforeEach(() => setupMocks());
+  afterEach(() => tearDownMocks());
+
+  it('uses `opencode --server` on v2', () => {
+    opencodeVersion = 'opencode v2.0.21\n';
+    assert.strictEqual(
+      ocmux.tuiAttachCommand('http://127.0.0.1:4096'),
+      "opencode --server 'http://127.0.0.1:4096' --continue",
+    );
+  });
+
+  it('uses legacy `opencode attach` on 0.x', () => {
+    opencodeVersion = '0.11.2\n';
+    assert.strictEqual(
+      ocmux.tuiAttachCommand('http://127.0.0.1:4096'),
+      "opencode attach --continue 'http://127.0.0.1:4096'",
+    );
+  });
+
+  it('uses legacy `opencode attach` on v1', () => {
+    opencodeVersion = 'v1.2.3\n';
+    assert.strictEqual(
+      ocmux.tuiAttachCommand('http://x:1'),
+      "opencode attach --continue 'http://x:1'",
+    );
+  });
+
+  it('falls back to legacy command when version cannot be detected', () => {
+    opencodeVersion = null;
+    assert.strictEqual(
+      ocmux.tuiAttachCommand('http://x:1'),
+      "opencode attach --continue 'http://x:1'",
+    );
   });
 });
 
