@@ -75,9 +75,12 @@ Manages per-project OpenCode servers in a persistent `Opencode` tmux session.
 | `new [dir]` | Alias for `serve` (deprecated) |
 | `kill [dir]` | Kill server, remove tmux window + `.ocmux.json` |
 | `resurrect [dir]` | Recover dead server: kill old window, remove state file, create fresh server + TUI |
+| `model [ref]` | Switch the model of the newest session (interactive picker without `ref`; prints the server URL on success so `agentp $(ocmux model <ref>)` composes) |
 | `switch` | Interactive session picker (TTY required) |
 | `list [-l]` | List all running servers |
 | _(no arg)_ | Switch to existing server (searches upward for `.ocmux.json`) |
+
+**`model` behavior:** Targets the newest session on the server found upward from `$PWD`. With no argument it opens an interactive model picker (all models, arrow/`j`/`k`, Enter to switch, `q`/`Ctrl+C` to quit; requires a TTY). With a reference it switches directly; references may be full (`providerID/modelID`), partial (matched uniquely against label or bare id), and carry a variant suffix (`#variant`). On success it writes the server URL to stdout (plus a confirmation to stderr), so `agentp $(ocmux model <ref>)` switches the model before the next prompt is sent. Multiple matches open the picker on a TTY, otherwise error listing the candidates. Rejects `--git`, `--GIT`, `--print-logs`, and directory arguments.
 
 **`switch` behavior:** Renders an interactive menu of all running servers on an alt screen with columns `dirname | status | url | full path`. `j`/`k` or arrow keys move the cursor; `Enter`/`Space` activates the selected server (switches its tmux window) and keeps the menu open; `q`/`Ctrl+C` exits and prints the URL of the last selected server (if any). The row matching the tmux-active window (queried live from tmux via `activeWindowIndex()` on every redraw) is highlighted across the full line width, so the highlight tracks both local activations and external tmux window switches. Errors (exit 1) when no TTY or no servers. Rejects `--git`, `--GIT`, `--print-logs`, and directory arguments.
 

@@ -27,6 +27,7 @@ const {
   activateServer,
   tuiAttachCommand,
 } = require('../lib/ocmux');
+const { listSessions, listModels, switchModel, resolveModelRef } = require('../lib/opencode');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -187,6 +188,12 @@ function printHelp() {
   console.error('  switch    Interactively select a server to switch to.');
   console.error('            j/k or arrows to move, Enter/Space selects (menu stays open),');
   console.error('            q or Ctrl+C quits. Prints the URL of the last selected server on exit.');
+  console.error('  model     Switch the model of the newest session on the current server.');
+  console.error('            With no argument: interactive model picker (requires a TTY).');
+  console.error('            With <ref>: switch directly and print the server URL on stdout,');
+  console.error('            so `agentp $(ocmux model <ref>)` switches before the next prompt.');
+  console.error('            Partial names work when unique (e.g. "ocmux model deepseek",');
+  console.error('            "opencode-go/deepseek", "...#high"). Multiple matches open the picker.');
   console.error('');
   console.error('  --         Treat the next argument as a directory even if it matches');
   console.error('            a subcommand name (e.g. "ocmux -- kill").');
@@ -366,6 +373,165 @@ function cmdSwitchMenu(longMode) {
   refreshActive();
   cursor = activeRow;
   draw();
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: model — switch the model of the server's most recent session
+// ---------------------------------------------------------------------------
+
+// Newest session id for a server (same heuristic as agentp's default).
+function newestSessionId(sessions) {
+  if (!sessions || sessions.length === 0) return null;
+  const sorted = sessions
+    .filter(s => s && s.id && s.time && (s.time.updated || s.time.created))
+    .sort((a, b) => {
+      const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
+      const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
+      return bTime - aTime;
+    });
+  return sorted.length > 0 ? sorted[0].id : (sessions[0] && sessions[0].id) || null;
+}
+
+// Interactive model picker (mirrors the ocmux switch menu; single selection).
+// Resolves with the chosen model or null on quit.
+function modelMenu(rows) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY || rows.length === 0) return resolve(null);
+
+    const maxLen = Math.max(
+      ...rows.map(r => r.label.length),
+      ...rows.map(r => (r.variants || []).join(',').length),
+      8,
+    );
+    let cursor = 0;
+    let done = false;
+
+    const cleanup = () => {
+      process.stderr.write('\x1b[?25h');
+      process.stderr.write('\x1b[?1049l');
+      try { process.stdin.setRawMode(false); } catch {}
+      process.stdin.pause();
+    };
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      process.stdin.removeAllListeners('keypress');
+      process.removeListener('SIGINT', onSig);
+      resolve(value);
+    };
+    const onSig = () => finish(null);
+    process.on('SIGINT', onSig);
+
+    const draw = () => {
+      let out = '\x1b[2J\x1b[H';
+      out += 'ocmux model — j/k or arrows: move, Enter: switch, q/Ctrl+C: quit\n\n';
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const marker = i === cursor ? '▶ ' : '  ';
+        const variants = (row.variants || []).join(',') || '—';
+        out += `${marker}${pad(row.label, maxLen)}  ${variants}\n`;
+      }
+      process.stderr.write(out);
+    };
+
+    process.stdin.on('keypress', (str, key) => {
+      if (key.ctrl && key.name === 'c') return finish(null);
+      if (key.name === 'q') return finish(null);
+      if (key.name === 'up' || str === 'k') {
+        cursor = (cursor + rows.length - 1) % rows.length;
+        draw();
+      } else if (key.name === 'down' || str === 'j') {
+        cursor = (cursor + 1) % rows.length;
+        draw();
+      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+        finish(rows[cursor]);
+      }
+    });
+
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stderr.write('\x1b[?1049h\x1b[?25l');
+    draw();
+  });
+}
+
+async function cmdModel(modelRef, longMode) {
+  const sf = findParentStatefile(process.cwd());
+  if (!sf) {
+    console.error(`Error: no opencode server found in ${process.cwd()} or any of its parents.`);
+    console.error("Run 'ocmux serve' to create a new server.");
+    process.exit(1);
+  }
+  const state = readState(sf);
+  if (!state || !state.url) {
+    console.error(`Error: invalid state file ${sf}`);
+    process.exit(1);
+  }
+
+  // Fail fast before any HTTP: interactive picker requires a TTY.
+  if (!modelRef && !process.stdin.isTTY) {
+    console.error('Error: "model" with no argument is interactive and requires a TTY.');
+    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
+    process.exit(1);
+  }
+
+  const sessions = await listSessions(state.url).catch((err) => {
+    console.error(`Error connecting to ${state.url}: ${err.message}`);
+    process.exit(1);
+  });
+  const sessionId = newestSessionId(sessions);
+  if (!sessionId) {
+    console.error(`Error: no sessions found on ${state.url} (${path.dirname(sf)}).`);
+    console.error('Open a session in the TUI first, or send a prompt with agentp.');
+    process.exit(1);
+  }
+
+  const models = await listModels(state.url).catch((err) => {
+    console.error(`Error listing models: ${err.message}`);
+    process.exit(1);
+  });
+  if (models.length === 0) {
+    console.error('Error: no models available from this server.');
+    process.exit(1);
+  }
+
+  let pick = null;
+  if (modelRef) {
+    const { model, matches, error } = resolveModelRef(models, modelRef);
+    if (model) {
+      pick = model;
+    } else if (matches.length > 1 && process.stdin.isTTY) {
+      console.error(`Multiple models match "${modelRef}", select one:`);
+      pick = await modelMenu(matches);
+    } else {
+      console.error(`Error: ${error}`);
+      process.exit(1);
+    }
+  } else if (process.stdin.isTTY) {
+    pick = await modelMenu(models);
+  } else {
+    // Unreachable (guarded above) — kept for safety.
+    console.error('Error: "model" with no argument is interactive and requires a TTY.');
+    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
+    process.exit(1);
+  }
+
+  if (!pick) {
+    console.error('Cancelled.');
+    return;
+  }
+
+  await switchModel(state.url, sessionId, pick).catch((err) => {
+    console.error(`Error switching model: ${err.message}`);
+    process.exit(1);
+  });
+  const label = pick.label + (pick.variant ? `#${pick.variant}` : '');
+  console.error(`Switched session ${sessionId} to ${label}.`);
+  // Print the URL on stdout so `agentp $(ocmux model <ref>)` composes: the
+  // switch (side effect) takes effect before agentp proceeds with the prompt.
+  outputUrl(state.url, path.dirname(sf), longMode);
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +778,7 @@ function main() {
 
   let subcommand = null;
   let targetDir = null;
+  let modelRef = null;
 
   for (const arg of positional) {
     if (dirIsForced) {
@@ -621,12 +788,15 @@ function main() {
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect' || arg === 'switch') {
+    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect' || arg === 'switch' || arg === 'model') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
       }
       subcommand = arg;
+    } else if (subcommand === 'model' && modelRef === null) {
+      // model reference (supports partial matches) — not a directory
+      modelRef = arg;
     } else {
       if (targetDir) {
         console.error(`Error: unexpected argument '${arg}'`);
@@ -696,6 +866,26 @@ function main() {
     }
     ensureSession();
     cmdSwitchMenu(longMode);
+  } else if (subcommand === 'model') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (printLogs) {
+      console.error("Error: '--print-logs' is only valid with 'serve'.");
+      process.exit(1);
+    }
+    if (targetDir !== process.cwd()) {
+      console.error("Error: 'model' does not accept a directory path.");
+      process.exit(1);
+    }
+    // cmdModel is async; swallow the (test-mocked) process.exit throw.
+    cmdModel(modelRef, longMode).catch((err) => {
+      if (!err || !err.message || !err.message.startsWith('EXIT:')) {
+        console.error(err ? err.message : String(err));
+        process.exit(1);
+      }
+    });
   } else if (subcommand === 'kill') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");

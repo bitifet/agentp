@@ -281,6 +281,7 @@ Subcommands:
   - `--print-logs` passes `--print-logs` to `opencode serve`, which prints server logs to stderr in the server tmux pane.
 - **`kill [dir]`** — Kill the server found upward from `dir`. Removes its tmux window and state file.
 - **`resurrect [--print-logs] [dir]`** — Recover a dead/crashed server: reads `.ocmux.json`, kills old tmux window, removes state file, then creates a fresh server + TUI in the same directory. Works even if no tmux window exists (stale state file).
+- **`model [ref]`** — Switch the model of the newest session on the current project's server. With no `ref`, shows an interactive model picker (TTY required). With `ref`, switches directly and prints the server URL on stdout so `agentp $(ocmux model <ref>)` composes: the switch (a side effect) takes effect before agentp sends the next prompt. `ref` supports partial matches when unique (`ocmux model deepseek`, `opencode-go/deepseek`, `...#high`); multiple matches open the picker (or error when not a TTY).
 - **`switch`** — Interactive session picker: an interactive menu of all running servers (columns: dirname, status, url, full path). Arrow keys or `j`/`k` move the selection; `Enter`/`Space` switches to the selected server's tmux window (the menu stays open, so you can hop between servers); `q` or `Ctrl+C` exits. The currently active server (queried live from tmux on every redraw) is highlighted across the full line width. Prints the URL of the last selected server on exit. Requires a TTY.
 - **`list`** — List all running servers with their directories, URLs, and status.
 

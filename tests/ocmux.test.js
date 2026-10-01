@@ -774,3 +774,92 @@ describe('bin/ocmux switch CLI guards', { concurrency: false }, () => {
     assert.ok(stderrOutput.some(s => s.includes("Run 'ocmux serve'")));
   });
 });
+
+// ---------------------------------------------------------------------------
+// bin/ocmux CLI — model subcommand guard paths
+// ---------------------------------------------------------------------------
+
+describe('bin/ocmux model CLI guards', { concurrency: false }, () => {
+  let origExit, origArgv, origIsTTY, origStderrWrite;
+  let stderrOutput, exitThrown;
+
+  function setupProcessMocks() {
+    origExit = process.exit;
+    origArgv = process.argv;
+    origIsTTY = process.stdin.isTTY;
+    origStderrWrite = process.stderr.write;
+    stderrOutput = [];
+    exitThrown = null;
+    process.exit = (code) => { exitThrown = code; throw new Error('EXIT:' + code); };
+    process.stderr.write = (chunk) => {
+      stderrOutput.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdin.isTTY = false;
+  }
+
+  function tearDownProcessMocks() {
+    process.exit = origExit;
+    process.argv = origArgv;
+    process.stdin.isTTY = origIsTTY;
+    process.stderr.write = origStderrWrite;
+  }
+
+  function requireMain() {
+    delete require.cache[require.resolve('../bin/ocmux')];
+    const { main } = require('../bin/ocmux');
+    try {
+      main();
+    } catch (e) {
+      if (!e.message || !e.message.startsWith('EXIT:')) throw e;
+    }
+  }
+
+  beforeEach(() => {
+    setupMocks();
+    setupProcessMocks();
+  });
+
+  afterEach(() => {
+    tearDownProcessMocks();
+    delete require.cache[require.resolve('../bin/ocmux')];
+    tearDownMocks();
+  });
+
+  it('errors when no server is found in the current directory tree', () => {
+    process.argv = ['node', 'ocmux', 'model'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('no opencode server found')));
+  });
+
+  it('rejects --print-logs with model', () => {
+    process.argv = ['node', 'ocmux', '--print-logs', 'model'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("'--print-logs' is only valid with 'serve'")));
+  });
+
+  it('rejects --git with model', () => {
+    process.argv = ['node', 'ocmux', '--git', 'model'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("'--git' and '--GIT' are only valid with 'serve'")));
+  });
+
+  it('rejects a directory path argument with model', () => {
+    process.argv = ['node', 'ocmux', 'model', 'gpt-5', '/tmp'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes("'model' does not accept a directory path")));
+  });
+
+  it('requires a TTY when no model reference is given', () => {
+    mockFiles[path.join(process.cwd(), '.ocmux.json')] = JSON.stringify({ url: 'http://localhost:4096', window_index: 1 });
+    process.stdin.isTTY = false;
+    process.argv = ['node', 'ocmux', 'model'];
+    requireMain();
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('requires a TTY')));
+  });
+});

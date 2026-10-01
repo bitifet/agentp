@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### New Features
+
+- **`ocmux model [ref]`** — switch the model of the newest session on the current project's server
+  - With no `ref`: interactive model picker (arrow/`j`/`k`, Enter to switch; TTY required)
+  - With `ref`: switch directly; `ref` supports full (`providerID/modelID`), partial (unique match on label or bare id), and `#variant` forms; multiple matches open the picker (or error with the candidates when not a TTY)
+  - On success prints the server URL on stdout, so `agentp $(ocmux model <ref>)` switches the model before the next prompt — no TUI dummy prompt needed
+  - Backed by new `lib/opencode.js` helpers: `listModels` (v2 `GET /api/model`, legacy from providers), `switchModel` (v2 `POST /api/session/:id/model`, legacy `PATCH`), `parseModelRef`, `resolveModelRef`; v2-only behavior degrades gracefully on older servers
+
 ### Changed
 
 - **agentp / tgagentp now support OpenCode v2 servers** — the v2 HTTP API broke the legacy protocol in three ways: endpoints moved under `/api`, responses are wrapped in a `{data}` envelope, and the SSE event schema changed from `{type, properties}` to `{id, type, data}` (text streams via `session.text.delta`, completion via `session.execution.succeeded|failed|interrupted`). `lib/opencode.js` now auto-detects v2 (one `GET /api/info` probe per server, cached) and speaks both protocols:

@@ -1088,6 +1088,139 @@ describe('v2 listAgents / listProviders', { concurrency: false }, () => {
   });
 });
 
+describe('parseModelRef', () => {
+  it('parses full provider/model references', () => {
+    assert.deepStrictEqual(opencode.parseModelRef('opencode-go/deepseek-v4.flash'), { providerID: 'opencode-go', id: 'deepseek-v4.flash', variant: null });
+  });
+
+  it('parses variant suffix', () => {
+    assert.deepStrictEqual(opencode.parseModelRef('opencode-go/gpt-5#high'), { providerID: 'opencode-go', id: 'gpt-5', variant: 'high' });
+  });
+
+  it('parses bare ids (provider unknown)', () => {
+    assert.deepStrictEqual(opencode.parseModelRef('deepseek'), { providerID: null, id: 'deepseek', variant: null });
+    assert.deepStrictEqual(opencode.parseModelRef('deepseek#max'), { providerID: null, id: 'deepseek', variant: 'max' });
+  });
+
+  it('returns null for empty input', () => {
+    assert.strictEqual(opencode.parseModelRef(''), null);
+    assert.strictEqual(opencode.parseModelRef('  '), null);
+  });
+});
+
+describe('resolveModelRef', () => {
+  const models = [
+    { providerID: 'opencode-go', id: 'deepseek-v4.flash', label: 'opencode-go/deepseek-v4.flash', variants: [] },
+    { providerID: 'opencode', id: 'deepseek-v4.flash', label: 'opencode/deepseek-v4.flash', variants: [] },
+    { providerID: 'opencode-go', id: 'gpt-5', label: 'opencode-go/gpt-5', variants: ['low', 'high'] },
+  ];
+
+  it('resolves an exact label match', () => {
+    const r = opencode.resolveModelRef(models, 'opencode-go/deepseek-v4.flash');
+    assert.ok(r.model);
+    assert.strictEqual(r.model.id, 'deepseek-v4.flash');
+  });
+
+  it('resolves a unique partial match', () => {
+    const r = opencode.resolveModelRef(models, 'gpt-5');
+    assert.ok(r.model);
+    assert.strictEqual(r.model.label, 'opencode-go/gpt-5');
+  });
+
+  it('carries the variant through', () => {
+    const r = opencode.resolveModelRef(models, 'gpt-5#high');
+    assert.ok(r.model);
+    assert.strictEqual(r.model.variant, 'high');
+  });
+
+  it('flags ambiguity', () => {
+    const r = opencode.resolveModelRef(models, 'deepseek-v4.flash');
+    assert.strictEqual(r.model, null);
+    assert.strictEqual(r.matches.length, 2);
+    assert.match(r.error, /multiple models match/);
+  });
+
+  it('reports no matches', () => {
+    const r = opencode.resolveModelRef(models, 'zzz-nope');
+    assert.strictEqual(r.model, null);
+    assert.match(r.error, /no model matches/);
+  });
+
+  it('returns all models for an empty ref', () => {
+    const r = opencode.resolveModelRef(models, '');
+    assert.strictEqual(r.matches.length, models.length);
+    assert.strictEqual(r.model, null);
+  });
+});
+
+describe('v2 listModels', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('unwraps {data} and builds labels/variants', async () => {
+    ctrl.reset({
+      status: 200,
+      body: JSON.stringify({
+        data: [
+          { providerID: 'opencode-go', id: 'gpt-5', variants: [{ id: 'low' }, { id: 'high' }] },
+          { providerID: 'opencode', id: 'plain' },
+        ],
+      }),
+    });
+    const r = await opencode.listModels('http://localhost:4096');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/model');
+    assert.strictEqual(r.length, 2);
+    assert.deepStrictEqual(r[0], { providerID: 'opencode-go', id: 'gpt-5', label: 'opencode-go/gpt-5', variants: ['low', 'high'] });
+    assert.deepStrictEqual(r[1], { providerID: 'opencode', id: 'plain', label: 'opencode/plain', variants: [] });
+  });
+});
+
+describe('v2 switchModel', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 204, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('POSTs the model to /api/session/:id/model', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await opencode.switchModel('http://localhost:4096', 's1', 'opencode-go/gpt-5');
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.path, '/api/session/s1/model');
+    assert.strictEqual(req.opts.method, 'POST');
+    assert.deepStrictEqual(JSON.parse(req.req._written.join('')), { model: { providerID: 'opencode-go', id: 'gpt-5' } });
+  });
+
+  it('includes the variant when provided', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await opencode.switchModel('http://localhost:4096', 's1', { providerID: 'opencode-go', id: 'gpt-5', variant: 'high' });
+    const body = JSON.parse(ctrl.lastReq().req._written.join(''));
+    assert.deepStrictEqual(body, { model: { providerID: 'opencode-go', id: 'gpt-5', variant: 'high' } });
+  });
+
+  it('rejects references without a provider', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await assert.rejects(
+      () => opencode.switchModel('http://localhost:4096', 's1', 'gpt-5'),
+      /Invalid model reference/,
+    );
+  });
+});
+
+describe('legacy switchModel', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({ status: 200, body: '' }); });
+  after(() => tearDownMock());
+
+  it('PATCHes the session model via updateSession', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ id: 's1', model: 'opencode-go/gpt-5' }) });
+    await opencode.switchModel('http://localhost:4096', 's1', 'opencode-go/gpt-5');
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.path, '/session/s1');
+    assert.strictEqual(req.opts.method, 'PATCH');
+    assert.deepStrictEqual(JSON.parse(req.req._written.join('')), { model: 'opencode-go/gpt-5' });
+  });
+});
+
 describe('v2 getSession', { concurrency: false }, () => {
   let ctrl;
   before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
