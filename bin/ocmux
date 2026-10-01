@@ -398,11 +398,14 @@ function modelMenu(rows) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY || rows.length === 0) return resolve(null);
 
+    // Display name when it differs from the canonical label (e.g. "Kimi K2 (opencode/kimi-k2)").
+    const display = (r) => (r.name && r.name !== r.label ? `${r.name} (${r.label})` : r.label);
     const maxLen = Math.max(
-      ...rows.map(r => r.label.length),
+      ...rows.map(r => display(r).length),
       ...rows.map(r => (r.variants || []).join(',').length),
       8,
     );
+    const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     let cursor = 0;
     let done = false;
 
@@ -430,7 +433,7 @@ function modelMenu(rows) {
         const row = rows[i];
         const marker = i === cursor ? '▶ ' : '  ';
         const variants = (row.variants || []).join(',') || '—';
-        out += `${marker}${pad(row.label, maxLen)}  ${variants}\n`;
+        out += `${marker}${pad(display(row), maxLen)}  ${variants}\n`;
       }
       process.stderr.write(out);
     };

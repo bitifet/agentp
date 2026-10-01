@@ -1151,6 +1151,35 @@ describe('resolveModelRef', () => {
     assert.strictEqual(r.matches.length, models.length);
     assert.strictEqual(r.model, null);
   });
+
+  it('matches the friendly display name', () => {
+    const named = [
+      { providerID: 'opencode', id: 'kimi-k2', label: 'opencode/kimi-k2', name: 'Kimi K2', variants: [] },
+    ];
+    const r = opencode.resolveModelRef(named, 'Kimi K2');
+    assert.ok(r.model);
+    assert.strictEqual(r.model.label, 'opencode/kimi-k2');
+  });
+
+  it('matches names/ids ignoring case and separators', () => {
+    const named = [
+      { providerID: 'opencode-go', id: 'deepseek-v4-flash', label: 'opencode-go/deepseek-v4-flash', name: 'DeepSeek V4 Flash', variants: [] },
+    ];
+    const r = opencode.resolveModelRef(named, 'Deep Seek');
+    assert.ok(r.model);
+    assert.strictEqual(r.model.id, 'deepseek-v4-flash');
+  });
+
+  it('flags ambiguity on shared display names', () => {
+    const named = [
+      { providerID: 'opencode', id: 'kimi-k2', label: 'opencode/kimi-k2', name: 'Kimi K2', variants: [] },
+      { providerID: 'opencode-go', id: 'kimi-k2-go', label: 'opencode-go/kimi-k2-go', name: 'Kimi K2', variants: [] },
+    ];
+    const r = opencode.resolveModelRef(named, 'kimi');
+    assert.strictEqual(r.model, null);
+    assert.ok(r.matches.length >= 2);
+    assert.match(r.error, /multiple models match/);
+  });
 });
 
 describe('v2 listModels', { concurrency: false }, () => {
@@ -1158,12 +1187,12 @@ describe('v2 listModels', { concurrency: false }, () => {
   before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 200, body: '' }); });
   after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
 
-  it('unwraps {data} and builds labels/variants', async () => {
+  it('unwraps {data} and builds labels/variants/names', async () => {
     ctrl.reset({
       status: 200,
       body: JSON.stringify({
         data: [
-          { providerID: 'opencode-go', id: 'gpt-5', variants: [{ id: 'low' }, { id: 'high' }] },
+          { providerID: 'opencode-go', id: 'gpt-5', name: 'Gpt Five', variants: [{ id: 'low' }, { id: 'high' }] },
           { providerID: 'opencode', id: 'plain' },
         ],
       }),
@@ -1171,8 +1200,8 @@ describe('v2 listModels', { concurrency: false }, () => {
     const r = await opencode.listModels('http://localhost:4096');
     assert.strictEqual(ctrl.lastReq().opts.path, '/api/model');
     assert.strictEqual(r.length, 2);
-    assert.deepStrictEqual(r[0], { providerID: 'opencode-go', id: 'gpt-5', label: 'opencode-go/gpt-5', variants: ['low', 'high'] });
-    assert.deepStrictEqual(r[1], { providerID: 'opencode', id: 'plain', label: 'opencode/plain', variants: [] });
+    assert.deepStrictEqual(r[0], { providerID: 'opencode-go', id: 'gpt-5', label: 'opencode-go/gpt-5', name: 'Gpt Five', variants: ['low', 'high'] });
+    assert.deepStrictEqual(r[1], { providerID: 'opencode', id: 'plain', label: 'opencode/plain', name: null, variants: [] });
   });
 });
 

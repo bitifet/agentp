@@ -2,13 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.14.0] - 2026-10-02
 
 ### New Features
 
 - **`ocmux model [ref]`** — switch the model of the newest session on the current project's server
   - With no `ref`: interactive model picker (arrow/`j`/`k`, Enter to switch; TTY required)
-  - With `ref`: switch directly; `ref` supports full (`providerID/modelID`), partial (unique match on label or bare id), and `#variant` forms; multiple matches open the picker (or error with the candidates when not a TTY)
+  - With `ref`: switch directly; `ref` accepts full (`providerID/modelID`), partial, and `#variant` forms, and matches case- and separator-insensitively against the canonical label, the bare id, and the friendly display name (e.g. `"Kimi K2"`, `"Deep Seek"`); multiple matches open the picker (or error with the candidates when not a TTY)
   - On success prints the server URL on stdout, so `agentp $(ocmux model <ref>)` switches the model before the next prompt — no TUI dummy prompt needed
   - Backed by new `lib/opencode.js` helpers: `listModels` (v2 `GET /api/model`, legacy from providers), `switchModel` (v2 `POST /api/session/:id/model`, legacy `PATCH`), `parseModelRef`, `resolveModelRef`; v2-only behavior degrades gracefully on older servers
 
