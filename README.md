@@ -47,7 +47,7 @@ Notes:
 
 - `agentp` connects to the OpenCode event endpoint over HTTP.
 - In practice this means running `opencode serve` (or equivalent serve mode) so the port is open.
-- `opencode attach` is optional but useful to monitor the full conversation in another terminal/tmux pane.
+- `opencode attach` (older OpenCode) / `opencode --server <url>` (OpenCode v2) is optional but useful to monitor the full conversation in another terminal/tmux pane. `ocmux` picks the right form automatically.
 - If the OpenCode server is password-protected (`OPENCODE_SERVER_PASSWORD`), both `agentp` and `ocmux` automatically send the required HTTP Basic Auth credentials.
 
 ## Usage
@@ -325,7 +325,7 @@ The session API ensures the request is processed even when no TUI is attached, a
 
 Operational hint:
 
-- You can keep a separate `opencode attach` view open to see the full run context while `agentp` is used from shell scripts or editor buffers.
+- You can keep a separate TUI view open to see the full run context while `agentp` is used from shell scripts or editor buffers: `opencode --server '<url>' --continue` on OpenCode v2, or `opencode attach --continue '<url>'` on older versions (`ocmux` uses the right one automatically).
 
 ## tgagentp
 

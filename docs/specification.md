@@ -88,7 +88,7 @@ Manages per-project OpenCode servers in a persistent `Opencode` tmux session.
 **Window layout:**
 
 - Pane 0: server (`opencode serve --port 0 2>&1 | tee <logfile>`)
-- Pane 1+: TUI (`opencode attach --continue '<url>'`)
+- Pane 1+: TUI (`opencode --server '<url>' --continue` on OpenCode v2; `opencode attach --continue '<url>'` on older versions — chosen automatically via `opencode --version`)
 - Log: `/tmp/opencode-serve-<hashDir(dir)>.log`
 - State: `<dir>/.ocmux.json` (contains `url`, `logfile`, `window_index`)
 
@@ -235,6 +235,8 @@ Server log file. Continuously written by `tee` in the server pane. Polled by `do
 opencode server listening on http://localhost:40999
 ```
 
+OpenCode v2 prints `server listening on http://...` (without the `opencode ` prefix); both formats are matched for URL extraction.
+
 ---
 
 ## Inter-Process Communication
@@ -281,10 +283,10 @@ All servers live in a single tmux session named `Opencode`. Each project gets on
 Session: Opencode
 ├── Window 3: /home/user/project-a
 │   ├── Pane 0: opencode serve --port 0 ...   (server)
-│   └── Pane 1: opencode attach --continue ...  (TUI, zoomed)
+│   └── Pane 1: TUI (opencode --server <url> --continue / attach, zoomed)
 ├── Window 4: /home/user/project-b
 │   ├── Pane 0: opencode serve --port 0 ...
-│   └── Pane 1: opencode attach --continue ...
+│   └── Pane 1: TUI (opencode --server <url> --continue / attach)
 ```
 
 Window names are the full project directory path. Pane 0 is always the server; pane 1+ is the TUI. The TUI pane is zoomed on switch/create. Dead TUI panes are auto-restarted on switch.
