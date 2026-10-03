@@ -1496,3 +1496,40 @@ describe('v2 sendToSession', { concurrency: false }, () => {
     assert.strictEqual(r, 'partial');
   });
 });
+
+// ── v2 completion quiescence (grace period) ────────────────────────────────
+describe('v2 completion quiescence', { concurrency: false }, () => {
+  it('keeps collecting when activity resumes after execution.succeeded', async () => {
+    opencode._setApiVersion('v2');
+    opencode._setCompletionGraceMs(100);
+
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/event') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders();
+        const w = (j) => res.write(`data: ${JSON.stringify(j)}\n\n`);
+        // First execution "succeeds", then a retry resumes with more text.
+        w({ id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'first' } });
+        w({ id: 'b', type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+        setTimeout(() => {
+          w({ id: 'c', type: 'session.execution.started', data: { sessionID: 's1' } });
+          w({ id: 'd', type: 'session.text.delta', data: { sessionID: 's1', delta: 'second' } });
+          w({ id: 'e', type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+        }, 10);
+        req.on('close', () => {});
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    const url = `http://${addr.address}:${addr.port}`;
+
+    const result = await opencode.listenForSessionEvents(url, 's1', {});
+    server.close();
+    opencode._setApiVersion('legacy');
+    opencode._setCompletionGraceMs(1500);
+    assert.strictEqual(result, 'firstsecond');
+  });
+});

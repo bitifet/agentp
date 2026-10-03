@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+
+- **`ocmux kill` killed the wrong server** — it trusted the stale `window_index`
+  from `.ocmux.json`, which tmux reuses as windows are created/destroyed. When
+  that index had been reassigned to a later server (and no window was named for
+  the target directory), `kill` would stop the wrong TUI/server. `kill` now
+  matches the window **by name** (`windowByDir`); if no window matches, it only
+  removes the state file.
+- **agentp returned incomplete answers** — OpenCode v2 can emit
+  `session.execution.succeeded|failed` before the agent is truly done (a retry
+  schedules a new execution, or a sub-agent resumes later), and the SSE stream
+  can end before the terminal signal. `listenV2` now treats those events as a
+  *completion candidate* and only resolves after a 1.5s quiescence window with
+  no further activity (`session.execution.started`, `session.retry.scheduled`,
+  or new text/reasoning deltas cancel the pending completion).
+  `session.execution.interrupted` still resolves immediately.
+
+### New Features
+
+- **agentp: interrupt a prompt into a ticket** — normal (non-`--defer`) runs now
+  execute in a detached child and wait for the answer. Pressing `Ctrl+C` while
+  waiting prints an `agentp_ticket` (with `elapsed`) and exits, leaving the
+  answer generating in the background for later retrieval — the best of both
+  waiting-for-the-answer and deferring.
+- **agentp normal mode recognizes tickets** — piping a ticket to `agentp`
+  without `--defer` now retrieves the result. Unlike `--defer`, it keeps waiting
+  (instead of returning the ticket immediately) if the answer is not ready yet,
+  and only re-prints the ticket if interrupted again with `Ctrl+C`.
+
 ## [1.14.0] - 2026-10-02
 
 ### New Features

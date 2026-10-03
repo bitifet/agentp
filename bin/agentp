@@ -192,6 +192,15 @@ function formatTicket(ticket, elapsed, compact) {
   return 'agentp_ticket ' + (compact ? JSON.stringify(fields) : JSON.stringify(fields, null, 2));
 }
 
+// Print a deferred ticket (with elapsed) and exit — used for the interrupt path.
+function printTicketAndExit(ticket, onlineTicket) {
+  const elapsed = ticket && ticket.ctime
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(ticket.ctime)) / 1000))
+    : 0;
+  process.stdout.write(formatTicket(ticket, elapsed, onlineTicket) + '\n');
+  process.exit(0);
+}
+
 async function resolveTargetSession(serverBase, sessionName, newSession) {
   let sessions;
   try {
@@ -273,6 +282,41 @@ function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Wait indefinitely for a deferred result. Resolves with `{ result }` once the
+// answer is ready, or `{ interrupted: true }` if SIGINT is received while
+// waiting (any detached child keeps running). The caller decides how to react
+// to the interrupt (normally print a ticket and exit).
+function waitForDeferredResultForever(filePath) {
+  return new Promise((resolve) => {
+    let timer = null;
+    let done = false;
+
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      if (timer) clearTimeout(timer);
+      process.removeListener('SIGINT', onSigint);
+      resolve(value);
+    };
+
+    function onSigint() {
+      finish({ interrupted: true });
+    }
+
+    const poll = () => {
+      const result = readDeferredResult(filePath);
+      if (result !== null) {
+        finish({ result });
+        return;
+      }
+      timer = setTimeout(poll, DEFER_POLL_MS);
+    };
+
+    process.on('SIGINT', onSigint);
+    poll();
+  });
+}
+
 function appendUnusedFollowup(result, followupText) {
   if (!followupText) return result;
   return result + (result.endsWith('\n') ? '' : '\n') + followupText;
@@ -319,6 +363,20 @@ function formatDeferredResult(filePath, result, qaMode, unusedFollowupText) {
   return appendUnusedFollowup(output, unusedFollowupText);
 }
 
+// Output a ready deferred result, clean up its temp files, and exit 0.
+function outputReadyResult(filePath, result, qaMode, unusedFollowupText) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (err) {
+    process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+    process.exit(1);
+  }
+  try { fs.unlinkSync(filePath + '.lock'); } catch {}
+  process.stdout.write(formatDeferredResult(filePath, result, qaMode, unusedFollowupText));
+  removeQueuedFollowups(filePath);
+  process.exit(0);
+}
+
 async function readAllStdin() {
   let text = '';
   const rl = readline.createInterface({ input: process.stdin });
@@ -332,6 +390,51 @@ async function readAllStdin() {
 const HUMAN_ROW = '👤: —————————————————\n'
 const AGENT_ROW = '🤖: —————————————————\n'
 const FINAL_ROW = '    —————————————————\n';
+
+// Write the prompt to a temp file, lock the output file, and spawn a detached
+// `--defer-child` process that runs the prompt and writes the answer. Returns
+// the ticket describing this deferred run.
+function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, qaMode, tgMode, flushMode, targetSessionId, deferSeconds }) {
+  const tempPath = generateTempFilename();
+  const promptTempPath = tempPath + '.prompt';
+
+  fs.writeFileSync(promptTempPath, promptText);
+  fs.writeFileSync(tempPath, '');
+  lockFile(tempPath);
+
+  const ticket = {
+    ctime: new Date().toISOString(),
+    path: tempPath,
+    defer: deferSeconds || 0,
+    server: serverBase,
+    sessionId: targetSessionId,
+  };
+
+  const childArgs = [
+    __filename,
+    '--defer-child',
+    '--prompt-file', promptTempPath,
+    '--output-file', tempPath,
+  ];
+  if (qaMode) childArgs.push('--qa');
+  if (tgMode === true) childArgs.push('--tg');
+  if (tgMode === false) childArgs.push('--no-tg');
+  if (flushMode) childArgs.push('--flush');
+  if (sessionName) {
+    childArgs.push('--session', sessionName);
+    if (newSession) childArgs.push('--new');
+  }
+  childArgs.push('--resolved-session-id', targetSessionId);
+  childArgs.push(serverBase);
+
+  const child = child_process.spawn(process.execPath, childArgs, {
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+
+  return ticket;
+}
 
 async function main() {
   let serverBase = 'http://localhost:4096';
@@ -658,9 +761,6 @@ async function main() {
     }
 
     // This is a regular prompt — create deferred execution
-    const tempPath = generateTempFilename();
-    const promptTempPath = tempPath + '.prompt';
-
     let targetSessionId;
     try {
       targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession);
@@ -669,59 +769,30 @@ async function main() {
       process.exit(1);
     }
 
-    // Write prompt to temp file for child process
-    fs.writeFileSync(promptTempPath, promptText);
-
-    // Create and lock the output file
-    fs.writeFileSync(tempPath, '');
-    lockFile(tempPath);
-
-    const newTicket = {
-      ctime: new Date().toISOString(),
-      path: tempPath,
-      defer: deferSeconds,
-      server: serverBase,
-      sessionId: targetSessionId,
-    };
-
-    // Spawn detached child process
-    const childArgs = [
-      __filename,
-      '--defer-child',
-      '--prompt-file', promptTempPath,
-      '--output-file', tempPath,
-    ];
-
-    // Pass through other flags
-    if (qaMode) childArgs.push('--qa');
-    if (tgMode === true) childArgs.push('--tg');
-    if (tgMode === false) childArgs.push('--no-tg');
-    if (flushMode) childArgs.push('--flush');
-    if (sessionName) {
-      childArgs.push('--session', sessionName);
-      if (newSession) childArgs.push('--new');
-    }
-    childArgs.push('--resolved-session-id', targetSessionId);
-    childArgs.push(serverBase);
-
-    const child = child_process.spawn(process.execPath, childArgs, {
-      detached: true,
-      stdio: 'ignore',
+    const newTicket = spawnDeferredChild({
+      promptText,
+      serverBase,
+      sessionName,
+      newSession,
+      qaMode,
+      tgMode,
+      flushMode,
+      targetSessionId,
+      deferSeconds,
     });
-    child.unref();
 
     // If a timeout was given, block until the answer arrives or the timeout
     // expires. Return the response when it arrives; otherwise print a ticket.
     if (deferSeconds > 0) {
-      const result = await waitForDeferredResult(tempPath, deferSeconds * 1000);
+      const result = await waitForDeferredResult(newTicket.path, deferSeconds * 1000);
       if (result !== null) {
         try {
-          fs.unlinkSync(tempPath);
+          fs.unlinkSync(newTicket.path);
         } catch (err) {
           process.stdout.write(`Error reading deferred file: ${err.message}\n`);
           process.exit(1);
         }
-        try { fs.unlinkSync(tempPath + '.lock'); } catch {}
+        try { fs.unlinkSync(newTicket.path + '.lock'); } catch {}
         process.stdout.write(result);
         process.exit(0);
       }
@@ -729,6 +800,86 @@ async function main() {
 
     // Output the deferred ticket
     process.stdout.write(formatTicket(newTicket, undefined, onlineTicket) + '\n');
+    process.exit(0);
+  }
+
+  // Normal (non-deferred, non-child) mode: wait for the answer, but run it in a
+  // detached child so a Ctrl+C can hand the in-flight response off as a ticket.
+  if (!deferChildMode) {
+    const ticket = parseDeferredTicketInput(promptText);
+
+    if (ticket) {
+      // Recognize a deferred ticket: wait indefinitely for the answer, and
+      // re-print the ticket only if the user interrupts with Ctrl+C.
+      const deferredPath = ticket.path;
+
+      if (!fs.existsSync(deferredPath)) {
+        process.stdout.write(`Error: deferred file not found: ${deferredPath}\n`);
+        process.exit(1);
+      }
+
+      let unusedFollowup = ticket.followupText || '';
+
+      // If the answer is already ready, return it immediately.
+      let result = ticket.followupText ? readDeferredResult(deferredPath) : null;
+      if (result !== null) {
+        outputReadyResult(deferredPath, result, qaMode, unusedFollowup);
+      }
+
+      // Queue any follow-up text to the original session (same as --defer).
+      if (ticket.followupText) {
+        if (!ticket.server || !ticket.sessionId) {
+          process.stdout.write('Error: deferred ticket does not include server/sessionId; cannot queue follow-up text. Re-submit only the ticket to check the result.\n');
+          process.exit(1);
+        }
+        try {
+          await sendToSessionAsync(ticket.server, ticket.sessionId, ticket.followupText);
+          appendQueuedFollowup(deferredPath, ticket.followupText);
+          unusedFollowup = '';  // follow-up already queued; don't echo it again
+        } catch (err) {
+          process.stdout.write(`Error queueing follow-up prompt: ${err.message}\n`);
+          process.exit(1);
+        }
+      }
+
+      const wait = await waitForDeferredResultForever(deferredPath);
+      if (wait.interrupted) printTicketAndExit(ticket, onlineTicket);
+      outputReadyResult(deferredPath, wait.result, qaMode, unusedFollowup);
+    }
+
+    // Regular prompt: submit via a detached child and wait for the answer.
+    let targetSessionId;
+    try {
+      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession);
+    } catch (err) {
+      console.error(err.message);
+      process.exit(1);
+    }
+
+    const newTicket = spawnDeferredChild({
+      promptText,
+      serverBase,
+      sessionName,
+      newSession,
+      qaMode,
+      tgMode,
+      flushMode,
+      targetSessionId,
+      deferSeconds: 0,
+    });
+
+    const wait = await waitForDeferredResultForever(newTicket.path);
+    if (wait.interrupted) printTicketAndExit(newTicket, onlineTicket);
+
+    // Answer ready — output it and clean up.
+    try {
+      fs.unlinkSync(newTicket.path);
+    } catch (err) {
+      process.stdout.write(`Error reading deferred file: ${err.message}\n`);
+      process.exit(1);
+    }
+    try { fs.unlinkSync(newTicket.path + '.lock'); } catch {}
+    process.stdout.write(wait.result);
     process.exit(0);
   }
 
@@ -843,4 +994,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult };
+module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult, waitForDeferredResultForever };

@@ -156,6 +156,21 @@ function setupOpencodeMocks() {
   mockCallIdx = 0;
   http.request = mockHttpRequest;
 
+  // Mock child spawn so no real detached process runs. When `_spawnAnswer` is
+  // set, simulate a completed child: write the answer and release the lock.
+  nodeMock.method(child_process, 'spawn', (cmd, args, opts) => {
+    mockCfg._spawn = { cmd, args, opts };
+    if (mockCfg._spawnAnswer !== undefined) {
+      const outIdx = args.indexOf('--output-file');
+      if (outIdx !== -1) {
+        const out = args[outIdx + 1];
+        fs.writeFileSync(out, mockCfg._spawnAnswer);
+        try { fs.unlinkSync(out + '.lock'); } catch {}
+      }
+    }
+    return { unref() {} };
+  });
+
   nodeMock.method(opencode, 'listSessions', async (server) => {
     mockCfg._listSessionsCalled = server;
     return mockCfg.sessions || [];
@@ -197,6 +212,30 @@ function provideStdin(text) {
 
 function setArgv(args) {
   process.argv = ['node', 'agentp', ...args];
+}
+
+// The session id resolved by the parent and passed to the detached child.
+function spawnResolvedSessionId() {
+  const args = mockCfg._spawn ? mockCfg._spawn.args : [];
+  const idx = args.indexOf('--resolved-session-id');
+  return idx !== -1 ? args[idx + 1] : null;
+}
+
+// Run agentp in --defer-child mode and return the written output file content.
+async function runDeferChild(extraArgs, promptContent) {
+  const tmp = path.join(os.tmpdir(), `agentp_child_${Date.now()}_${Math.random().toString(16).slice(2)}`);
+  const promptFile = tmp + '.prompt';
+  const outputFile = tmp + '.out';
+  fs.writeFileSync(promptFile, promptContent);
+  provideStdin('');
+  setArgv(['--defer-child', '--prompt-file', promptFile, '--output-file', outputFile, '--resolved-session-id', 's1', ...extraArgs]);
+  const { main } = require('../bin/agentp');
+  await main();
+  let output = null;
+  try { output = fs.readFileSync(outputFile, 'utf8'); } catch {}
+  try { fs.unlinkSync(outputFile); } catch {}
+  try { fs.unlinkSync(outputFile + '.lock'); } catch {}
+  return output;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -263,20 +302,20 @@ describe('agentp CLI', () => {
       setArgv(['8080']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
+      await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(mockCfg._listSessionsCalled, 'http://localhost:8080');
-      assert.strictEqual(mockCfg._sendToSessionCalled.server, 'http://localhost:8080');
+      assert.ok(mockCfg._spawn.args.includes('http://localhost:8080'));
     });
 
     it('URL argument sets server base', async () => {
       setArgv(['http://192.168.1.1:5000/']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
+      await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(mockCfg._listSessionsCalled, 'http://192.168.1.1:5000');
     });
   });
@@ -289,10 +328,10 @@ describe('agentp CLI', () => {
         { id: 's1', title: 'My Task', time: { updated: 1 } },
         { id: 's2', title: 'Other', time: { updated: 2 } },
       ];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
-      assert.strictEqual(mockCfg._sendToSessionCalled.sessionId, 's1');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(spawnResolvedSessionId(), 's1');
     });
 
     it('uses partial session match with --session', async () => {
@@ -301,10 +340,10 @@ describe('agentp CLI', () => {
       mockCfg.sessions = [
         { id: 's1', title: 'My Task', time: { updated: 1 } },
       ];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
-      assert.strictEqual(mockCfg._sendToSessionCalled.sessionId, 's1');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(spawnResolvedSessionId(), 's1');
     });
 
     it('errors on multiple partial matches with --session', async () => {
@@ -323,11 +362,11 @@ describe('agentp CLI', () => {
       setArgv(['--session', 'New Task', '--new']);
       provideStdin('hello');
       mockCfg.sessions = [];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
+      await assert.rejects(main(), /EXIT:0/);
       assert.deepStrictEqual(mockCfg._createSessionCalled, { server: 'http://localhost:4096', title: 'New Task' });
-      assert.strictEqual(mockCfg._sendToSessionCalled.text, 'hello\n');
+      assert.strictEqual(spawnResolvedSessionId(), 'new-session-id');
     });
 
     it('errors when no session matches and not --new', async () => {
@@ -347,10 +386,10 @@ describe('agentp CLI', () => {
         { id: 's2', title: 'New', time: { updated: 3 } },
         { id: 's3', title: 'Mid', time: { updated: 2 } },
       ];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
-      assert.strictEqual(mockCfg._sendToSessionCalled.sessionId, 's2');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(spawnResolvedSessionId(), 's2');
     });
 
     it('uses time.created as fallback for sorting', async () => {
@@ -360,19 +399,19 @@ describe('agentp CLI', () => {
         { id: 's1', title: 'No updated', time: { created: 5 } },
         { id: 's2', title: 'Has updated', time: { updated: 3, created: 1 } },
       ];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
-      assert.strictEqual(mockCfg._sendToSessionCalled.sessionId, 's1');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(spawnResolvedSessionId(), 's1');
     });
 
     it('creates agentp session when no sessions exist', async () => {
       setArgv([]);
       provideStdin('hello');
       mockCfg.sessions = [];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await main();
+      await assert.rejects(main(), /EXIT:0/);
       assert.deepStrictEqual(mockCfg._createSessionCalled, { server: 'http://localhost:4096', title: 'agentp' });
     });
   });
@@ -382,21 +421,17 @@ describe('agentp CLI', () => {
       setArgv([]);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
-      mockCfg.answer = 'hi';
+      mockCfg._spawnAnswer = 'hi\n';
       const { main } = require('../bin/agentp');
-      await main();
+      await assert.rejects(main(), /EXIT:0/);
       assert.ok(stdout.some(s => s.includes('hi')));
       assert.ok(stdout.some(s => s.includes('\n')));
     });
 
-    it('outputs QA pair with --qa', async () => {
-      setArgv(['--qa']);
-      provideStdin('hello');
-      mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
+    it('produces QA pair output in the deferred child with --qa', async () => {
       mockCfg.answer = 'hi';
-      const { main } = require('../bin/agentp');
-      await main();
-      const output = stdout.join('');
+      mockCfg._fsFiles = { '/tmp/tgagentp-port': 'ENOENT' };
+      const output = await runDeferChild(['--qa'], 'hello\n');
       assert.ok(output.includes('👤:'));
       assert.ok(output.includes('🤖:'));
       assert.ok(output.includes('hello'));
@@ -415,15 +450,11 @@ describe('agentp CLI', () => {
       assert.ok(errors.some(e => e.includes('tgagentp gateway not found')));
     });
 
-    it('notifies gateway when tgPort is available', async () => {
-      setArgv(['--tg']);
-      provideStdin('hello');
-      mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
+    it('child notifies gateway when tgPort is available', async () => {
       mockCfg.answer = 'hi';
       mockCfg.body = JSON.stringify({ ok: true, buffered: [] });
       mockCfg._fsFiles = { '/tmp/tgagentp-port': '12345' };
-      const { main } = require('../bin/agentp');
-      await main();
+      await runDeferChild(['--tg'], 'hello\n');
       assert.ok(mockCfg._lastReq);
       assert.strictEqual(mockCfg._lastReq.opts.path, '/send');
       assert.strictEqual(mockCfg._lastReq.opts.port, '12345');
@@ -475,23 +506,6 @@ describe('agentp CLI', () => {
   });
 
   describe('deferred execution', () => {
-    beforeEach(() => {
-      // Mock child spawn so no real detached process runs. When _spawnAnswer
-      // is set, simulate a completed child: write the answer and release the lock.
-      nodeMock.method(child_process, 'spawn', (cmd, args, opts) => {
-        mockCfg._spawn = { cmd, args, opts };
-        if (mockCfg._spawnAnswer !== undefined) {
-          const outIdx = args.indexOf('--output-file');
-          if (outIdx !== -1) {
-            const out = args[outIdx + 1];
-            fs.writeFileSync(out, mockCfg._spawnAnswer);
-            try { fs.unlinkSync(out + '.lock'); } catch {}
-          }
-        }
-        return { unref() {} };
-      });
-    });
-
     function cleanupSpawnFiles() {
       if (!mockCfg._spawn) return;
       const args = mockCfg._spawn.args;
@@ -724,6 +738,80 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:1/);
       assert.ok(stdout.join('').includes('deferred file not found'));
+    });
+  });
+
+  describe('normal mode: interrupt and ticket recognition', () => {
+    function parseTicketOutput() {
+      const out = stdout.join('');
+      assert.ok(out.startsWith('agentp_ticket '), `expected ticket, got: ${out}`);
+      return JSON.parse(out.slice('agentp_ticket '.length).trim());
+    }
+
+    function cleanupSpawnFiles() {
+      if (!mockCfg._spawn) return;
+      const args = mockCfg._spawn.args;
+      for (const flag of ['--prompt-file', '--output-file']) {
+        const idx = args.indexOf(flag);
+        if (idx !== -1) {
+          try { fs.unlinkSync(args[idx + 1]); } catch {}
+          try { fs.unlinkSync(args[idx + 1] + '.lock'); } catch {}
+        }
+      }
+    }
+
+    it('interrupting a prompt with SIGINT prints a ticket', async () => {
+      setArgv([]);
+      provideStdin('hello');
+      mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
+      // No _spawnAnswer → the child never completes, so the wait blocks.
+      setTimeout(() => process.emit('SIGINT'), 20);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.ok(t.path);
+      assert.strictEqual(t.server, 'http://localhost:4096');
+      assert.strictEqual(t.sessionId, 's1');
+      assert.ok(t.elapsed >= 0);
+      assert.ok(mockCfg._spawn.args.includes('--defer-child'));
+      cleanupSpawnFiles();
+    });
+
+    it('recognizes a ready ticket and returns the answer', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_norm_ready_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'the stored answer');
+      setArgv([]);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.ok(stdout.join('').includes('the stored answer'));
+      assert.ok(!fs.existsSync(tmp));
+    });
+
+    it('waits for a not-ready ticket and returns the answer when it arrives', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_norm_later_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv([]);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}"}`);
+      setTimeout(() => fs.writeFileSync(tmp, 'late answer'), 100);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.ok(stdout.join('').includes('late answer'));
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('re-prints a not-ready ticket with elapsed on SIGINT', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_norm_wait_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv([]);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}"}`);
+      setTimeout(() => process.emit('SIGINT'), 20);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.ok(t.elapsed >= 0);
+      assert.ok(!('defer' in t));
+      try { fs.unlinkSync(tmp); } catch {}
     });
   });
 

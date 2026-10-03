@@ -863,3 +863,86 @@ describe('bin/ocmux model CLI guards', { concurrency: false }, () => {
     assert.ok(stderrOutput.some(s => s.includes('requires a TTY')));
   });
 });
+
+// ---------------------------------------------------------------------------
+// bin/ocmux CLI — kill matches the window by name, not the stale index
+// ---------------------------------------------------------------------------
+
+describe('bin/ocmux kill', { concurrency: false }, () => {
+  let origExit, origArgv, origIsTTY, origStderrWrite;
+  let stderrOutput, exitThrown;
+
+  function setupProcessMocks() {
+    origExit = process.exit;
+    origArgv = process.argv;
+    origIsTTY = process.stdin.isTTY;
+    origStderrWrite = process.stderr.write;
+    stderrOutput = [];
+    exitThrown = null;
+    process.exit = (code) => { exitThrown = code; throw new Error('EXIT:' + code); };
+    process.stderr.write = (chunk) => {
+      stderrOutput.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return true;
+    };
+    process.stdin.isTTY = true;
+  }
+
+  function tearDownProcessMocks() {
+    process.exit = origExit;
+    process.argv = origArgv;
+    process.stdin.isTTY = origIsTTY;
+    process.stderr.write = origStderrWrite;
+  }
+
+  function requireMain() {
+    delete require.cache[require.resolve('../bin/ocmux')];
+    const { main } = require('../bin/ocmux');
+    try {
+      main();
+    } catch (e) {
+      if (!e.message || !e.message.startsWith('EXIT:')) throw e;
+    }
+  }
+
+  beforeEach(() => {
+    setupMocks();
+    setupProcessMocks();
+  });
+
+  afterEach(() => {
+    tearDownProcessMocks();
+    delete require.cache[require.resolve('../bin/ocmux')];
+    tearDownMocks();
+  });
+
+  it('kills the window whose name matches the project directory', () => {
+    const cwd = process.cwd();
+    mockFiles[path.join(cwd, '.ocmux.json')] = JSON.stringify({ url: 'http://localhost:4096', window_index: 1 });
+    tmuxHandler = (args) => {
+      if (args[0] === 'list-windows') return tmuxOk(`5\t${cwd}\n2\t/other\n`);
+      return tmuxOk();
+    };
+    process.argv = ['node', 'ocmux', 'kill'];
+    requireMain();
+    const killCalls = spawnSyncCalls.filter(c => c.args[0] === 'kill-window');
+    assert.strictEqual(killCalls.length, 1);
+    // Window index 5 (name match), not the stale index 1.
+    assert.strictEqual(killCalls[0].args[2], 'Opencode:5');
+    assert.ok(fsUnlinks.includes(path.join(cwd, '.ocmux.json')));
+  });
+
+  it('does not kill anything when no window matches the project directory', () => {
+    const cwd = process.cwd();
+    mockFiles[path.join(cwd, '.ocmux.json')] = JSON.stringify({ url: 'http://localhost:4096', window_index: 1 });
+    tmuxHandler = (args) => {
+      if (args[0] === 'list-windows') return tmuxOk('1\t/some/other/project\n');
+      return tmuxOk();
+    };
+    process.argv = ['node', 'ocmux', 'kill'];
+    requireMain();
+    const killCalls = spawnSyncCalls.filter(c => c.args[0] === 'kill-window');
+    assert.strictEqual(killCalls.length, 0, 'should not kill a different server\'s window');
+    assert.ok(fsUnlinks.includes(path.join(cwd, '.ocmux.json')));
+    assert.ok(stderrOutput.some(s => s.includes('Tmux window not found')));
+  });
+});

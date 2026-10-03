@@ -673,18 +673,16 @@ function cmdKill(statefile) {
     process.exit(1);
   }
 
-  let { window_index: winIdx } = state;
-
   console.error(`Stopping server and removing window for ${serverDir}...`);
 
   const sessionR = tmux(['has-session', '-t', SESSION]);
   if (sessionR.status === 0) {
-    const actualName = windowNameByIndex(winIdx);
-    if (actualName !== serverDir) {
-      const found = windowByDir(serverDir);
-      if (found != null) winIdx = found;
-    }
-
+    // Match the window by its NAME (the project directory path), never by the
+    // stale `window_index` from the state file. tmux reuses window indices as
+    // windows are created/destroyed, so a stale index may now point at a
+    // different (later) server. Only kill the window that actually belongs to
+    // this .ocmux.json; otherwise just clean up the state file.
+    const winIdx = windowByDir(serverDir);
     if (winIdx != null) {
       tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
       tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`, 'C-c']);
