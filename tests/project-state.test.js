@@ -125,4 +125,23 @@ describe('project-state', { concurrency: false }, () => {
     assert.strictEqual(ctx.directory, root);
     assert.strictEqual(ctx.session, 'ses_3');
   });
+
+  it('annotations: read/write/clear the sidecar next to the state file', (t) => {
+    const root = makeTempProject(t);
+    const sf = path.join(root, '.ocmux.json');
+    fs.writeFileSync(sf, '{}');
+    assert.deepStrictEqual(ps.readAnnotations(sf), {});
+    assert.strictEqual(ps.writeAnnotation(sf, 'ses_a', 'Remember the worktree'), 'Remember the worktree');
+    assert.strictEqual(ps.readAnnotations(sf).ses_a, 'Remember the worktree');
+    // update
+    ps.writeAnnotation(sf, 'ses_a', 'New note');
+    assert.strictEqual(ps.readAnnotations(sf).ses_a, 'New note');
+    // clear (empty text removes)
+    assert.strictEqual(ps.writeAnnotation(sf, 'ses_a', ''), null);
+    assert.deepStrictEqual(ps.readAnnotations(sf), {});
+    // multiple sessions coexist
+    ps.writeAnnotation(sf, 'ses_a', 'x');
+    ps.writeAnnotation(sf, 'ses_b', 'y');
+    assert.deepStrictEqual(ps.readAnnotations(sf), { ses_a: 'x', ses_b: 'y' });
+  });
 });
