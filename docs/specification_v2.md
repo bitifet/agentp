@@ -587,3 +587,25 @@ Candidates for the next pass:
   loop to become idle") after the terminal signal;
 - explicit child-session tracking (`parentID`) so sub-agent runs keep the parent
   "working" regardless of event silence.
+
+### 13.3 Deferred-mode long-prompt handling (annotated, planned)
+
+Problem: a long prompt with a **silent** gap longer than the completion window
+(default 15s, `AGENTP_COMPLETION_GRACE_MS`) can still return a truncated answer.
+Raising the window reduced this but did not eliminate it.
+
+Proposed approach (does not change the `--defer 0` re-send semantics that
+follow-up queuing relies on):
+
+1. In `--defer`/child mode, **do not cap** the "verify idle" retries — keep
+   extending while the session is genuinely busy (bounded only by a larger
+   safety timeout).
+2. When the listener *does* give up (verify cap or safety timeout), write an
+   `<output>.incomplete` marker next to the deferred result.
+3. On retrieval, if the marker exists, print the captured output followed by
+   `⚠️ may be incomplete — re-send the ticket for the full answer`, then clear
+   the marker.
+
+Longer term, prefer an authoritative completion signal
+(`GET /api/experimental/session/:id/wait` and/or child-session tracking via
+`parentID`) over any timed quiescence.

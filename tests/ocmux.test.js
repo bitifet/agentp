@@ -293,7 +293,15 @@ describe('sessionInfoLines', () => {
     assert.ok(text.includes('Tokens: --'));
     assert.ok(text.includes('Cost: --'));
     assert.ok(text.includes('Ctx: --'));
-    assert.ok(text.includes('Outcome: Unknown'));
+  });
+
+  it('colours labels yellow when highlighted (current session under cursor)', () => {
+    const s = { id: 's1', title: 'T' };
+    const plain = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120, false).join('\n');
+    const yellow = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120, true).join('\n');
+    assert.ok(plain.includes('\x1b[1m'));
+    assert.ok(!plain.includes('\x1b[1;33m'));
+    assert.ok(yellow.includes('\x1b[1;33m'));
   });
 });
 

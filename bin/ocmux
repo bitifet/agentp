@@ -222,18 +222,18 @@ function fmtCost(c) {
 function cellPlain(c) {
   return (c && typeof c === 'object') ? `${c.label}: ${c.value}` : String(c);
 }
-function cellRender(c, width) {
+function cellRender(c, width, labelColor = '\x1b[1m') {
   if (c && typeof c === 'object') {
     const label = `${c.label}:`;
     const avail = Math.max(0, width - label.length - 1);
     let value = String(c.value == null ? '' : c.value);
     if (value.length > avail) value = value.slice(0, avail);
     const plainLen = label.length + 1 + value.length;
-    return `\x1b[1m${label}\x1b[0m ${value}` + ' '.repeat(Math.max(0, width - plainLen));
+    return `${labelColor}${label}\x1b[0m ${value}` + ' '.repeat(Math.max(0, width - plainLen));
   }
   return String(c) + ' '.repeat(Math.max(0, width - String(c).length));
 }
-function layoutCells(cells, cols, minCell = 26) {
+function layoutCells(cells, cols, minCell = 26, labelColor = '\x1b[1m') {
   if (!cells || cells.length === 0) return [];
   const plains = cells.map(cellPlain);
   let nCols = Math.max(1, Math.min(cells.length, Math.floor(Math.max(cols, 1) / minCell)));
@@ -254,7 +254,7 @@ function layoutCells(cells, cols, minCell = 26) {
     for (let c = 0; c < nCols; c++) {
       const idx = r * nCols + c;
       if (idx >= cells.length) break;
-      parts.push(cellRender(cells[idx], widths[c]));
+      parts.push(cellRender(cells[idx], widths[c], labelColor));
     }
     lines.push(parts.join('  ').trimEnd());
   }
@@ -262,23 +262,26 @@ function layoutCells(cells, cols, minCell = 26) {
 }
 
 // Bold a label and append a (truncated) value, fitting `cols`.
-function labeledLine(label, value, cols) {
+function labeledLine(label, value, cols, labelColor = '\x1b[1m') {
   const lbl = `${label}:`;
   const avail = Math.max(0, cols - lbl.length - 1);
   let v = String(value == null ? '' : value);
   if (v.length > avail) v = v.slice(0, avail);
-  return `\x1b[1m${lbl}\x1b[0m ${v}`;
+  return `${labelColor}${lbl}\x1b[0m ${v}`;
 }
 
 // Info lines about the selected session: title + location (bold labels) and a
 // responsive grid. Fields are ALWAYS present (placeholders when unknown).
-function sessionInfoLines(s, runningIds, modelContext, cols) {
+// When `highlight` is true (the cursor is on the current session), labels are
+// yellow instead of white.
+function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false) {
   if (!s) return [];
+  const labelColor = highlight ? '\x1b[1;33m' : '\x1b[1m';
   const title = (s.title && s.title.trim()) || 'Untitled';
   const location = (s.location && s.location.directory) || 'Unknown';
   const out = [
-    labeledLine('Title', title, cols),
-    labeledLine('Location', location, cols),
+    labeledLine('Title', title, cols, labelColor),
+    labeledLine('Location', location, cols, labelColor),
   ];
 
   const model = s.model ? `${s.model.providerID}/${s.model.id}` : null;
@@ -310,7 +313,7 @@ function sessionInfoLines(s, runningIds, modelContext, cols) {
     { label: 'Ctx', value: ctx },
     { label: 'Outcome', value: s.outcome || 'Unknown' },
   ];
-  return out.concat(layoutCells(cells, cols));
+  return out.concat(layoutCells(cells, cols, 26, labelColor));
 }
 
 // Render a scrollable list into the alternate screen.
@@ -340,8 +343,10 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
   let out = '\x1b[2J\x1b[H';
   out += '\x1b[1;7m' + centerIn(titleLine, cols) + '\x1b[0m\n\n';
 
+  let rendered = 0;
   if (items.length === 0) {
     out += '  (none)\n';
+    rendered = 1;
   } else {
     for (let i = 0; i < win.count; i++) {
       const idx = win.start + i;
@@ -350,8 +355,12 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
       const reverse = r && typeof r === 'object' && r.reverse;
       const line = `${idx === cursor ? '▶ ' : '  '}${text == null ? '' : text}`;
       out += (reverse ? `\x1b[7m${line}\x1b[0m` : line) + '\n';
+      rendered++;
     }
   }
+  // Pad the list area so the footer stays pinned to the bottom of the terminal
+  // (instead of floating right under the last row on a tall window).
+  for (let i = rendered; i < viewHeight; i++) out += '\n';
   for (const l of extras) out += l + '\n';
   const hint = footer.length > cols ? footer.slice(0, cols) : padLeft(footer, cols);
   out += '\x1b[7m' + hint + '\x1b[0m\n';
@@ -460,7 +469,8 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         extras.push(`${input.label} ${renderInputValue(input.value)}`);
       }
       const selected = rows[cursor];
-      const infoLines = sessionInfoLines(selected, runningIds, modelContext, cols);
+      const selIsCurrent = !!(selected && String(selected.id) === String(current));
+      const infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
       process.stderr.write(renderList({
         title: 'ocmux — sessions',
         items: rows,
@@ -471,7 +481,9 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
           const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
-          return `${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
+          const text = `${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
+          // Yellow for the session currently selected in the TUI window.
+          return String(s.id) === String(current) ? `\x1b[33m${text}\x1b[0m` : text;
         },
         footer: 'Enter: switch · h: help · q: quit',
         infoLines,
@@ -862,6 +874,10 @@ async function cmdSessionSwitch(targetDir, directRef) {
       console.error(`Run 'ocmux serve' to create it.`);
       process.exit(1);
     }
+
+    // Focus this project's window up-front so the picker (and any session
+    // switch) never leaves another project's window selected.
+    activateProject(dir, winIdx, server, state.session);
 
     const sessions = await listSessions(server, dir).catch((err) => {
       console.error(`Error connecting to ${server}: ${err.message}`);

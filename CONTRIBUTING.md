@@ -2,9 +2,20 @@
 
 ## Introduction
 
-agentp is a collection of three zero-dependency Node.js CLI tools that extend [OpenCode](https://opencode.ai) with per-project tmux server management (`ocmux`), a stdin-to-session pipe (`agentp`), and a Telegram bot bridge (`tgagentp`).
+agentp is a collection of three **zero-dependency** Node.js CLI tools that
+extend [OpenCode](https://opencode.ai) v2:
 
-The project aims to stay **zero npm dependencies** — all tools use only the Node.js 18+ stdlib (`http`, `https`, `readline`, `url`, `child_process`, `fs`, `path`, `crypto`, `os`). PRs introducing new dependencies will not be accepted unless there is an exceptional justification.
+- **`agentp`** — pipes prompt text into a running OpenCode session and streams the answer back to stdout.
+- **`ocmux`** — manages per-project TUI windows in tmux (session picker, project switcher, create/rename/delete/annotate sessions) on top of a single **user-managed** OpenCode server.
+- **`tgagentp`** — bridges a Telegram bot chat with OpenCode (multi-chat, multi-server, file sharing). *Experimental.*
+
+The project aims to stay **zero npm dependencies** — everything uses only the
+Node.js 18+ stdlib (`http`, `https`, `readline`, `url`, `child_process`, `fs`,
+`path`, `crypto`, `os`). PRs introducing new dependencies will not be accepted
+unless there is an exceptional justification.
+
+**OpenCode v2 only.** OpenCode v1 support was removed in 2.0.0; there are no
+legacy code paths. The HTTP client lives in `lib/opencode.js`.
 
 ## Development Setup
 
@@ -12,7 +23,8 @@ The project aims to stay **zero npm dependencies** — all tools use only the No
 
 - Node.js >= 18
 - npm (ships with Node.js)
-- tmux (optional, only needed for `ocmux` and `tgagentp` features)
+- tmux (only needed for `ocmux` and `tgagentp`)
+- an OpenCode v2 server for manual testing (`opencode serve`)
 
 ### Local Install
 
@@ -21,119 +33,104 @@ git clone <your-fork>
 cd agentp
 npm link          # registers bin/agentp, bin/ocmux, bin/tgagentp globally
 # or
-npm install -g .  # alternative
+npm install -g .
 ```
 
-After linking, all three binaries are available globally. Run `tgagentp --help` or refer to `README.md`.
-
-### Code Map
+## Code Map
 
 ```
 agentp/
 ├── bin/
-│   ├── agentp        — Stdin-to-OpenCode pipe
-│   ├── ocmux         — Tmux server manager
-│   └── tgagentp      — Telegram bot bridge
+│   ├── agentp            — stdin-to-session pipe
+│   ├── ocmux             — project/TUI window manager + interactive pickers
+│   └── tgagentp          — Telegram bot bridge
 ├── lib/
-│   ├── opencode.js   — HTTP session API client (shared by agentp + tgagentp)
-│   └── ocmux.js      — Tmux management (shared by ocmux + tgagentp)
-├── tests/
-│   ├── opencode.test.js  — Unit tests for lib/opencode.js
-│   └── ocmux.test.js     — Unit tests for lib/ocmux.js
+│   ├── opencode.js       — OpenCode v2 HTTP/SSE client (shared by all three)
+│   ├── ocmux.js          — tmux helpers (shared by ocmux + tgagentp)
+│   ├── project-state.js  — `.ocmux.json` v2 schema + per-session reminders
+│   ├── tui-cmd.js        — tmux send-keys passthrough (tgagentp)
+│   ├── file-share.js     — telegram-shared directory + upload/download
+│   └── telegram-*.js     — Telegram API + formatting helpers
+├── tests/                — node:test suites (one per module)
 ├── docs/
-│   └── specification.md  — Technical architecture reference
-├── AGENTS.md             — Development notes and TODO
-├── CONTRIBUTING.md       — This file
+│   ├── specification.md     — short pointer (superseded)
+│   └── specification_v2.md  — current architecture reference
+├── AGENTS.md             — agent/dev notes
+├── CONTRIBUTING.md       — this file
 └── package.json
 ```
 
 ## Coding Standards
 
-### Style
-
-- **CommonJS** (`require` / `module.exports`) — no ES modules
-- **No semicolons** — the project uses ASI (automatic semicolon insertion)
-- **No comments** in production code — let the code speak; use descriptive variable/function names
-- **2-space indentation**
-- Single quotes for strings
-- `const` over `let`; avoid `var`
-- Arrow functions for callbacks and closures
+- **CommonJS** (`require` / `module.exports`) — no ES modules.
+- **2-space indentation**, single quotes, `const` over `let` (avoid `var`),
+  `async/await` over `.then()`.
+- **Semicolons are used** in `bin/` and `lib/` — except `lib/tui-cmd.js`, which
+  is deliberately no-semicolons. Match the file you are editing.
+- Comments are welcome and present throughout; keep them meaningful.
 
 ### Conventions
 
-- Async functions: use `async/await`, avoid raw `.then()`
-- Error handling: use try-catch at call sites; log errors via `log.error()`
-- Logging: use the `log` helper (`log.info`, `log.error`, `log.debug`) — never `console.log`
-- HTTP: use `lib/opencode.js` request helpers instead of raw `http.request`
-- Tmux: use `lib/ocmux.js` helpers instead of raw `spawnSync`
+- **HTTP:** use `lib/opencode.js` helpers — never raw `http.request`.
+- **tmux:** use `lib/ocmux.js` helpers (`_tmux` / exported wrappers) — never raw
+  `spawnSync`.
+- **State:** `.ocmux.json` I/O goes through `lib/project-state.js`
+  (`readProjectState`, `writeProjectState`, `readAnnotations`, `writeAnnotation`,
+  atomic writes). Never hand-roll reads/writes.
+- **Logging:** `tgagentp` uses `log.info`/`log.error`/`log.debug` (never bare
+  `console.log`). `agentp`/`ocmux` use `console.log` for CLI stdout (answers,
+  lists, `--version`) and `console.error` for diagnostics.
 
 ### Architecture Rules
 
-1. **Zero npm dependencies.** The `package.json` `"dependencies"` field must remain empty.
-2. **`bin/`** files are entry points — keep them thin. Business logic goes in `lib/`.
-3. **`bin/tgagentp`** is the largest file (~2000 lines). When adding new features, extract reusable logic into `lib/` when possible.
-4. **Shared state** (e.g., `chatStates`, `serverOwners`) is held in module-level variables in `bin/tgagentp` and `lib/ocmux.js`. Be mindful of mutation.
-5. **All external calls must be mockable.** `lib/opencode.js` tests mock `http.request`; `lib/ocmux.js` tests mock `child_process.spawnSync` and `fs.*`.
+1. **Zero npm dependencies.** `package.json` `"dependencies"` must remain empty.
+2. **`bin/` entry points stay thin**; business logic goes in `lib/`.
+3. **`bin/tgagentp` is the largest file (~3000 lines).** Extract reusable logic
+   into `lib/` when adding features.
+4. **Mockable externals.** All network/subprocess/filesystem access must be
+   interceptable (the existing test suites mock `http.request`,
+   `child_process.spawnSync`, and `fs.*`).
+5. **Sessions created via the API have no model** and will not execute prompts
+   until one is set — always create them with `createSessionWithModel`.
 
 ## Running Tests
 
-Tests use Node.js built-in test runner (`node:test`) — zero additional dependencies.
+Tests use the built-in `node:test` runner (no extra dependencies). Every
+external interface is mocked, so the suite runs fully in-process and is safe to
+run alongside a live OpenCode instance.
 
 ```bash
-# Run all tests
-npm test
-
-# Run a specific test file
-node --test tests/opencode.test.js
+npm test                                # all suites
+node --test tests/opencode.test.js      # one file
 node --test tests/ocmux.test.js
-
-# Run with verbose output
-node --test tests/opencode.test.js | bunyan  # or just grep for results
+node --test tests/project-state.test.js
 ```
 
-All external interfaces are mocked — tests run entirely in-process without touching the network, tmux, or the filesystem. They are safe to run alongside a live OpenCode instance.
-
-### Test Architecture
-
-Tests are structured in phases (see `AGENTS.md` for the full plan):
-
-| Phase | Module | Boundary Mocked |
-|-------|--------|----------------|
-| 1a | `lib/opencode.js` | `http.request` |
-| 1b | `lib/ocmux.js` | `child_process.spawnSync`, `child_process.execSync`, `fs.*` |
-
-Each test file uses `node:test`'s `mock` API in `before()`/`after()` hooks to install and tear down mocks. Tests within a describe block run serially (`concurrency: false`) when they share mocked state.
+Mock boundaries are installed in `before()`/`after()` (opencode) or
+`beforeEach()`/`afterEach()` (ocmux) hooks. Tests that share mocked state run
+serially (`concurrency: false`).
 
 ### Adding Tests
 
-1. Place new tests in `tests/<module>.test.js`
-2. Use `describe`, `it`, `before`, `after` from `node:test`
-3. Use `node:assert` for assertions
-4. Mock all external boundaries (network, filesystem, subprocesses)
-5. Run the full suite before submitting a PR
+1. Add them to the matching `tests/<module>.test.js`.
+2. Use `describe`/`it`/`before`/`after` from `node:test` and `node:assert`.
+3. Mock every external boundary.
+4. Run the full suite before opening a PR.
 
 ## Pull Request Process
 
-1. **Fork the repo** and create a feature branch from `main`.
-2. **Make your changes** following the coding standards above.
-3. **Run `npm test`** and ensure all tests pass.
-4. **Update documentation** if your change affects user-facing behavior:
-   - Help text in `bin/tgagentp` (the `cmdHelp` function)
-   - `docs/specification.md` for architecture changes
-   - Command table in `devto-article.md` (if adding/changing a slash command)
-   - `AGENTS.md` Done section (move items in/out as appropriate)
-5. **Commit with a descriptive message** following the existing style (e.g., `fix: ...`, `feat: ...`, `refactor: ...`, `docs: ...`).
-6. **Open a pull request** against `main`. Include a summary of the change and any testing instructions.
-
-### Review Process
-
-- Maintainers review within a few business days
-- Focus areas: mock correctness, zero-dependency rule, architectural consistency
-- Large changes may be asked to split into smaller PRs
-- All PRs must pass the test suite before merging
+1. Fork the repo and branch from `main`.
+2. Follow the coding standards above.
+3. Run `npm test` — all suites must pass.
+4. Update documentation when user-facing behavior changes:
+   - `README.md` (usage/behavior),
+   - `docs/specification_v2.md` (architecture),
+   - `AGENTS.md` (test counts / non-obvious facts),
+   - `CHANGELOG.md` (with every release).
+5. Commit with a descriptive message (`fix:`, `feat:`, `refactor:`, `docs:` …).
+6. Open a PR against `main` with a summary and testing instructions.
 
 ## Getting Help
 
-- Open an issue on GitHub for bugs or feature requests
-- Tag questions with `question` label for general help
-- For OpenCode-specific questions, refer to [opencode.ai](https://opencode.ai)
+- Open a GitHub issue for bugs or feature requests.
+- For OpenCode-specific questions, refer to [opencode.ai](https://opencode.ai).

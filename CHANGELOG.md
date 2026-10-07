@@ -2,36 +2,81 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.0.0] - 2026-10-07
 
-### Bug Fixes
+The **project/session** release. OpenCode v2 only; the server is user-managed;
+`ocmux` manages project TUI windows and a single source of truth (`.ocmux.json`).
 
-- **`ocmux kill` killed the wrong server** — it trusted the stale `window_index`
-  from `.ocmux.json`, which tmux reuses as windows are created/destroyed. When
-  that index had been reassigned to a later server (and no window was named for
-  the target directory), `kill` would stop the wrong TUI/server. `kill` now
-  matches the window **by name** (`windowByDir`); if no window matches, it only
-  removes the state file.
-- **agentp returned incomplete answers** — OpenCode v2 can emit
-  `session.execution.succeeded|failed` before the agent is truly done (a retry
-  schedules a new execution, or a sub-agent resumes later), and the SSE stream
-  can end before the terminal signal. `listenV2` now treats those events as a
-  *completion candidate* and only resolves after a 1.5s quiescence window with
-  no further activity (`session.execution.started`, `session.retry.scheduled`,
-  or new text/reasoning deltas cancel the pending completion).
-  `session.execution.interrupted` still resolves immediately.
+> **Versioning:** from 2.0.0 on, the three tools share one version whose major
+> number pairs with the targeted OpenCode major (OpenCode 2.x ⇒ this project 2.x).
+
+### Breaking changes
+
+- **OpenCode v1 support removed.** `lib/opencode.js` is v2-only (endpoints under
+  `/api`, `{data}` envelopes, `{id,type,data}` SSE). Legacy `/tui/*` helpers and
+  legacy SSE listeners are gone.
+- **The server is user-managed.** `ocmux` no longer starts/stops OpenCode
+  servers; run `opencode serve` yourself. `ocmux serve` only creates a TUI
+  window (and health-checks the server). `ocmux kill` closes the window and keeps
+  `.ocmux.json`.
+- **`.ocmux.json` v2 schema:** `{ version, directory, session, server, annotations }`.
+  Old files are read for back-compat (`url` → `server`, directory from location);
+  `ocmux migrate` rewrites them.
+- **Removed subcommands/flags:** `ocmux switch` (use `p` in the picker),
+  `ocmux model` (use `m`), `--print-logs`, `--last`. `agentp` positional URL is
+  kept; add `--server <url>`.
+- **agentp no longer needs `$(ocmux)`.** It resolves the server, project
+  directory and target session from the nearest `.ocmux.json`.
 
 ### New Features
 
-- **agentp: interrupt a prompt into a ticket** — normal (non-`--defer`) runs now
-  execute in a detached child and wait for the answer. Pressing `Ctrl+C` while
-  waiting prints an `agentp_ticket` (with `elapsed`) and exits, leaving the
-  answer generating in the background for later retrieval — the best of both
-  waiting-for-the-answer and deferring.
-- **agentp normal mode recognizes tickets** — piping a ticket to `agentp`
-  without `--defer` now retrieves the result. Unlike `--defer`, it keeps waiting
-  (instead of returning the ticket immediately) if the answer is not ready yet,
-  and only re-prints the ticket if interrupted again with `Ctrl+C`.
+- **Project/session model.** `agentp` reads the nearest `.ocmux.json` for the
+  server URL, the project directory (used to scope session listings) and the
+  stored session; `--session`/`--new` still override. `--getLast` is scoped too.
+- **`ocmux` interactive session picker** (per project): `Enter` switches (stays
+  open), `n` creates (name input; inherits the previous session's model),
+  `r` renames **in place** (readline-style caret editing), `R` sets a per-session
+  **reminder**, `d` deletes (confirm), `a` switches the agent (primary agents
+  only), `m` switches the model, `p` opens the project switcher, `h` help,
+  `q` quit. Sessions are listed most-recently-viewed first with a last-view
+  **time column**, an **animated spinner** for running sessions, a centered
+  inverted heading, and a scrollable, **resize-aware** viewport.
+- **Info footer** under the inverted key-hint bar: title, location and a
+  responsive grid (model, agent, `BUSY`/`IDLE` + time in status, tokens, cost,
+  context limit, outcome).
+- **Per-session reminders.** Stored in `.ocmux.json` (`annotations`); `agentp`
+  prepends a session's reminder to every prompt sent to it.
+- **agentp `--qa` header** — prints `📂 <project dir>` and `💬 <title> [<id>]`
+  (fresh sends and ticket retrievals).
+- **Cancellable deferred tickets.** Tickets now carry `cancelled: false`; flip
+  it to `true` and pipe the ticket back to interrupt the prompt
+  (`POST /api/session/:id/interrupt`, the `ESC` equivalent), discard the ticket
+  and print a confirmation.
+- **agentp focuses the target project's TUI window** before sending, so the
+  prompt streams in view even when the window/session differed.
+- **agentp `--server <url>`** and **`ocmux serve --server <url> --force`** to
+  point at a different (possibly remote/containerized) server.
+- New `lib/opencode.js` helpers: `createSessionWithModel`, `deleteSession`,
+  `interruptSession`, `getActiveSessions`, `sortSessionsByRecency`.
+- New `lib/project-state.js` with atomic `.ocmux.json` read/write.
+
+### Bug Fixes
+
+- **Empty answers from API-created sessions** — v2 sessions created via the API
+  have **no model** and will not execute a prompt until one is set;
+  `createSessionWithModel` inherits from a reference session / the server default.
+- **Rename applied server-side but not refreshed** — v2 returns `204` on the
+  title `PATCH`; `updateSession` now accepts it and re-reads the session.
+- **Duplicate `--qa` header** — the detached child already embeds the header, so
+  retrieval no longer prepends a second copy.
+- **Truncated long answers (improved).** `listenV2` defers completion on ANY
+  stream activity (including sub-agent/child-session events) and verifies the
+  session idle marker; the quiescence window is now 15s, tunable via
+  `AGENTP_COMPLETION_GRACE_MS`. A fully-silent gap longer than the window can
+  still truncate — see `docs/specification_v2.md` §13.3 for the planned fix.
+- Per-step assistant text segments are separated by a blank line.
+- `ocmux kill` now matches the window by name (not the stale `window_index`).
+- `ocmux` menus no longer overflow the terminal (scrollable, resize-aware).
 
 ## [1.14.0] - 2026-10-02
 

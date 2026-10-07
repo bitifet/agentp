@@ -3,13 +3,15 @@
 ## File layout
 
 ```
-bin/agentp          — stdin → opencode session (846 lines)
-bin/ocmux           — tmux project/TUI window manager (764 lines)
-bin/tgagentp        — Telegram bot ↔ opencode TUI (3050 lines)
-lib/opencode.js     — HTTP session API client (shared by agentp + tgagentp)
+bin/agentp          — stdin → opencode session (~1100 lines)
+bin/ocmux           — tmux project/TUI window manager + interactive pickers (~1380 lines)
+bin/tgagentp        — Telegram bot ↔ opencode TUI (~3050 lines)
+lib/opencode.js     — OpenCode v2 HTTP/SSE API client (shared by agentp + ocmux + tgagentp)
 lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
+lib/project-state.js— `.ocmux.json` v2 schema (directory/session/server/annotations)
 lib/tui-cmd.js      — tmux send-keys for TUI command passthrough (used by tgagentp)
 lib/file-share.js   — telegram-shared directory + file upload/download helpers
+lib/telegram-*.js   — Telegram API/format helpers (used by tgagentp)
 tests/              — node:test, all external calls mocked, safe to run live
 ```
 
@@ -27,7 +29,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 259 tests (60 + 8 + 66 + 62 + 12 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 263 tests (61 + 8 + 69 + 62 + 12 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
@@ -38,20 +40,19 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 
 ## Versioning
 
-- **Do not bump version without approval.**
-- Pre-release suffix: `0.11.2-pre01`, `0.11.2-pre02`, etc.
-- Update `CHANGELOG.md` with a full summary.
-- Maintainer strips the suffix for final releases.
+- **Do not bump the version without approval.** (2.0.0 was explicitly approved.)
+- **One version for all three tools; the major pairs with the targeted OpenCode
+  major** (OpenCode 2.x ⇒ this project is 2.x). Minor = features, patch = fixes.
+- Update `CHANGELOG.md` with a full summary for every release.
 
 ## Architecture quirks
 
 - `lib/opencode.js` wraps `http.request` — all OpenCode API functions go through `makeRequest()` (handles 401, optional timeout, optional `cancelRef` for req.destroy).
 - `lib/ocmux.js` wraps `child_process.spawnSync` via `_tmux()` helper — all tmux interactions must go through this, never raw spawn.
-- tgagentp is monolithic (~2500 lines). New features: extract into `lib/` when possible.
+- tgagentp is monolithic (~3050 lines). New features: extract into `lib/` when possible.
 - Shared state lives in module-level variables (`chatStates`, `serverOwners`, `agentpQueues`).
-- `activateProject()` is safe to call repeatedly: it checks `activeWindowIndex()` internally and is a no-op on the same window.
 - Server is **user-managed** (`opencode serve`); `ocmux`/`agentp` only health-check it (`checkServer`/connection errors). No per-project servers.
-- The interactive menus share `windowFor()`/`renderList()` in `bin/ocmux` (scrollable viewport, `resize`-aware, tested with explicit cols/rows).
+- The interactive menus share `windowFor()`/`renderList()` in `bin/ocmux` (scrollable viewport, `resize`-aware, tested with explicit cols/rows). Sessions created via the API have **no model** until set — always use `createSessionWithModel`.
 
 ## `//command` TUI passthrough (tgagentp)
 
@@ -79,4 +80,4 @@ tgagentp detects `[Telegram]{...}` structured messages on their own line in agen
 
 - Agentp gateway: tgagentp starts `POST /send` server on `127.0.0.1` (random port, written to `/tmp/tgagentp-port`). `agentp --tg` POSTs answers there for forwarding to Telegram.
 - `/record` ring buffer (100 msgs / 100KB) — recorded context prepended by `agentp --qa`.
-- Tmux session name: `"Opencode"`. Windows named by full project directory path. Server is pane 0, TUI is pane 1+.
+- Tmux session name: `"Opencode"`. Windows named by full project directory path; each window is **TUI-only (pane 0)** — there is no server pane (the server is user-managed).

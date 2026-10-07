@@ -44,6 +44,39 @@ npm link
 - **OpenCode v2** (`opencode serve`) — the server is user-managed; these tools only check it is reachable and complain otherwise.
 - [tmux](https://github.com/tmux/tmux) when using `ocmux` (project TUI windows).
 
+## Servers
+
+The OpenCode server is **user-managed**: start it yourself (e.g. `opencode serve`).
+`agentp` and `ocmux` only *check* that it is reachable and complain otherwise.
+
+- Each project records the server it uses in `.ocmux.json` (`"server"`). If that
+  server is not reachable:
+  - `agentp` exits with `Error connecting to server: …`;
+  - `ocmux` exits with `OpenCode server not reachable at <url>.`
+- **Point somewhere else for one command** (without touching any file):
+
+  ```bash
+  cat prompt.txt | agentp --server http://127.0.0.1:4097
+  # or the positional form:
+  cat prompt.txt | agentp http://127.0.0.1:4097
+  ```
+
+- **Repoint an existing project** (e.g. the server moved to a new port/host) and
+  relaunch its TUI on the stored session:
+
+  ```bash
+  ocmux serve --server http://127.0.0.1:4097 --force
+  ```
+
+  Without `--force`, `ocmux serve` refuses when `.ocmux.json` already exists.
+
+- **Remote or containerized servers** work too: pass any host reachable over
+  HTTP, e.g. a published Docker port (`--server http://192.168.1.50:4096`) or an
+  SSH tunnel. Auth uses `OPENCODE_SERVER_PASSWORD`/`OPENCODE_SERVER_USERNAME`.
+  The client speaks **HTTP only** (no `https://`). Note that `ocmux` launches the
+  *local* `opencode --server <url>` for the TUI, so use a local OpenCode version
+  compatible with the remote server.
+
 ## Usage
 
 ```bash
@@ -61,6 +94,7 @@ Options:
 - `--getLast <n>`: retrieve last n assistant answers from session history
 - `--session <name>`: target a specific session by name (exact or partial match)
 - `--new`: create a new session with the given title (requires `--session`)
+- `--server <url>`: use this OpenCode server instead of the one in `.ocmux.json` (e.g. `http://host:4096`)
 - `--version`: show version
 - `--help`: show help message
 
