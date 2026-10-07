@@ -3,31 +3,29 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const http = require('http');
+const { URL } = require('url');
 const { spawnSync } = require('child_process');
 const os = require('os');
 const {
   SESSION,
-  readState,
   statefileFor,
   tuiPaneId,
   windowByDir,
   windowNameByIndex,
   activeWindowIndex,
-  paneCount,
-  listServers,
+  listProjects,
+  activateProject,
+  relaunchTui,
+  closeProjectWindow,
+  createProjectWindow,
   ensureSession,
   pinWindowName,
   sleep,
-  hashDir,
-  logfileFor,
-  URL_RE,
-  resurrectServer,
-  startServer,
-  getActiveServer,
-  activateServer,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, listModels, switchModel, resolveModelRef } = require('../lib/opencode');
+const { listSessions, createSession, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession } = require('../lib/opencode');
+const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,6 +35,7 @@ const { version } = require('../package.json');
 
 const SCRIPT = path.basename(process.argv[1] || 'ocmux');
 const HOME = os.homedir();
+const DEFAULT_SERVER = process.env.OCMUX_SERVER || 'http://localhost:4096';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -94,17 +93,9 @@ function resolveGitDir(startDir, requireDir, flagLabel) {
   if (!result.dir) {
     const label = requireDir ? '.git directory' : '.git entry';
     console.error(`Error: no ${label} found in ${startDir} or any of its parents.`);
-    console.error(`Run '${SCRIPT} serve' without ${flagLabel} to create a server in the current directory.`);
+    console.error(`Run '${SCRIPT} serve' without ${flagLabel} to create a project window in the current directory.`);
     process.exit(1);
   }
-
-  if (result.stateDir && result.stateDir !== result.dir) {
-    console.error(`Error: found an existing ocmux server in ${result.stateDir}.`);
-    console.error(`Refusing to create a new server at ${result.dir} because it is above that session.`);
-    console.error(`Move outside ${result.stateDir} or pass an explicit directory.`);
-    process.exit(1);
-  }
-
   return result.dir;
 }
 
@@ -137,268 +128,734 @@ function resolveDir(arg) {
   process.exit(1);
 }
 
-function ensureTuiZoomed(windowIndex) {
-  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_index}|#{window_zoomed_flag}']);
-  if (r.status !== 0) return;
-  for (const line of r.stdout.trim().split('\n').filter(Boolean)) {
-    const [wi, zoomed] = line.split('|');
-    if (parseInt(wi, 10) === windowIndex && zoomed === '1') return;
-  }
-  const paneId = tuiPaneId(windowIndex);
-  if (paneId) tmux(['resize-pane', '-Z', '-t', paneId]);
-}
-
-
-
-function outputUrl(url, dir, longMode) {
-  if (longMode) {
-    console.log(`${url} → ${dir}`);
-  } else {
-    console.log(url);
-  }
-}
-
-function printHelp() {
-  console.error(`Usage: ${SCRIPT} [-l] [<subcommand>] [<directory>]`);
-  console.error('');
-  console.error('Manage opencode server + TUI in tmux for project directories.');
-  console.error('');
-  console.error('Without arguments, searches upward from <directory> (default: $PWD)');
-  console.error("for .ocmux.json and switches to that server's tmux window.");
-  console.error('If <directory> is not a valid path, ocmux will match it against the');
-  console.error("basenames of existing sessions' directories. If exactly one matches,");
-  console.error('that session is used.');
-  console.error('');
-  console.error('Subcommands:');
-  console.error('  serve     Create a server in <directory> (default: $PWD) and attach a TUI.');
-  console.error('            Aliased as "new" for backwards compatibility.');
-  console.error('            Errors if one already exists there.');
-  console.error('            Warns if a parent directory already has a server.');
-  console.error('            --git  Use the nearest parent with a .git entry (file or dir).');
-  console.error('            --GIT  Use the nearest parent with a .git directory only.');
-  console.error('            Refuses to create above an existing .ocmux.json found while searching.');
-  console.error('            --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
-  console.error('  kill      Kill the server found upward from <directory>.');
-  console.error('            Removes its tmux window and state file.');
-  console.error('  resurrect Recover a dead server: kills the old window, removes the state file,');
-  console.error('            then creates a fresh server + TUI in the same directory.');
-  console.error('            Works even if no tmux window exists (stale state file).');
-  console.error('            --print-logs  Pass --print-logs to the new opencode serve.');
-  console.error('  list      List all running servers with their directories and URLs.');
-  console.error('  switch    Interactively select a server to switch to.');
-  console.error('            j/k or arrows to move, Enter/Space selects (menu stays open),');
-  console.error('            q or Ctrl+C quits. Prints the URL of the last selected server on exit.');
-  console.error('  model     Switch the model of the newest session on the current server.');
-  console.error('            With no argument: interactive model picker (requires a TTY).');
-  console.error('            With <ref>: switch directly and print the server URL on stdout,');
-  console.error('            so `agentp $(ocmux model <ref>)` switches before the next prompt.');
-  console.error('            Partial names work when unique (e.g. "ocmux model deepseek",');
-  console.error('            "opencode-go/deepseek", "...#high"). Multiple matches open the picker.');
-  console.error('');
-  console.error('  --         Treat the next argument as a directory even if it matches');
-  console.error('            a subcommand name (e.g. "ocmux -- kill").');
-  console.error('');
-  console.error('Options:');
-  console.error('  -l       Long output: append " → <dir>" after the URL (serve/default).');
-  console.error('  --last   Print the URL of the active tmux window (last used server).');
-  console.error('  --print-logs  Pass --print-logs to opencode serve (prints server logs to stderr).');
-  console.error('  --version  Show version');
-  console.error('  -h       Show this help');
-  console.error('');
-  console.error('See also: agentp -- pipe prompts into OpenCode from stdin');
-  console.error('          tgagentp -- Telegram bridge for OpenCode (tgagentp --help)');
-  process.exit(0);
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: default — switch to an existing server
-// ---------------------------------------------------------------------------
-
-function cmdSwitch(statefile, longMode) {
-  const serverDir = path.dirname(statefile);
-  const state = readState(statefile);
-
-  if (!state || !state.url || state.window_index == null) {
-    console.error(`Error: invalid state file ${statefile}`);
-    process.exit(1);
-  }
-
-  let { url, window_index: winIdx } = state;
-
-  const actualName = windowNameByIndex(winIdx);
-  if (actualName !== serverDir) {
-    const found = windowByDir(serverDir);
-    if (found == null) {
-      console.error(`Error: tmux window for ${serverDir} not found`);
-      console.error("Run 'ocmux serve' to create a new server.");
-      process.exit(1);
-    }
-    winIdx = found;
-  }
-
-  pinWindowName(winIdx);
-
-  const tuiPane = tuiPaneId(winIdx);
-  if (!tuiPane) {
-    console.error('TUI pane is dead, restarting...');
-    const count = paneCount(winIdx);
-    if (count >= 2) {
-      const panesR = tmux(['list-panes', '-t', `${SESSION}:${winIdx}`, '-F', '#{pane_id}']);
-      const panes = panesR.stdout.trim().split('\n').filter(Boolean);
-      const lastPane = panes[panes.length - 1];
-      const respawnR = tmux(['respawn-pane', '-k', '-t', lastPane, tuiAttachCommand(url)]);
-      if (respawnR.status !== 0) {
-        tmux(['send-keys', '-t', lastPane, tuiAttachCommand(url), 'Enter']);
-      }
-    } else {
-      tmux(['split-window', '-v', '-t', `${SESSION}:${winIdx}`, '-c', serverDir,
-        tuiAttachCommand(url)]);
-    }
-  }
-
-  const activeWin = activeWindowIndex();
-  if (activeWin !== winIdx) {
-    tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
-  }
-
-  ensureTuiZoomed(winIdx);
-  outputUrl(url, serverDir, longMode);
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: switch — interactive session selection
-// ---------------------------------------------------------------------------
-
-function cmdSwitchMenu(longMode) {
-  const rows = listServers();
-  if (rows.length === 0) {
-    console.error('No opencode servers running.');
-    process.exit(1);
-  }
-  if (!process.stdin.isTTY) {
-    console.error('Error: "switch" is interactive and requires a TTY.');
-    console.error('Use "ocmux list" to list servers, or run "ocmux <dir>" to switch directly.');
-    process.exit(1);
-  }
-
-  const cols = process.stderr.columns || 80;
-  const nameW = Math.max(...rows.map(r => path.basename(r.dir).length), 4);
-  const stsW = Math.max(...rows.map(r => r.status.length), 6);
-  const urlW = Math.max(...rows.map(r => r.url.length), 3);
-  const dirW = Math.max(...rows.map(r => r.dir.length), 9);
-  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
-  const lineWidth = Math.max(cols, nameW + 2 + stsW + 2 + urlW + 2 + dirW);
-
-  let cursor = 0;
-  let activeRow = 0;
-  let lastUrl = null;
-  let lastDir = null;
-  let exited = false;
-
-  // Query tmux for the currently active window and map it to a row. Called at
-  // init and on every draw, so the highlight always reflects tmux's real state.
-  const refreshActive = () => {
-    const idx = activeWindowIndex();
-    if (idx == null) return;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i].index === idx) { activeRow = i; return; }
-    }
-  };
-
-  const cleanup = () => {
-    process.stderr.write('\x1b[?25h');
-    process.stderr.write('\x1b[?1049l');
-    try { process.stdin.setRawMode(false); } catch {}
-  };
-
-  const finish = () => {
-    if (exited) return;
-    exited = true;
-    cleanup();
-    process.stdin.pause();
-    if (lastUrl) outputUrl(lastUrl, lastDir, longMode);
-    process.exit(0);
-  };
-
-  const draw = () => {
-    refreshActive();
-    let out = '\x1b[2J\x1b[H';
-    out += 'ocmux switch — j/k or arrows: move, Enter/Space: select (keep switching), q/Ctrl+C: quit\n\n';
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const marker = i === cursor ? '▶ ' : '  ';
-      const line = `${marker}${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(row.url, urlW)}  ${pad(row.dir, dirW)}`;
-      if (i === activeRow) {
-        out += '\x1b[7m' + pad(line, lineWidth) + '\x1b[0m\n';
-      } else {
-        out += line + '\n';
-      }
-    }
-    process.stderr.write(out);
-  };
-
-  const activate = (i) => {
-    const row = rows[i];
+// Health check: is a server answering on `server`? The server is user-managed
+// (started with `opencode serve`); this only verifies something is listening.
+function checkServer(server) {
+  return new Promise((resolve) => {
+    let parsed;
     try {
-      activateServer(row.dir, row.index, row.url);
-      lastUrl = row.url;
-      lastDir = row.dir;
-    } catch (err) {
-      process.stderr.write(`\nError: ${err.message}\n`);
+      parsed = new URL(`${server}/api/info`);
+    } catch {
+      return resolve(false);
     }
-    draw();
-  };
-
-  process.stdin.on('keypress', (str, key) => {
-    if (key.ctrl && key.name === 'c') return finish();
-    if (key.name === 'q') return finish();
-    if (key.name === 'up' || str === 'k') {
-      cursor = (cursor + rows.length - 1) % rows.length;
-      draw();
-    } else if (key.name === 'down' || str === 'j') {
-      cursor = (cursor + 1) % rows.length;
-      draw();
-    } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
-      activate(cursor);
-    }
+    const req = http.request({
+      hostname: parsed.hostname,
+      port: parsed.port,
+      path: parsed.pathname,
+      method: 'GET',
+      headers: getAuthHeaders(),
+    }, (res) => {
+      res.resume();
+      resolve(true); // any HTTP response means the server is up
+    });
+    req.setTimeout(3000, () => { req.destroy(); resolve(false); });
+    req.on('error', () => resolve(false));
+    req.end();
   });
-
-  process.on('SIGINT', finish);
-  process.on('SIGTERM', finish);
-
-  readline.emitKeypressEvents(process.stdin);
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
-  process.stderr.write('\x1b[?1049h\x1b[?25l');
-  refreshActive();
-  cursor = activeRow;
-  draw();
 }
 
-// ---------------------------------------------------------------------------
-// Subcommand: model — switch the model of the server's most recent session
-// ---------------------------------------------------------------------------
-
-// Newest session id for a server (same heuristic as agentp's default).
 function newestSessionId(sessions) {
   if (!sessions || sessions.length === 0) return null;
-  const sorted = sessions
-    .filter(s => s && s.id && s.time && (s.time.updated || s.time.created))
-    .sort((a, b) => {
-      const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
-      const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
-      return bTime - aTime;
-    });
-  return sorted.length > 0 ? sorted[0].id : (sessions[0] && sessions[0].id) || null;
+  const sorted = sortSessionsByRecency(sessions).filter(s => s && s.id);
+  return sorted.length > 0 ? sorted[0].id : null;
 }
 
-// Interactive model picker (mirrors the ocmux switch menu; single selection).
-// Resolves with the chosen model or null on quit.
+// Render an interactive session picker (alt screen). Sorted most-recently-viewed
+// first by the caller. Keys: Enter/Space switch (menu stays open), n create,
+// r rename, d delete (confirm), h help, q/Ctrl+C quit. Resolves on quit.
+function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = {}) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) return resolve(null);
+
+    let rows = [...sessions];
+    let current = currentSession;
+    let cursor = 0;
+    let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input'
+    let confirmDel = null;
+    let input = null;           // { label, value, onConfirm }
+    let done = false;
+
+    const cols = process.stderr.columns || 80;
+    const maxLen = Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 12;
+    const lineWidth = Math.max(cols, maxLen + 6);
+    const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+    const helpLines = [
+      'Enter / Space    switch to the selected session (stays open)',
+      'n                create a new session (type a name, Enter; or blank for auto)',
+      'r                rename the selected session (ESC cancels)',
+      'd                delete the selected session (then y/N to confirm)',
+      'j / k, arrows    move the cursor',
+      'h                toggle this help',
+      'q / Ctrl+C       quit',
+    ];
+
+    const cleanup = () => {
+      process.stderr.write('\x1b[?25h');
+      process.stderr.write('\x1b[?1049l');
+      try { process.stdin.setRawMode(false); } catch {}
+      process.stdin.pause();
+    };
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      process.stdin.removeAllListeners('keypress');
+      process.removeListener('SIGINT', onSig);
+      resolve(value);
+    };
+    const onSig = () => finish(null);
+    process.on('SIGINT', onSig);
+
+    const draw = () => {
+      let out = '\x1b[2J\x1b[H';
+      if (mode === 'help') {
+        out += 'ocmux session picker — help\n\n';
+        for (const l of helpLines) out += '  ' + l + '\n';
+        out += '\nPress any key to return.\n';
+      } else {
+        out += 'ocmux — sessions (most recently viewed first)\n\n';
+        if (rows.length === 0) {
+          out += '  (no sessions yet — press n to create one)\n';
+        }
+        for (let i = 0; i < rows.length; i++) {
+          const s = rows[i];
+          const title = (s.title || s.id || '').slice(0, 60);
+          const age = s.time && s.time.viewed
+            ? `${Math.max(0, Math.floor((Date.now() - s.time.viewed) / 60000))}m`
+            : '';
+          const mark = String(s.id) === String(current) ? ' *' : '';
+          const line = `${i === cursor ? '▶ ' : '  '}${pad(title, maxLen)}  ${age}${mark}`;
+          out += pad(line, lineWidth) + '\n';
+        }
+        if (mode === 'confirm' && confirmDel) {
+          out += `\nDelete session "` + (confirmDel.title || confirmDel.id || '') + `"? (y/N) `;
+        } else if (mode === 'input' && input) {
+          out += `\n${input.label} ${input.value}_`;
+        }
+        out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
+        out += 'Enter: switch · n: new · r: rename · d: delete · h: help · q: quit';
+      }
+      process.stderr.write(out);
+    };
+
+    const startInput = (label, value, kind) => {
+      input = { label, value, kind };
+      mode = 'input';
+      draw();
+    };
+
+    const applyRenameWith = (name) => {
+      const row = rows[cursor];
+      if (!row || !onRename || !name) return;
+      Promise.resolve(onRename(row, name)).then(() => {
+        row.title = name;
+        draw();
+      }).catch((err) => {
+        process.stderr.write(`\nError: ${err.message}\n`);
+        draw();
+      });
+    };
+
+    const applyPick = (row) => {
+      Promise.resolve(onPick ? onPick(row) : null).then((created) => {
+        if (row.new && created) {
+          rows.unshift(created);
+          current = created.id;
+          cursor = 0;
+        } else if (!row.new) {
+          current = row.id;
+        }
+        confirmDel = null;
+        draw();
+      }).catch((err) => {
+        process.stderr.write(`\nError: ${err.message}\n`);
+        confirmDel = null;
+        draw();
+      });
+    };
+
+    const applyRename = () => {
+      const row = rows[cursor];
+      if (!row || !onRename) return;
+      Promise.resolve(onRename(row, input.value.trim())).then(() => {
+        if (input.value.trim()) row.title = input.value.trim();
+        input = null;
+        mode = 'normal';
+        draw();
+      }).catch((err) => {
+        process.stderr.write(`\nError: ${err.message}\n`);
+        input = null;
+        mode = 'normal';
+        draw();
+      });
+    };
+
+    const applyDelete = () => {
+      const s = confirmDel;
+      if (!s || !onDelete) return;
+      Promise.resolve(onDelete(s)).then(() => {
+        rows = rows.filter(r => r.id !== s.id);
+        if (cursor >= rows.length && cursor > 0) cursor = rows.length - 1;
+        confirmDel = null;
+        mode = 'normal';
+        draw();
+      }).catch((err) => {
+        process.stderr.write(`\nError: ${err.message}\n`);
+        confirmDel = null;
+        mode = 'normal';
+        draw();
+      });
+    };
+
+    process.stdin.on('keypress', (str, key) => {
+      if (mode === 'help') {
+        mode = 'normal';
+        draw();
+        return;
+      }
+      if (mode === 'confirm') {
+        if (key.name === 'y') return applyDelete();
+        if (key.name === 'n' || key.name === 'escape' || key.name === 'q' || key.name === 'return') {
+          confirmDel = null;
+          mode = 'normal';
+          draw();
+        }
+        return;
+      }
+      if (mode === 'input') {
+        if (key.name === 'escape') {
+          input = null;
+          mode = 'normal';
+          draw();
+        } else if (key.name === 'return' || key.name === 'enter') {
+          const v = input.value;
+          const kind = input.kind;
+          input = null;
+          mode = 'normal';
+          draw();
+          if (kind === 'create') {
+            applyPick({ new: true, name: v.trim() });
+          } else if (v.trim()) {
+            applyRenameWith(v.trim());
+          }
+        } else if (key.name === 'backspace') {
+          input.value = input.value.slice(0, -1);
+          draw();
+        } else if (str && !key.ctrl && !key.meta && str >= ' ') {
+          input.value += str;
+          draw();
+        }
+        return;
+      }
+      if (key.ctrl && key.name === 'c') return finish(null);
+      if (key.name === 'q') return finish(null);
+      if (key.name === 'h') {
+        mode = 'help';
+        draw();
+        return;
+      }
+      if (key.name === 'n') {
+        startInput('New session name (blank for auto; ESC cancels):', '', 'create');
+        return;
+      }
+      if (key.name === 'r') {
+        if (cursor < rows.length) {
+          startInput('Rename to (ESC cancels):', rows[cursor].title || '', 'rename');
+        }
+        return;
+      }
+      if (key.name === 'd') {
+        if (cursor < rows.length) {
+          confirmDel = rows[cursor];
+          mode = 'confirm';
+          draw();
+        }
+        return;
+      }
+      if (rows.length > 0 && (key.name === 'up' || str === 'k')) {
+        cursor = (cursor - 1 + rows.length) % rows.length;
+        draw();
+      } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
+        cursor = (cursor + 1) % rows.length;
+        draw();
+      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+        if (cursor < rows.length) applyPick(rows[cursor]);
+      }
+    });
+
+    // Track whether the active input is "create" (n) or "rename" (r) — stored
+    // on the `input` object itself; nothing else needed here.
+
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stderr.write('\x1b[?1049h\x1b[?25l');
+    draw();
+  });
+}
+
+// Interactive project picker — purely visual/navigation, never writes state.
+function switchMenu(rows, longMode) {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      console.error('Error: "switch" is interactive and requires a TTY.');
+      process.exit(1);
+    }
+    if (rows.length === 0) {
+      console.log('No opencode projects running.');
+      resolve(null);
+      return;
+    }
+
+    const nameW = Math.max(...rows.map(r => path.basename(r.dir).length), 4);
+    const stsW = Math.max(...rows.map(r => r.status.length), 6);
+    const ssnW = Math.max(...rows.map(r => (r.session || '').length), 7);
+    const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+    const cols = process.stderr.columns || 80;
+    const lineWidth = Math.max(cols, nameW + 2 + stsW + 2 + ssnW + 6);
+
+    let cursor = 0;
+    let activeRow = 0;
+    let done = false;
+
+    const refreshActive = () => {
+      const idx = activeWindowIndex();
+      if (idx == null) return;
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i].index === idx) { activeRow = i; return; }
+      }
+    };
+
+    const cleanup = () => {
+      process.stderr.write('\x1b[?25h');
+      process.stderr.write('\x1b[?1049l');
+      try { process.stdin.setRawMode(false); } catch {}
+    };
+
+    const finish = () => {
+      if (done) return;
+      done = true;
+      cleanup();
+      process.stdin.pause();
+      resolve(null);
+    };
+
+    const draw = () => {
+      refreshActive();
+      let out = '\x1b[2J\x1b[H';
+      out += 'ocmux switch — j/k or arrows: move, Enter/Space: focus, q/Ctrl+C: quit\n\n';
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+        const marker = i === cursor ? '▶ ' : '  ';
+        const session = row.session ? row.session.slice(0, 14) : '(none)';
+        const line = `${marker}${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(session, ssnW)}  ${row.dir}`;
+        if (i === activeRow) {
+          out += '\x1b[7m' + pad(line, lineWidth) + '\x1b[0m\n';
+        } else {
+          out += line + '\n';
+        }
+      }
+      process.stderr.write(out);
+    };
+
+    const activate = (i) => {
+      const row = rows[i];
+      try {
+        if (row.server) {
+          activateProject(row.dir, row.index, row.server, row.session);
+        } else {
+          tmux(['select-window', '-t', `${SESSION}:${row.index}`]);
+        }
+      } catch (err) {
+        process.stderr.write(`\nError: ${err.message}\n`);
+      }
+      draw();
+    };
+
+    const onSig = () => finish();
+    process.on('SIGINT', onSig);
+
+    process.stdin.on('keypress', (str, key) => {
+      if (key.ctrl && key.name === 'c') return finish();
+      if (key.name === 'q') return finish();
+      if (key.name === 'up' || str === 'k') {
+        cursor = (cursor + rows.length - 1) % rows.length;
+        draw();
+      } else if (key.name === 'down' || str === 'j') {
+        cursor = (cursor + 1) % rows.length;
+        draw();
+      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+        activate(cursor);
+      }
+    });
+
+    readline.emitKeypressEvents(process.stdin);
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stderr.write('\x1b[?1049h\x1b[?25l');
+    draw();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: default — interactive session switcher for the current project
+// ---------------------------------------------------------------------------
+
+async function cmdSessionSwitch(targetDir, directRef) {
+  const sf = findParentStatefile(targetDir);
+  if (!sf) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    console.error(`Run 'ocmux serve' to create a project window.`);
+    process.exit(1);
+  }
+  const state = projectState.readProjectState(sf);
+  const server = state.server;
+  if (!server) {
+    console.error(`Error: ${sf} does not record a server.`);
+    console.error(`Run 'ocmux serve --server <url>' to set it up, or add "server" to the file.`);
+    process.exit(1);
+  }
+  const dir = state.directory;
+
+  const alive = await checkServer(server);
+  if (!alive) {
+    console.error(`Error: OpenCode server not reachable at ${server}.`);
+    console.error(`Start it with 'opencode serve' (or your usual launcher) first.`);
+    process.exit(1);
+  }
+
+  const winIdx = windowByDir(dir);
+  if (winIdx == null) {
+    console.error(`Error: no tmux window for ${dir}.`);
+    console.error(`Run 'ocmux serve' to create it.`);
+    process.exit(1);
+  }
+
+  const sessions = await listSessions(server, dir).catch((err) => {
+    console.error(`Error connecting to ${server}: ${err.message}`);
+    process.exit(1);
+  });
+  const sorted = sortSessionsByRecency(sessions);
+
+  const applySession = (id) => {
+    projectState.writeProjectState(sf, { session: id });
+    relaunchTui(winIdx, dir, server, id);
+  };
+
+  if (directRef) {
+    const pick = sorted.find(s => String(s.id) === directRef)
+      || sorted.find(s => (s.title || '').toLowerCase() === directRef.toLowerCase())
+      || null;
+    if (!pick) {
+      console.error(`Error: no session matching "${directRef}" in ${dir}.`);
+      process.exit(1);
+    }
+    applySession(pick.id);
+  } else if (process.stdin.isTTY) {
+    // Interactive: Enter switches but stays open; n creates; d deletes; q quits.
+    await new Promise((resolve) => {
+      sessionMenu(sorted, state.session, {
+        onPick: async (row) => {
+          if (row.new) {
+            const created = await createSession(server, row.name || undefined, dir).catch((err) => {
+              console.error(`Error creating session: ${err.message}`);
+              return null;
+            });
+            if (created) applySession(created.id);
+            return created || null;
+          }
+          applySession(row.id);
+        },
+        onRename: async (row, name) => {
+          await updateSession(server, row.id, name).catch((err) => {
+            console.error(`Error renaming session: ${err.message}`);
+            throw err;
+          });
+        },
+        onDelete: async (row) => {
+          await deleteSession(server, row.id).catch((err) => {
+            console.error(`Error deleting session: ${err.message}`);
+            throw err;
+          });
+          if (String(row.id) === String(state.session)) {
+            projectState.writeProjectState(sf, { session: null });
+          }
+        },
+      }).then(resolve);
+    });
+  } else {
+    // Silent path (non-TTY): just make sure the window is focused.
+    activateProject(dir, winIdx, server, state.session);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: serve — create a project TUI window (server is user-managed)
+// ---------------------------------------------------------------------------
+
+async function cmdServeNew(targetDir, serverArg) {
+  try { targetDir = fs.realpathSync(targetDir); } catch {}
+
+  const sf = path.join(targetDir, '.ocmux.json');
+  if (fs.existsSync(sf)) {
+    console.error(`Error: a project window already exists in ${targetDir}.`);
+    console.error(`Run 'ocmux' without arguments to switch sessions there.`);
+    process.exit(1);
+  }
+
+  const parent = findParentStatefile(path.dirname(targetDir));
+  if (parent) {
+    const parentDir = path.dirname(parent);
+    console.error(`Warning: there is already an opencode project in ${parentDir}.`);
+    console.error(`Run 'ocmux switch' to move between project windows.`);
+
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question('Are you sure you want to create a new project window here? [y/N] ', (answer) => {
+      rl.close();
+      if (!/^[yY]([eE][sS])?$/.test(answer.trim())) {
+        console.error('Cancelled.');
+        process.exit(0);
+      }
+      doServeNew(targetDir, serverArg).catch((err) => {
+        console.error(err ? err.message : String(err));
+        process.exit(1);
+      });
+    });
+    return;
+  }
+  return doServeNew(targetDir, serverArg);
+}
+
+async function doServeNew(targetDir, serverArg) {
+  const server = serverArg || DEFAULT_SERVER;
+
+  const alive = await checkServer(server);
+  if (!alive) {
+    console.error(`Error: OpenCode server not reachable at ${server}.`);
+    console.error(`Start it with 'opencode serve' (or --server <url> to point elsewhere).`);
+    process.exit(1);
+  }
+
+  // Pick the newest session already in this directory, or create one.
+  let sessions = [];
+  try {
+    sessions = await listSessions(server, targetDir);
+  } catch (err) {
+    console.error(`Error connecting to ${server}: ${err.message}`);
+    process.exit(1);
+  }
+  let session = newestSessionId(sessions);
+  if (!session) {
+    try {
+      const created = await createSession(server, undefined, targetDir);
+      session = created.id;
+    } catch (err) {
+      console.error(`Error creating session: ${err.message}`);
+      process.exit(1);
+    }
+  }
+
+  console.error(`Creating project window for ${targetDir} (session ${session})...`);
+  try {
+    createProjectWindow(targetDir, server, session);
+  } catch (err) {
+    console.error(`Error: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: list
+// ---------------------------------------------------------------------------
+
+function cmdList(longMode) {
+  const rows = listProjects();
+  if (rows.length === 0) {
+    console.log('No opencode projects running.');
+    return;
+  }
+
+  const dirW = Math.max(...rows.map(r => r.dir.length), 9);
+  const stsW = Math.max(...rows.map(r => r.status.length), 6);
+  const ssnW = Math.max(...rows.map(r => (r.session || '').length), 7);
+  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+
+  console.log(`${pad('Directory', dirW)}  ${pad('Status', stsW)}  ${pad('Session', ssnW)}`);
+  for (const row of rows) {
+    console.log(`${pad(row.dir, dirW)}  ${pad(row.status, stsW)}  ${pad(row.session || '(none)', ssnW)}`);
+    if (longMode && row.server) console.log(`    server: ${row.server}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: kill — close the project window but keep .ocmux.json
+// ---------------------------------------------------------------------------
+
+function cmdKill(targetDir) {
+  const sf = findParentStatefile(targetDir);
+  if (!sf) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    process.exit(1);
+  }
+  const serverDir = path.dirname(sf);
+  const winIdx = windowByDir(serverDir);
+  if (winIdx != null) {
+    console.error(`Closing project window for ${serverDir}...`);
+    try {
+      closeProjectWindow(winIdx);
+    } catch (err) {
+      console.error(`Error: ${err.message}`);
+      process.exit(1);
+    }
+  } else {
+    console.error(`Tmux window not found for ${serverDir} (state kept).`);
+  }
+  // Session memory intentionally kept.
+  projectState.writeProjectState(sf, { status: 'stopped' });
+  console.error('Done (state file kept).');
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: resurrect — recreate a project window from its state
+// ---------------------------------------------------------------------------
+
+async function cmdResurrect(targetDir) {
+  const sf = findParentStatefile(targetDir);
+  if (!sf) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    process.exit(1);
+  }
+  const state = projectState.readProjectState(sf);
+  const server = state.server;
+  if (!server) {
+    console.error(`Error: ${sf} does not record a server.`);
+    process.exit(1);
+  }
+  const dir = state.directory;
+
+  const winIdx = windowByDir(dir);
+  if (winIdx != null) {
+    console.error(`Project window for ${dir} already exists.`);
+    return;
+  }
+
+  const alive = await checkServer(server);
+  if (!alive) {
+    console.error(`Error: OpenCode server not reachable at ${server}.`);
+    process.exit(1);
+  }
+  console.error(`Recreating project window for ${dir}...`);
+  createProjectWindow(dir, server, state.session);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: migrate — rewrite legacy .ocmux.json files to v2
+// ---------------------------------------------------------------------------
+
+function cmdMigrate() {
+  const rows = listProjects();
+  let migrated = 0;
+  for (const row of rows) {
+    const sf = statefileFor(row.dir);
+    const state = projectState.readProjectState(sf);
+    if (!state) continue;
+    if (state.version >= 2) continue;
+    projectState.writeProjectState(sf, {
+      directory: row.dir,
+      server: state.server,
+      session: state.session,
+    });
+    migrated++;
+    console.error(`Migrated ${sf}`);
+  }
+  if (migrated === 0) console.error('No legacy state files found.');
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: model — switch the model of the selected session
+// ---------------------------------------------------------------------------
+
+async function cmdModel(modelRef) {
+  const sf = findParentStatefile(process.cwd());
+  if (!sf) {
+    console.error(`Error: no opencode server found in ${process.cwd()} or any of its parents.`);
+    console.error(`Run 'ocmux serve' to create a project window.`);
+    process.exit(1);
+  }
+  const state = projectState.readProjectState(sf);
+  const server = state.server;
+  if (!server) {
+    console.error(`Error: ${sf} does not record a server.`);
+    process.exit(1);
+  }
+  const dir = state.directory;
+
+  // Fail fast before any HTTP: interactive picker requires a TTY.
+  if (!modelRef && !process.stdin.isTTY) {
+    console.error('Error: "model" with no argument is interactive and requires a TTY.');
+    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
+    process.exit(1);
+  }
+
+  const sessions = await listSessions(server, dir).catch((err) => {
+    console.error(`Error connecting to ${server}: ${err.message}`);
+    process.exit(1);
+  });
+  const sessionId = state.session && sessions.some(s => String(s.id) === String(state.session))
+    ? state.session
+    : newestSessionId(sessions);
+  if (!sessionId) {
+    console.error(`Error: no sessions found in ${dir}.`);
+    console.error('Open a session in the TUI first, or send a prompt with agentp.');
+    process.exit(1);
+  }
+
+  const models = await listModels(server).catch((err) => {
+    console.error(`Error listing models: ${err.message}`);
+    process.exit(1);
+  });
+  if (models.length === 0) {
+    console.error('Error: no models available from this server.');
+    process.exit(1);
+  }
+
+  let pick = null;
+  if (modelRef) {
+    const { model, matches, error } = resolveModelRef(models, modelRef);
+    if (model) {
+      pick = model;
+    } else if (matches.length > 1 && process.stdin.isTTY) {
+      console.error(`Multiple models match "${modelRef}", select one:`);
+      pick = await modelMenu(matches);
+    } else {
+      console.error(`Error: ${error}`);
+      process.exit(1);
+    }
+  } else if (process.stdin.isTTY) {
+    pick = await modelMenu(models);
+  }
+
+  if (!pick) {
+    console.error('Cancelled.');
+    return;
+  }
+
+  await switchModel(server, sessionId, pick).catch((err) => {
+    console.error(`Error switching model: ${err.message}`);
+    process.exit(1);
+  });
+  const label = pick.label + (pick.variant ? `#${pick.variant}` : '');
+  console.error(`Switched session ${sessionId} to ${label}.`);
+}
+
+// ---------------------------------------------------------------------------
+// modelMenu — interactive model picker (unchanged from previous versions)
+// ---------------------------------------------------------------------------
+
 function modelMenu(rows) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY || rows.length === 0) return resolve(null);
 
-    // Display name when it differs from the canonical label (e.g. "Kimi K2 (opencode/kimi-k2)").
     const display = (r) => (r.name && r.name !== r.label ? `${r.name} (${r.label})` : r.label);
     const maxLen = Math.max(
       ...rows.map(r => display(r).length),
@@ -460,289 +917,71 @@ function modelMenu(rows) {
   });
 }
 
-async function cmdModel(modelRef, longMode) {
-  const sf = findParentStatefile(process.cwd());
-  if (!sf) {
-    console.error(`Error: no opencode server found in ${process.cwd()} or any of its parents.`);
-    console.error("Run 'ocmux serve' to create a new server.");
-    process.exit(1);
-  }
-  const state = readState(sf);
-  if (!state || !state.url) {
-    console.error(`Error: invalid state file ${sf}`);
-    process.exit(1);
-  }
+// ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
 
-  // Fail fast before any HTTP: interactive picker requires a TTY.
-  if (!modelRef && !process.stdin.isTTY) {
-    console.error('Error: "model" with no argument is interactive and requires a TTY.');
-    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
-    process.exit(1);
-  }
-
-  const sessions = await listSessions(state.url).catch((err) => {
-    console.error(`Error connecting to ${state.url}: ${err.message}`);
-    process.exit(1);
-  });
-  const sessionId = newestSessionId(sessions);
-  if (!sessionId) {
-    console.error(`Error: no sessions found on ${state.url} (${path.dirname(sf)}).`);
-    console.error('Open a session in the TUI first, or send a prompt with agentp.');
-    process.exit(1);
-  }
-
-  const models = await listModels(state.url).catch((err) => {
-    console.error(`Error listing models: ${err.message}`);
-    process.exit(1);
-  });
-  if (models.length === 0) {
-    console.error('Error: no models available from this server.');
-    process.exit(1);
-  }
-
-  let pick = null;
-  if (modelRef) {
-    const { model, matches, error } = resolveModelRef(models, modelRef);
-    if (model) {
-      pick = model;
-    } else if (matches.length > 1 && process.stdin.isTTY) {
-      console.error(`Multiple models match "${modelRef}", select one:`);
-      pick = await modelMenu(matches);
-    } else {
-      console.error(`Error: ${error}`);
-      process.exit(1);
-    }
-  } else if (process.stdin.isTTY) {
-    pick = await modelMenu(models);
-  } else {
-    // Unreachable (guarded above) — kept for safety.
-    console.error('Error: "model" with no argument is interactive and requires a TTY.');
-    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
-    process.exit(1);
-  }
-
-  if (!pick) {
-    console.error('Cancelled.');
-    return;
-  }
-
-  await switchModel(state.url, sessionId, pick).catch((err) => {
-    console.error(`Error switching model: ${err.message}`);
-    process.exit(1);
-  });
-  const label = pick.label + (pick.variant ? `#${pick.variant}` : '');
-  console.error(`Switched session ${sessionId} to ${label}.`);
-  // Print the URL on stdout so `agentp $(ocmux model <ref>)` composes: the
-  // switch (side effect) takes effect before agentp proceeds with the prompt.
-  outputUrl(state.url, path.dirname(sf), longMode);
+function printHelp() {
+  console.error(`Usage: ${SCRIPT} [-l] [<subcommand>] [<directory>]`);
+  console.error('');
+  console.error('Manage project OpenCode TUI windows in tmux. The OpenCode server');
+  console.error('itself is user-managed: start it once with `opencode serve`.');
+  console.error('');
+  console.error('Without arguments, searches upward from <directory> (default: $PWD)');
+  console.error('for .ocmux.json and opens an interactive SESSION picker for that');
+  console.error('project (requires a TTY). Selecting updates .ocmux.json and relaunches');
+  console.error('the project TUI on the chosen session. Silent on success.');
+  console.error('');
+  console.error('Subcommands:');
+  console.error('  serve     Create a TUI window for <directory> (default: $PWD).');
+  console.error('            --server <url>  Server to record (default: $OCMUX_SERVER or http://localhost:4096).');
+  console.error('            --git / --GIT   Use the nearest parent with a .git entry / directory.');
+  console.error('            Aliased as "new" for backwards compatibility.');
+  console.error('  switch    Interactive PROJECT picker: focus other project TUI windows.');
+  console.error('            Read-only: never modifies .ocmux.json. Requires a TTY.');
+  console.error('  session <id|title>');
+  console.error('            Non-interactive session switch for the current project.');
+  console.error('  list [-l] List project windows (with -l, their server URL).');
+  console.error('  model [ref]');
+  console.error('            Switch the model of the selected session (interactive picker without ref).');
+  console.error('  kill      Close the current project window. KEEPS .ocmux.json (session memory).');
+  console.error('  resurrect Recreate the project window from its .ocmux.json.');
+  console.error('  migrate   Rewrite legacy .ocmux.json files to the v2 schema.');
+  console.error('');
+  console.error('Options:');
+  console.error('  -l          Long output (list: also show server URL).');
+  console.error('  --version   Show version');
+  console.error('  -h          Show this help');
+  console.error('');
+  console.error('See also: agentp -- pipe prompts into OpenCode from stdin');
+  console.error('          tgagentp -- Telegram bridge for OpenCode (tgagentp --help)');
+  process.exit(0);
 }
 
 // ---------------------------------------------------------------------------
-// Subcommand: list
-// ---------------------------------------------------------------------------
-
-function cmdList() {
-  const rows = listServers();
-  if (rows.length === 0) {
-    console.log('No opencode servers running.');
-    return;
-  }
-
-  const urlW = Math.max(...rows.map(r => r.url.length), 3);
-  const dirW = Math.max(...rows.map(r => r.dir.length), 9);
-  const stsW = Math.max(...rows.map(r => r.status.length), 6);
-
-  const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
-
-  console.log(`${pad('URL', urlW)}  ${pad('Directory', dirW)}  ${pad('Status', stsW)}`);
-  for (const row of rows) {
-    console.log(`${pad(row.url, urlW)}  ${pad(row.dir, dirW)}  ${pad(row.status, stsW)}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: new
-// ---------------------------------------------------------------------------
-
-function cmdNew(targetDir, longMode, printLogs) {
-  const sf = path.join(targetDir, '.ocmux.json');
-  if (fs.existsSync(sf)) {
-    console.error(`Error: a server already exists in ${targetDir}.`);
-    console.error("Run 'ocmux' without arguments to switch to it, or 'ocmux kill' to stop it first.");
-    process.exit(1);
-  }
-
-  const parent = findParentStatefile(path.dirname(targetDir));
-  if (parent) {
-    const parentDir = path.dirname(parent);
-    console.error(`Warning: there is already an opencode server in ${parentDir}.`);
-    console.error("Running 'ocmux' without arguments would switch to that server.");
-
-    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-    rl.question('Are you sure you want to create a new server here? [y/N] ', (answer) => {
-      rl.close();
-      if (!/^[yY]([eE][sS])?$/.test(answer.trim())) {
-        console.error('Cancelled.');
-        process.exit(0);
-      }
-      doNew(targetDir, longMode, printLogs);
-    });
-  } else {
-    doNew(targetDir, longMode, printLogs);
-  }
-}
-
-function doNew(targetDir, longMode, printLogs) {
-  // Normalize to real path so tmux window names are consistent regardless of symlinks
-  try { targetDir = fs.realpathSync(targetDir); } catch {}
-  ensureSession();
-  const lf = logfileFor(targetDir);
-
-  console.error(`Starting opencode server for ${targetDir}...`);
-
-  // Create window with interactive shell so .bashrc/.zshrc is sourced
-  const rc = tmux(['new-window', '-d', '-t', SESSION, '-n', targetDir, '-c', targetDir]);
-  if (rc.status !== 0) {
-    console.error(`Error: failed to create tmux window: ${rc.stderr}`);
-    process.exit(1);
-  }
-
-  const winIdx = windowByDir(targetDir);
-  if (winIdx == null) {
-    console.error('Error: window was not created properly');
-    process.exit(1);
-  }
-
-  pinWindowName(winIdx);
-
-  // Truncate log file so stale URL from previous run can't be matched by polling
-  try { fs.truncateSync(lf); } catch { /* may not exist yet */ }
-
-  // Send the command to the interactive shell (like typing it manually)
-  const serveFlags = printLogs ? '--print-logs' : '';
-  tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`,
-    `opencode serve ${serveFlags} 2>&1 | tee '${lf}'`, 'Enter']);
-
-  // Wait up to 10s for the URL in the logfile.
-  // Don't break on first match — keep polling so url ends up holding the
-  // final URL in case the server prints multiple URLs during startup.
-  let url = null;
-  for (let i = 0; i < 50; i++) {
-    sleep(0.2);
-    const log = (() => { try { return fs.readFileSync(lf, 'utf8'); } catch { return ''; } })();
-    const m = log.match(URL_RE);
-    if (m) url = m[1];
-  }
-
-  if (!url) {
-    console.error('Error: opencode server did not start within 10 seconds');
-    const wi = windowByDir(targetDir);
-    if (wi != null) tmux(['kill-window', '-t', `${SESSION}:${wi}`]);
-    process.exit(1);
-  }
-
-  const state = { url, logfile: lf, window_index: winIdx };
-  fs.writeFileSync(path.join(targetDir, '.ocmux.json'), JSON.stringify(state) + '\n');
-
-  const splitResult = tmux(['split-window', '-v', '-P', '-F', '#{pane_id}', '-t', `${SESSION}:${winIdx}`, '-c', targetDir]);
-  const tuiPane = splitResult.stdout.trim();
-  sleep(0.2);
-  tmux(['send-keys', '-t', tuiPane,
-    tuiAttachCommand(url), 'Enter']);
-  sleep(0.5);
-  if (tuiPane) tmux(['resize-pane', '-Z', '-t', tuiPane]);
-
-  const activeWin = activeWindowIndex();
-  if (activeWin !== winIdx) {
-    tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
-  }
-
-  outputUrl(url, targetDir, longMode);
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: kill
-// ---------------------------------------------------------------------------
-
-function cmdKill(statefile) {
-  const serverDir = path.dirname(statefile);
-  const state = readState(statefile);
-
-  if (!state || !state.url || state.window_index == null) {
-    console.error(`Error: invalid state file ${statefile}`);
-    process.exit(1);
-  }
-
-  console.error(`Stopping server and removing window for ${serverDir}...`);
-
-  const sessionR = tmux(['has-session', '-t', SESSION]);
-  if (sessionR.status === 0) {
-    // Match the window by its NAME (the project directory path), never by the
-    // stale `window_index` from the state file. tmux reuses window indices as
-    // windows are created/destroyed, so a stale index may now point at a
-    // different (later) server. Only kill the window that actually belongs to
-    // this .ocmux.json; otherwise just clean up the state file.
-    const winIdx = windowByDir(serverDir);
-    if (winIdx != null) {
-      tmux(['select-window', '-t', `${SESSION}:${winIdx}`]);
-      tmux(['send-keys', '-t', `${SESSION}:${winIdx}.0`, 'C-c']);
-      sleep(0.3);
-      tmux(['kill-window', '-t', `${SESSION}:${winIdx}`]);
-      console.error('Window removed.');
-    } else {
-      console.error(`Tmux window not found for ${serverDir} (cleaning up state file).`);
-    }
-  } else {
-    console.error("No tmux session '" + SESSION + "' found (cleaning up state file).");
-  }
-
-  fs.unlinkSync(statefile);
-  console.error('Done.');
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: resurrect — kill dead server and create a fresh one
-// ---------------------------------------------------------------------------
-
-function cmdResurrect(targetDir, longMode, printLogs) {
-  const sf = findParentStatefile(targetDir);
-  if (!sf) {
-    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
-    console.error("Run 'ocmux serve' to create a new server.");
-    process.exit(1);
-  }
-
-  const serverDir = path.dirname(sf);
-  console.error(`Resurrecting server for ${serverDir}...`);
-
-  try {
-    const { url } = resurrectServer(serverDir, printLogs);
-    outputUrl(url, serverDir, longMode);
-  } catch (err) {
-    console.error(`Error: ${err.message}`);
-    process.exit(1);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Argument parsing
+// Argument parsing + dispatch
 // ---------------------------------------------------------------------------
 
 function main() {
   let longMode = false;
   let gitMode = null;
-  let printLogs = false;
-  let lastMode = false;
+  let serverArg = null;
   const positional = [];
   let dirIsForced = false;
 
-  for (const arg of process.argv.slice(2)) {
+  const parsedArgs = process.argv.slice(2);
+  for (let i = 0; i < parsedArgs.length; i++) {
+    const arg = parsedArgs[i];
     if (arg === '-l') {
       longMode = true;
-    } else if (arg === '--last') {
-      lastMode = true;
-    } else if (arg === '--print-logs') {
-      printLogs = true;
+    } else if (arg === '--server') {
+      const val = parsedArgs[i + 1];
+      if (!val || val.startsWith('-')) {
+        console.error("Error: '--server' requires a URL argument.");
+        process.exit(1);
+      }
+      serverArg = val;
+      i++;
     } else if (arg === '--git') {
       if (gitMode && gitMode !== 'nearest') {
         console.error("Error: cannot combine '--git' with '--GIT'.");
@@ -763,22 +1002,19 @@ function main() {
     } else if (arg === '--') {
       dirIsForced = true;
     } else if (arg.startsWith('-')) {
-      if (arg === '--new') {
-        console.error("Error: '--new' is no longer a flag. Use 'ocmux serve' instead.");
-      } else if (arg === '--kill') {
-        console.error("Error: '--kill' is no longer a flag. Use 'ocmux kill' instead.");
-      } else {
-        console.error(`Error: unknown option '${arg}'`);
-        console.error(`Run '${SCRIPT} -h' for help.`);
-      }
+      console.error(`Error: unknown option '${arg}'`);
+      console.error(`Run '${SCRIPT} -h' for help.`);
       process.exit(1);
     } else {
       positional.push(arg);
     }
   }
 
+  // Handle --server <url> (inline-consumed in the loop above; nothing here).
+
   let subcommand = null;
   let targetDir = null;
+  let directRef = null;
   let modelRef = null;
 
   for (const arg of positional) {
@@ -789,15 +1025,18 @@ function main() {
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list' || arg === 'resurrect' || arg === 'switch' || arg === 'model') {
+    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list'
+      || arg === 'resurrect' || arg === 'switch' || arg === 'model' || arg === 'session'
+      || arg === 'migrate') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
       }
       subcommand = arg;
     } else if (subcommand === 'model' && modelRef === null) {
-      // model reference (supports partial matches) — not a directory
       modelRef = arg;
+    } else if (subcommand === 'session' && directRef === null) {
+      directRef = arg;
     } else {
       if (targetDir) {
         console.error(`Error: unexpected argument '${arg}'`);
@@ -809,56 +1048,25 @@ function main() {
 
   if (!targetDir) targetDir = process.cwd();
 
-  // Dispatch
-  if (lastMode) {
-    if (gitMode) {
-      console.error("Error: '--last' cannot be combined with '--git' or '--GIT'.");
-      process.exit(1);
-    }
-    if (printLogs) {
-      console.error("Error: '--last' cannot be combined with '--print-logs'.");
-      process.exit(1);
-    }
-    if (subcommand) {
-      console.error(`Error: '--last' cannot be combined with subcommand '${subcommand}'.`);
-      process.exit(1);
-    }
-    if (targetDir !== process.cwd()) {
-      console.error("Error: '--last' does not accept a directory path.");
-      process.exit(1);
-    }
-    ensureSession();
-    const url = getActiveServer();
-    if (!url) {
-      console.error('Error: no active opencode server found in tmux.');
-      console.error("Run 'ocmux serve' to create a server, or switch to an existing one.");
-      process.exit(1);
-    }
-    outputUrl(url, null, longMode);
-    return;
-  }
+  // Dispatch. Each branch may throw synchronously (EXIT) for validation errors
+  // or return a promise for async commands; main() returns the settled promise
+  // so tests can await it.
+  let p = Promise.resolve();
 
   if (subcommand === 'list') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
-    if (printLogs) {
-      console.error("Error: '--print-logs' is only valid with 'serve'.");
-      process.exit(1);
-    }
     if (targetDir !== process.cwd()) {
       console.error("Error: 'list' does not accept a directory path.");
       process.exit(1);
     }
-    cmdList();
+    ensureSession();
+    cmdList(longMode);
   } else if (subcommand === 'switch') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
-      process.exit(1);
-    }
-    if (printLogs) {
-      console.error("Error: '--print-logs' is only valid with 'serve'.");
       process.exit(1);
     }
     if (targetDir !== process.cwd()) {
@@ -866,91 +1074,59 @@ function main() {
       process.exit(1);
     }
     ensureSession();
-    cmdSwitchMenu(longMode);
+    p = switchMenu(listProjects(), longMode);
+  } else if (subcommand === 'session') {
+    if (gitMode) {
+      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+      process.exit(1);
+    }
+    p = cmdSessionSwitch(targetDir, directRef);
   } else if (subcommand === 'model') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
-    if (printLogs) {
-      console.error("Error: '--print-logs' is only valid with 'serve'.");
-      process.exit(1);
-    }
-    if (targetDir !== process.cwd()) {
-      console.error("Error: 'model' does not accept a directory path.");
-      process.exit(1);
-    }
-    // cmdModel is async; swallow the (test-mocked) process.exit throw.
-    cmdModel(modelRef, longMode).catch((err) => {
-      if (!err || !err.message || !err.message.startsWith('EXIT:')) {
-        console.error(err ? err.message : String(err));
-        process.exit(1);
-      }
-    });
+    p = cmdModel(modelRef);
   } else if (subcommand === 'kill') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
-    if (printLogs) {
-      console.error("Error: '--print-logs' is only valid with 'serve'.");
-      process.exit(1);
-    }
-    const sf = findParentStatefile(targetDir);
-    if (!sf) {
-      console.error(`Error: no opencode server found in ${targetDir} or any of its parents.`);
-      console.error("Run 'ocmux serve' to create a new server.");
-      process.exit(1);
-    }
-    cmdKill(sf);
+    cmdKill(targetDir);
   } else if (subcommand === 'resurrect') {
-    if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
+    p = cmdResurrect(targetDir);
+  } else if (subcommand === 'migrate') {
+    if (targetDir !== process.cwd()) {
+      console.error("Error: 'migrate' does not accept a directory path.");
       process.exit(1);
     }
-    cmdResurrect(targetDir, longMode, printLogs);
+    cmdMigrate();
   } else if (subcommand === 'serve' || subcommand === 'new') {
     if (gitMode) {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
       targetDir = resolveGitDir(targetDir, gitMode === 'root', flagLabel);
     }
-    cmdNew(targetDir, longMode, printLogs);
+    p = cmdServeNew(targetDir, serverArg);
   } else {
+    // Default: session switcher for the current project.
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
-    if (printLogs) {
-      console.error("Error: '--print-logs' is only valid with 'serve'.");
-      process.exit(1);
-    }
-    // Default mode — find an existing server and switch to it
-    let sf = findParentStatefile(targetDir);
-    if (!sf) {
-      console.log(`Error: no opencode server found in ${targetDir} or any of its parents.`);
-      console.error("Run 'ocmux serve' to create a new server.");
-      process.exit(1);
-    }
-
-    // Skip stale state files whose tmux window no longer exists,
-    // and search from the parent directory instead.
-    const state = readState(sf);
-    if (state && state.window_index != null) {
-      const serverDir = path.dirname(sf);
-      const actualName = windowNameByIndex(state.window_index);
-      if (actualName !== serverDir && windowByDir(serverDir) == null) {
-        const parentSf = findParentStatefile(path.dirname(serverDir));
-        if (parentSf) sf = parentSf;
-      }
-    }
-
-    ensureSession();
-    cmdSwitch(sf, longMode);
+    p = cmdSessionSwitch(targetDir, null);
   }
+
+  return p.catch((err) => {
+    // Already exiting (a command called process.exit — the test stub throws
+    // EXIT:code). Swallow so the chain settles cleanly.
+    if (err && err.message && err.message.startsWith('EXIT:')) return;
+    console.error(err ? err.message : String(err));
+    process.exit(1);
+  });
 }
 
 if (require.main === module) {
   main();
 }
 
-module.exports = { main };
+module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate };
