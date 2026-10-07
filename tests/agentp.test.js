@@ -203,6 +203,10 @@ function setupOpencodeMocks() {
     mockCfg._selectSessionCalled = { server, sessionId };
     return mockCfg.selectResult;
   });
+  nodeMock.method(opencode, 'interruptSession', async (server, sessionId) => {
+    mockCfg._interruptCalled = { server, sessionId };
+    return mockCfg.interruptResult !== undefined ? mockCfg.interruptResult : true;
+  });
 }
 
 function tearDownOpencodeMocks() {
@@ -715,6 +719,29 @@ describe('agentp CLI', () => {
       assert.ok(out.includes('💬 My Task [s1]'));
     });
 
+    it('cancels a ticket when cancelled:true, interrupts the session, and discards it', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_cancel_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'partial answer');
+      fs.writeFileSync(tmp + '.followups', JSON.stringify(['ignored']));
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42","cancelled":true}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._interruptCalled, { server: 'http://localhost:9999', sessionId: 's42' });
+      assert.ok(stdout.join('').includes('Prompt cancelled'));
+      assert.ok(!fs.existsSync(tmp));
+      assert.ok(!fs.existsSync(tmp + '.followups'));
+    });
+
+    it('new tickets include cancelled:false', async () => {
+      setArgv(['--defer']);
+      provideStdin('hello\n');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(t.cancelled, false);
+    });
+
     it('queues follow-up text before applying the ticket defer wait', async () => {
       const tmp = path.join(os.tmpdir(), `agentp_test_followup_wait_${Date.now()}.tmp`);
       fs.writeFileSync(tmp, '');
@@ -841,13 +868,14 @@ describe('agentp CLI', () => {
         defer: 5,
         server: null,
         sessionId: null,
+        cancelled: false,
       });
     });
 
     it('trims surrounding whitespace and newlines', () => {
       const { parseDeferredTicket } = require('../bin/agentp');
       const t = parseDeferredTicket('\n  agentp_ticket {"path":"/tmp/x.tmp"}  \n');
-      assert.deepStrictEqual(t, { ctime: null, path: '/tmp/x.tmp', defer: 0, server: null, sessionId: null });
+      assert.deepStrictEqual(t, { ctime: null, path: '/tmp/x.tmp', defer: 0, server: null, sessionId: null, cancelled: false });
     });
 
     it('defaults defer to 0 when absent', () => {
@@ -872,14 +900,14 @@ describe('agentp CLI', () => {
       const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 });
       assert.ok(s.includes('\n'), 'expected pretty-printed multi-line JSON');
       const data = JSON.parse(s.slice('agentp_ticket '.length));
-      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 });
+      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5, cancelled: false });
     });
 
     it('includes elapsed on re-print', () => {
       const { formatTicket } = require('../bin/agentp');
       const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 0 }, 42);
       const data = JSON.parse(s.slice('agentp_ticket '.length));
-      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', elapsed: 42 });
+      assert.deepStrictEqual(data, { ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', elapsed: 42, cancelled: false });
     });
 
     it('omits defer when 0', () => {
@@ -891,7 +919,7 @@ describe('agentp CLI', () => {
     it('prints a compact single-line ticket with compact=true', () => {
       const { formatTicket } = require('../bin/agentp');
       const s = formatTicket({ ctime: '2026-08-03T14:30:00.000Z', path: '/tmp/x.tmp', defer: 5 }, undefined, true);
-      assert.strictEqual(s, 'agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/x.tmp","defer":5}');
+      assert.strictEqual(s, 'agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/x.tmp","defer":5,"cancelled":false}');
     });
 
     it('parses a pretty-printed multi-line ticket', () => {
@@ -903,6 +931,7 @@ describe('agentp CLI', () => {
         defer: 5,
         server: null,
         sessionId: null,
+        cancelled: false,
       });
     });
 
@@ -915,6 +944,7 @@ describe('agentp CLI', () => {
         defer: 0,
         server: 'http://localhost:4096',
         sessionId: 's1',
+        cancelled: false,
         followupText: 'Add this detail.',
       });
     });

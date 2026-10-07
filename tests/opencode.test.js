@@ -718,6 +718,30 @@ describe('deleteSession (v2)', { concurrency: false }, () => {
   });
 });
 
+describe('interruptSession (v2)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('POSTs /api/session/:id/interrupt and returns the interrupted flag', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { interrupted: true } }) });
+    const r = await opencode.interruptSession('http://localhost:4096', 's1');
+    assert.strictEqual(r, true);
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session/s1/interrupt');
+    assert.strictEqual(ctrl.lastReq().opts.method, 'POST');
+  });
+
+  it('returns false when the session is already idle', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { interrupted: false } }) });
+    assert.strictEqual(await opencode.interruptSession('http://localhost:4096', 's1'), false);
+  });
+
+  it('returns false on network error (best-effort)', async () => {
+    ctrl.reset({ netError: new Error('ECONNREFUSED') });
+    assert.strictEqual(await opencode.interruptSession('http://localhost:4096', 's1'), false);
+  });
+});
+
 describe('createSessionWithModel (v2)', { concurrency: false }, () => {
   let ctrl;
   before(() => { ctrl = setupMock({}); });

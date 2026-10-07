@@ -183,6 +183,7 @@ The ticket is `agentp_ticket` followed by a JSON object with these fields:
 - `sessionId` — OpenCode session ID used by the deferred job.
 - `elapsed` — seconds since `ctime`, included only when the ticket is re-printed (not on first print).
 - `defer` — the timeout requested at submission, included only when it was > 0.
+- `cancelled` — always present (defaults to `false`). Set it to `true` and pipe the ticket back to cancel the running job (see below).
 
 Tickets are printed as pretty-printed (multi-line) JSON for easier reading and
 editing; pass `--onlineTicket` to print them on a single line instead:
@@ -226,6 +227,27 @@ the ticket's own `defer` value as the timeout (default `0`):
 
 - If the answer is ready, it is returned and the temp file is removed.
 - If not, the ticket is re-printed with the elapsed time updated.
+
+Cancel a running deferred job by flipping `cancelled` to `true` and piping the
+ticket back (the equivalent of pressing `ESC` in the TUI window):
+
+```bash
+cat <<'EOF' | agentp --defer
+agentp_ticket {
+  "ctime": "2026-08-03T14:30:00.000Z",
+  "path": "/tmp/agentp_deferred_...tmp",
+  "server": "http://localhost:4096",
+  "sessionId": "ses_abc123",
+  "cancelled": true
+}
+EOF
+# 🚫 Prompt cancelled.
+```
+
+`agentp` interrupts the session's execution (`POST /api/session/:id/interrupt`),
+discards the ticket and its queued follow-ups, and prints
+`🚫 Prompt cancelled` (with `(or already finished)` when there was nothing left
+to interrupt).
 
 Works as a Vim/Neovim filter with deferred execution:
 

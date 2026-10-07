@@ -17,6 +17,7 @@ const {
   getSession,
   selectSession,
   sortSessionsByRecency,
+  interruptSession,
 } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 const ocmuxLib = require('../lib/ocmux');
@@ -173,6 +174,7 @@ function parseDeferredTicketInput(text) {
     defer: typeof data.defer === 'number' && data.defer > 0 ? data.defer : 0,
     server: typeof data.server === 'string' ? data.server : null,
     sessionId: typeof data.sessionId === 'string' ? data.sessionId : null,
+    cancelled: data.cancelled === true,
     followupText,
   };
 }
@@ -193,7 +195,23 @@ function formatTicket(ticket, elapsed, compact) {
   if (ticket.sessionId) fields.sessionId = ticket.sessionId;
   if (elapsed !== undefined) fields.elapsed = elapsed;
   if (ticket.defer > 0) fields.defer = ticket.defer;
+  // Always present so it can be flipped to true and piped back to cancel.
+  fields.cancelled = ticket.cancelled === true;
   return 'agentp_ticket ' + (compact ? JSON.stringify(fields) : JSON.stringify(fields, null, 2));
+}
+
+// Cancel a deferred ticket: interrupt the session (ESC-equivalent) and discard
+// the ticket. Prints a message and exits 0.
+async function cancelTicket(ticket) {
+  let interrupted = false;
+  if (ticket.server && ticket.sessionId) {
+    interrupted = await interruptSession(ticket.server, ticket.sessionId);
+  }
+  try { fs.unlinkSync(ticket.path); } catch {}
+  try { fs.unlinkSync(ticket.path + '.lock'); } catch {}
+  removeQueuedFollowups(ticket.path);
+  process.stdout.write(`\n🚫 Prompt cancelled${interrupted ? '' : ' (or already finished)'}.\n`);
+  process.exit(0);
 }
 
 // Print a deferred ticket (with elapsed) and exit — used for the interrupt path.
@@ -453,6 +471,7 @@ function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, q
     defer: deferSeconds || 0,
     server: serverBase,
     sessionId: targetSessionId,
+    cancelled: false,
   };
 
   const childArgs = [
@@ -751,6 +770,10 @@ async function main() {
       // ignored; the ticket's own "defer" timeout is used instead (default 0).
       const deferredPath = ticket.path;
 
+      if (ticket.cancelled) {
+        await cancelTicket(ticket);
+      }
+
       if (!fs.existsSync(deferredPath)) {
         process.stdout.write(`Error: deferred file not found: ${deferredPath}\n`);
         process.exit(1);
@@ -867,6 +890,10 @@ async function main() {
       // Recognize a deferred ticket: wait indefinitely for the answer, and
       // re-print the ticket only if the user interrupts with Ctrl+C.
       const deferredPath = ticket.path;
+
+      if (ticket.cancelled) {
+        await cancelTicket(ticket);
+      }
 
       if (!fs.existsSync(deferredPath)) {
         process.stdout.write(`Error: deferred file not found: ${deferredPath}\n`);
