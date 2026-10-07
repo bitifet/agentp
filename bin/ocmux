@@ -374,7 +374,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -390,10 +390,13 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let spinIdx = 0;
     let spinTimer = null;
+    let broadcastSel = new Set(); // session ids selected in broadcast mode
 
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
-      'Enter / Space    switch to the selected session (stays open)',
+      'Enter            switch to the selected session (stays open)',
+      'Space            start BROADCAST: add the selected session to the current one',
+      '                 (Space toggles each session; Enter keeps the selection)',
       'n                create a new session (type a name, Enter; blank = auto)',
       'r                rename the selected session (edit in place; ESC cancels)',
       'R (Shift+r)      set a REMINDER for the selected session (sent in front of',
@@ -462,30 +465,40 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 6,
         Math.max(8, cols - (showTime ? TIME_W + 10 : 8)),
       );
+      const inBc = mode === 'broadcast';
       const extras = [];
-      if (mode === 'confirm' && confirmDel) {
+      if (!inBc && mode === 'confirm' && confirmDel) {
         extras.push(`Delete session "${confirmDel.title || confirmDel.id || ''}"? (y/N) `);
-      } else if (mode === 'input' && input) {
+      } else if (!inBc && mode === 'input' && input) {
         extras.push(`${input.label} ${renderInputValue(input.value)}`);
       }
       const selected = rows[cursor];
-      const selIsCurrent = !!(selected && String(selected.id) === String(current));
-      const infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
+      let infoLines = [];
+      let footer = 'Enter: switch · Space: broadcast · h: help · q: quit';
+      if (inBc) {
+        const names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
+        infoLines = [`Broadcast to sessions: ${names}`];
+        footer = 'Enter: switch · Space: select/deselect · ESC: cancel · q: quit';
+      } else {
+        const selIsCurrent = !!(selected && String(selected.id) === String(current));
+        infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
+      }
       process.stderr.write(renderList({
         title: 'ocmux — sessions',
         items: rows,
         cursor,
         row: (i, s) => {
+          const sel = inBc ? (broadcastSel.has(String(s.id)) ? '[x] ' : '[ ] ') : '';
           const title = (s.title || s.id || '').slice(0, maxLen);
           const timeStr = showTime ? padLeft(fmtClock(s.time && s.time.viewed), TIME_W) + '  ' : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
           const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
-          const text = `${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
+          const text = `${sel}${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
           // Yellow for the session currently selected in the TUI window.
           return String(s.id) === String(current) ? `\x1b[33m${text}\x1b[0m` : text;
         },
-        footer: 'Enter: switch · h: help · q: quit',
+        footer,
         infoLines,
         extraLines: extras,
       }));
@@ -557,7 +570,31 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       });
     };
 
-    const openList = (title, items, format, onEnter) => {
+    const persistBroadcast = (ids) => {
+  if (onBroadcastChange) onBroadcastChange(ids);
+};
+const startBroadcast = (idx) => {
+  broadcastSel = new Set([String(current), String(rows[idx].id)]);
+  persistBroadcast([...broadcastSel]);
+  mode = 'broadcast';
+  draw();
+};
+const toggleBroadcast = (idx) => {
+  const id = String(rows[idx].id);
+  if (broadcastSel.has(id)) broadcastSel.delete(id);
+  else broadcastSel.add(id);
+  if (broadcastSel.size < 2) {
+    persistBroadcast([]);
+    broadcastSel = new Set();
+    mode = 'normal';
+    draw();
+    return;
+  }
+  persistBroadcast([...broadcastSel]);
+  draw();
+};
+
+const openList = (title, items, format, onEnter) => {
       if (!items || items.length === 0) {
         process.stderr.write(`\nNo ${title.toLowerCase()} available.\n`);
         draw();
@@ -658,6 +695,32 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         }
         return;
       }
+      if (mode === 'broadcast') {
+        if (key.name === 'escape') {
+          persistBroadcast([]);
+          broadcastSel = new Set();
+          mode = 'normal';
+          draw();
+        } else if (key.name === 'q') {
+          persistBroadcast([]);
+          finish(null);
+        } else if (key.name === 'space') {
+          if (cursor < rows.length) toggleBroadcast(cursor);
+        } else if (key.name === 'return' || key.name === 'enter') {
+          if (cursor < rows.length) {
+            mode = 'normal';
+            broadcastSel = new Set(); // selection stays persisted for agentp
+            applyPick(rows[cursor]);
+          }
+        } else if (rows.length > 0 && (key.name === 'up' || str === 'k')) {
+          cursor = (cursor - 1 + rows.length) % rows.length;
+          draw();
+        } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
+          cursor = (cursor + 1) % rows.length;
+          draw();
+        }
+        return;
+      }
       if (key.ctrl && key.name === 'c') return finish(null);
       if (key.name === 'q') return finish(null);
       if (key.name === 'p') return finish('switch-project');
@@ -717,8 +780,15 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
         cursor = (cursor + 1) % rows.length;
         draw();
-      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+      } else if (key.name === 'enter') {
         if (cursor < rows.length) applyPick(rows[cursor]);
+      } else if (key.name === 'space') {
+        // Start broadcast only when adding a DIFFERENT session to the current one.
+        if (cursor < rows.length && String(rows[cursor].id) !== String(current)) {
+          startBroadcast(cursor);
+        } else if (cursor < rows.length) {
+          draw(); // no-op on the already-selected session
+        }
       }
     });
 
@@ -923,6 +993,7 @@ async function cmdSessionSwitch(targetDir, directRef) {
       sessionMenu(sorted, state.session, annotations, server, {
         runningIds,
         modelContext,
+        onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
         onPick: async (row) => {
           if (row.new) {
             const created = await createSessionWithModel(server, row.name || undefined, dir, [lastRef, ...sorted]).catch((err) => {

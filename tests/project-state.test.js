@@ -160,4 +160,17 @@ describe('project-state', { concurrency: false }, () => {
     assert.strictEqual(ps.readAnnotations(sf).ses_old, 'legacy note');
     assert.strictEqual(ps.readAnnotations(sf).ses_new, 'fresh');
   });
+
+  it('broadcast: persists a multi-session list and clears it', (t) => {
+    const root = makeTempProject(t);
+    const sf = path.join(root, '.ocmux.json');
+    fs.writeFileSync(sf, JSON.stringify({ version: 2, directory: root, session: 's1' }));
+    ps.writeProjectState(sf, { broadcast: ['s1', 's2'] });
+    assert.deepStrictEqual(ps.readProjectState(sf).broadcast, ['s1', 's2']);
+    ps.writeProjectState(sf, { broadcast: ['s1'] }); // <2 → cleared
+    assert.strictEqual(ps.readProjectState(sf).broadcast, null);
+    assert.strictEqual(ps.readProjectState(sf).session, 's1'); // untouched
+    // legacy parse: unknown broadcast is null
+    assert.strictEqual(ps.readProjectState(sf).broadcast, null);
+  });
 });

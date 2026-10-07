@@ -18,6 +18,7 @@ const {
   selectSession,
   sortSessionsByRecency,
   interruptSession,
+  getActiveSessions,
 } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 const ocmuxLib = require('../lib/ocmux');
@@ -412,6 +413,87 @@ function outputReadyResult(filePath, result, qaMode, unusedFollowupText, header)
   process.stdout.write(formatDeferredResult(filePath, result, qaMode, unusedFollowupText, header));
   removeQueuedFollowups(filePath);
   process.exit(0);
+}
+
+// ── Broadcast (ocmux "Space" multi-session send) ───────────────────
+
+// One answer section: a heading with the session name and a separator below it.
+function buildBroadcastSection(title, answer) {
+  let s = `\n${title}\n${'━'.repeat(40)}\n`;
+  s += answer;
+  if (!answer.endsWith('\n')) s += '\n';
+  return s;
+}
+
+// Send a prompt to every session in `ids` and collect the answers.
+//   deps.getActiveSessions(server) -> Set of busy session ids
+//   deps.getSession(server, id)    -> session object (title)
+//   deps.sendToSession(server, id, text) -> answer text
+//   deps.readBroadcast()           -> current .ocmux.json broadcast list (null/[] = cancelled)
+// Waits for each session to become idle before sending; stops as soon as the
+// broadcast list disappears (ocmux exited broadcast mode early).
+async function runBroadcastSend(server, ids, prompt, deps) {
+  const { getActiveSessions, getSession, sendToSession, readBroadcast, pollMs = 1000, busyTimeoutMs = 15 * 60 * 1000 } = deps;
+  const initial = new Set(ids.map(String));
+  const results = [];   // { id, title, answer }
+  const missing = [];   // { id, title }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  let cancelledNow = false;
+  for (const id of ids) {
+    if (cancelledNow) {
+      missing.push({ id, title: id });
+      continue;
+    }
+    let title = id;
+    try {
+      const s = await getSession(server, id);
+      title = (s && (s.title || s.id)) || id;
+    } catch {
+      missing.push({ id, title });
+      continue;
+    }
+    // Wait for the session to become idle (skip prompts into a busy session).
+    const deadline = Date.now() + busyTimeoutMs;
+    let busy = true;
+    while (busy && Date.now() < deadline) {
+      let cancelled = false;
+      try { cancelled = !isBroadcastActive(readBroadcast(), initial); } catch { cancelled = false; }
+      if (cancelled) { cancelledNow = true; break; }
+      const active = await getActiveSessions(server);
+      if (!active.has(String(id))) busy = false;
+      else await sleep(pollMs);
+    }
+    if (cancelledNow || busy) {
+      missing.push({ id, title });
+      continue;
+    }
+    try {
+      const answer = await sendToSession(server, id, prompt);
+      results.push({ id, title, answer });
+    } catch {
+      missing.push({ id, title });
+    }
+  }
+  return { results, missing, requested: ids.length };
+}
+
+// A broadcast list is still active while it is an array that contains every
+// session we were asked to reach.
+function isBroadcastActive(broadcast, initial) {
+  return Array.isArray(broadcast)
+    && broadcast.length >= 2
+    && [...initial].every((id) => broadcast.includes(id));
+}
+
+// Assemble the final broadcast output: heading per session + missing note.
+function formatBroadcastResults({ results, missing, requested }) {
+  let out = `🌐 Broadcast to ${requested} sessions\n`;
+  for (const r of results) out += buildBroadcastSection(r.title, r.answer);
+  if (missing.length > 0) {
+    out += `\n⚠️  Prompt not completed in the following sessions: ${missing.map(m => m.title).join(', ')}\n`;
+  }
+  return out;
 }
 
 // Structured header (project path + session id/title) prepended to --qa output,
@@ -993,34 +1075,52 @@ async function main() {
   // Wrap main processing in try-catch for deferChildMode to write errors to output file
   let tgError = null;
   async function runMain() {
-    const sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession, {
-      directory: projectDir,
-      preferredSession,
-    });
+    // Broadcast mode: ocmux's Space key selected multiple sessions in
+    // .ocmux.json — send the prompt to all of them.
+    const broadcastIds = (ctx && ctx.state && Array.isArray(ctx.state.broadcast) && ctx.state.broadcast.length >= 2)
+      ? ctx.state.broadcast
+      : null;
 
-    // v2: focus the target project's TUI window so the user sees the prompt
-    // stream, and prepend the session's annotation (if any) to the prompt.
-    let prompt = actualPromptText;
-    try {
-      if (ctx && ctx.statefile) {
-        const ann = projectState.readAnnotations(ctx.statefile)[sessionId];
-        if (ann) prompt = ann + '\n\n' + actualPromptText;
-      }
-      if (projectDir) ocmuxLib.focusWindowByDir(projectDir);
-    } catch {
-      // tmux focus is best-effort; never fail the prompt because of it
-    }
-
+    let sessionId = null;
     let answer;
-    try {
-      answer = await sendToSession(serverBase, sessionId, prompt);
-    } catch (err) {
-      throw new Error(`Error sending prompt: ${err.message}`);
+    if (broadcastIds) {
+      try { if (projectDir) ocmuxLib.focusWindowByDir(projectDir); } catch {}
+      const bres = await runBroadcastSend(serverBase, broadcastIds, actualPromptText, {
+        getActiveSessions,
+        getSession,
+        sendToSession,
+        readBroadcast: () => (ctx && ctx.statefile ? projectState.readProjectState(ctx.statefile).broadcast : null),
+      });
+      answer = formatBroadcastResults(bres);
+    } else {
+      sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession, {
+        directory: projectDir,
+        preferredSession,
+      });
+
+      // v2: focus the target project's TUI window so the user sees the prompt
+      // stream, and prepend the session's annotation (if any) to the prompt.
+      let prompt = actualPromptText;
+      try {
+        if (ctx && ctx.statefile) {
+          const ann = projectState.readAnnotations(ctx.statefile)[sessionId];
+          if (ann) prompt = ann + '\n\n' + actualPromptText;
+        }
+        if (projectDir) ocmuxLib.focusWindowByDir(projectDir);
+      } catch {
+        // tmux focus is best-effort; never fail the prompt because of it
+      }
+
+      try {
+        answer = await sendToSession(serverBase, sessionId, prompt);
+      } catch (err) {
+        throw new Error(`Error sending prompt: ${err.message}`);
+      }
     }
 
     // Build the message to send to Telegram (QA pair with rulers)
     let tgMessage = answer;
-    if (qaMode) {
+    if (qaMode && !broadcastIds) {
       let header = '';
       try { header = await buildSessionHeader(serverBase, sessionId); } catch {}
       tgMessage = header + HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
@@ -1105,4 +1205,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult, waitForDeferredResultForever };
+module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult, waitForDeferredResultForever, runBroadcastSend, buildBroadcastSection, formatBroadcastResults, isBroadcastActive };

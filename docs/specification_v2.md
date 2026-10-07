@@ -80,6 +80,7 @@ Placed at the **project root** (found by upward search, git-like).
 | `session` | yes (written) | OpenCode session ID to target. May be absent until first `ocmux serve`/`agentp` run. |
 | `server` | no | Cached shared-server URL. **Not authoritative** — the global server state wins. Kept for self-containment/offline diagnostics. |
 | `annotations` | no | Map `sessionID → reminder text` (the picker's `R` key). Prepended by `agentp` to every prompt for that session. |
+| `broadcast` | no | Multi-session target (the picker's `Space` key): array of session IDs. When ≥2, `agentp` sends the prompt to all of them (waiting for idle). |
 
 **Legacy tolerance (read):** old files `{url, logfile, window_index}` must still
 parse. On read:
@@ -166,6 +167,15 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
      input, blank = auto-title); `r` renames; `R` (Shift+r) sets a reminder;
      `d` deletes (y/N); `a` switches agent; `m` switches model; `p` opens the
      project switcher; `h` toggles help; `q`/`Ctrl+C` quits
+   - **Broadcast (`Space`)**: only `Enter` switches. `Space` over a *different*
+     session enters broadcast mode: `Space` toggles each session (selection
+     persists to `.ocmux.json` `broadcast`; back to normal when <2 remain),
+     `Enter` keeps the selection and switches to the cursor session, `ESC`/`q`
+     cancels. The footer shows only `Broadcast to sessions: <names>` while
+     selecting. `agentp` then sends the prompt to **all** selected sessions,
+     waiting for each to become idle first; if the broadcast is cancelled before
+     every session answers, the received responses are printed plus a
+     "not completed in …" note.
    - an **inverted footer** with the key hints, plus info lines about the
      selected session (title, location, and a responsive grid of model, agent,
      status + time in status, tokens, cost, context limit, outcome).

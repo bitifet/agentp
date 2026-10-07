@@ -982,3 +982,57 @@ describe('agentp CLI', () => {
     });
   });
 });
+
+// ───────────────────────────────────────────────────────────────────
+// Broadcast helpers (ocmux Space multi-session send)
+// ───────────────────────────────────────────────────────────────────
+describe('broadcast helpers', () => {
+  const { buildBroadcastSection, formatBroadcastResults, runBroadcastSend, isBroadcastActive } = require('../bin/agentp');
+
+  it('isBroadcastActive requires a matching >=2 list', () => {
+    assert.strictEqual(isBroadcastActive(['s1', 's2'], new Set(['s1', 's2'])), true);
+    assert.strictEqual(isBroadcastActive(['s1'], new Set(['s1', 's2'])), false);
+    assert.strictEqual(isBroadcastActive(null, new Set(['s1', 's2'])), false);
+  });
+
+  it('formats sections with a title heading, separator and missing note', () => {
+    const sec = buildBroadcastSection('Task A', 'one');
+    assert.ok(sec.includes('Task A'));
+    assert.ok(sec.includes('━'.repeat(40)));
+    const out = formatBroadcastResults({
+      results: [{ id: 's1', title: 'Task A', answer: 'one' }],
+      missing: [{ id: 's2', title: 'Task B' }],
+      requested: 2,
+    });
+    assert.ok(out.includes('Broadcast to 2 sessions'));
+    assert.ok(out.includes('Task A'));
+    assert.ok(out.includes('not completed in the following sessions: Task B'));
+  });
+
+  it('sends to all idle sessions and waits for busy ones', async () => {
+    const sent = [];
+    let activeCalls = 0;
+    const res = await runBroadcastSend('http://x', ['s1', 's2'], 'ping', {
+      getSession: async (s, id) => ({ id, title: 'T' + id.slice(1) }),
+      getActiveSessions: async () => { activeCalls++; return activeCalls <= 2 ? new Set(['s2']) : new Set(); },
+      sendToSession: async (s, id, text) => { sent.push(id); return 'ok' + id; },
+      readBroadcast: () => ['s1', 's2'],
+      pollMs: 5,
+    });
+    assert.deepStrictEqual(sent, ['s1', 's2']);
+    assert.strictEqual(res.missing.length, 0);
+    assert.ok(activeCalls >= 3, 'the busy session was polled at least twice');
+  });
+
+  it('stops early with a missing note when the broadcast is cancelled', async () => {
+    const res = await runBroadcastSend('http://x', ['s1', 's2'], 'ping', {
+      getSession: async (s, id) => ({ id, title: 'T' }),
+      getActiveSessions: async () => new Set(),
+      sendToSession: async () => 'a',
+      readBroadcast: () => null, // ocmux exited broadcast mode
+      pollMs: 5,
+    });
+    assert.strictEqual(res.results.length, 0);
+    assert.strictEqual(res.missing.length, 2);
+  });
+});
