@@ -572,9 +572,13 @@ the annotation can be looked up from the ticket's session on the server.
 
 ### 13.2 Completion hardening (annotated)
 
-`listenV2` still resolves after a **silent** grace window (default 5000ms). A
-sub-agent that goes completely silent for longer than that (e.g. a long `bash`
-tool without events) can still truncate an answer. Candidates for the next pass:
+`listenV2` resolves after a **silent** grace window once a terminal signal
+(`session.execution.succeeded|failed`) arrives; ANY stream activity (including
+child-session/sub-agent events) resets it, and `sendToSession` additionally
+verifies the session's idle marker is newer than the send. The default window is
+**15 s** (tunable via `AGENTP_COMPLETION_GRACE_MS`). A sub-agent (or tool) that
+goes completely silent for longer than the window can still truncate an answer.
+Candidates for the next pass:
 - wait on `GET /api/experimental/session/:id/wait` ("Wait for a session agent
   loop to become idle") after the terminal signal;
 - explicit child-session tracking (`parentID`) so sub-agent runs keep the parent
