@@ -13,6 +13,7 @@ const {
   sendToSessionAsync,
   listSessions,
   createSession,
+  createSessionWithModel,
   getSession,
   selectSession,
   sortSessionsByRecency,
@@ -234,7 +235,7 @@ async function resolveTargetSession(serverBase, sessionName, newSession, opts = 
       if (partial.length > 1) throw new Error(`Error: multiple sessions match "${sessionName}"`);
       if (!newSession) throw new Error(`Error: no session found matching "${sessionName}"`);
       try {
-        const session = await createSession(serverBase, sessionName, directory);
+        const session = await createSessionWithModel(serverBase, sessionName, directory, sessions);
         await selectSession(serverBase, session.id);
         return session.id;
       } catch (err) {
@@ -255,7 +256,7 @@ async function resolveTargetSession(serverBase, sessionName, newSession, opts = 
   }
 
   try {
-    const session = await createSession(serverBase, 'agentp', directory);
+    const session = await createSessionWithModel(serverBase, 'agentp', directory, sessions);
     return session.id;
   } catch (err) {
     throw new Error(`Error creating session: ${err.message}`);
@@ -370,8 +371,15 @@ function injectQueuedFollowups(result, followups) {
 function formatDeferredResult(filePath, result, qaMode, unusedFollowupText, header) {
   const followups = qaMode ? readQueuedFollowups(filePath) : [];
   const output = qaMode ? injectQueuedFollowups(result, followups) : result;
-  const withHeader = qaMode && header ? header + output : output;
+  // The stored answer (produced by the detached child) may already carry the
+  // project/session header — don't prepend it a second time on retrieval.
+  const withHeader = qaMode && header && !carriesHeader(output) ? header + output : output;
   return appendUnusedFollowup(withHeader, unusedFollowupText);
+}
+
+// Does the text already begin with the 📂 / 💬 header lines?
+function carriesHeader(text) {
+  return /^[\u{1F4CC}\u{1F4AC}]/u.test(String(text || '').trimStart());
 }
 
 // Output a ready deferred result, clean up its temp files, and exit 0.
