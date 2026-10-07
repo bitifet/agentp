@@ -4,7 +4,7 @@
 
 ```
 bin/agentp          — stdin → opencode session (846 lines)
-bin/ocmux           — tmux server manager (764 lines)
+bin/ocmux           — tmux project/TUI window manager (764 lines)
 bin/tgagentp        — Telegram bot ↔ opencode TUI (3050 lines)
 lib/opencode.js     — HTTP session API client (shared by agentp + tgagentp)
 lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
@@ -26,7 +26,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 275 tests (53 + 8 + 55 + 108 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 305 tests (58 + 8 + 56 + 122 + 10 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
@@ -48,7 +48,8 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 - `lib/ocmux.js` wraps `child_process.spawnSync` via `_tmux()` helper — all tmux interactions must go through this, never raw spawn.
 - tgagentp is monolithic (~2500 lines). New features: extract into `lib/` when possible.
 - Shared state lives in module-level variables (`chatStates`, `serverOwners`, `agentpQueues`).
-- `activateServer()` is safe to call repeatedly: it checks `activeWindowIndex()` internally and is a no-op on the same window.
+- `activateProject()` is safe to call repeatedly: it checks `activeWindowIndex()` internally and is a no-op on the same window.
+- Server is **user-managed** (`opencode serve`); `ocmux`/`agentp` only health-check it (`checkServer`/connection errors). No per-project servers.
 
 ## `//command` TUI passthrough (tgagentp)
 
