@@ -348,6 +348,14 @@ describe('createSession', { concurrency: false }, () => {
       /Failed to create session/,
     );
   });
+
+  it('ignores location on legacy servers', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ id: 's3' }) });
+    const r = await opencode.createSession('http://localhost:4096', 'T', '/home/proj');
+    const body = JSON.parse(ctrl.lastReq().req._written.join(''));
+    assert.strictEqual(body.location, undefined);
+    assert.strictEqual(r.id, 's3');
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────
@@ -987,6 +995,14 @@ describe('v2 createSession', { concurrency: false }, () => {
     assert.strictEqual(ctrl.lastReq().opts.path, '/api/session');
     assert.strictEqual(ctrl.lastReq().opts.method, 'POST');
   });
+
+  it('includes location as a PublicRef object in the POST body when provided', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: { id: 's_loc' } }) });
+    await opencode.createSession('http://localhost:4096', 'T', '/home/proj');
+    const body = JSON.parse(ctrl.lastReq().req._written.join(''));
+    assert.strictEqual(body.title, 'T');
+    assert.deepStrictEqual(body.location, { directory: '/home/proj' });
+  });
 });
 
 describe('v2 updateSession', { concurrency: false }, () => {
@@ -1325,6 +1341,32 @@ describe('v2 listenForFinalAnswer', { concurrency: false }, () => {
     const r = await opencode.listenForFinalAnswer('http://localhost:4096');
     assert.strictEqual(r, 'PONG');
   });
+
+  it('separates per-step text segments with a blank line', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.started', data: {} }),
+        sse({ id: 'b', type: 'session.text.delta', data: { delta: 'first' } }),
+        sse({ id: 'c', type: 'session.text.started', data: {} }),
+        sse({ id: 'd', type: 'session.text.delta', data: { delta: 'second' } }),
+        sse({ id: 'e', type: 'session.execution.succeeded', data: {} }),
+      ],
+    });
+    const r = await opencode.listenForFinalAnswer('http://localhost:4096');
+    assert.strictEqual(r, 'first\n\nsecond');
+  });
+
+  it('does not add a leading separator before the first segment', async () => {
+    ctrl.reset({
+      sseChunks: [
+        sse({ id: 'a', type: 'session.text.started', data: {} }),
+        sse({ id: 'b', type: 'session.text.delta', data: { delta: 'only' } }),
+        sse({ id: 'c', type: 'session.execution.succeeded', data: {} }),
+      ],
+    });
+    const r = await opencode.listenForFinalAnswer('http://localhost:4096');
+    assert.strictEqual(r, 'only');
+  });
 });
 
 describe('v2 listenForSessionEvents', { concurrency: false }, () => {
@@ -1531,5 +1573,103 @@ describe('v2 completion quiescence', { concurrency: false }, () => {
     opencode._setApiVersion('legacy');
     opencode._setCompletionGraceMs(1500);
     assert.strictEqual(result, 'firstsecond');
+  });
+
+  it('defers completion while sub-agent (child session) activity continues', async () => {
+    opencode._setApiVersion('v2');
+    opencode._setCompletionGraceMs(100);
+
+    const server = http.createServer((req, res) => {
+      if (req.url === '/api/event') {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders();
+        const w = (j) => res.write(`data: ${JSON.stringify(j)}\n\n`);
+        // Parent text + terminal, then only CHILD-session activity (a sub-agent
+        // working), then the parent continues and finishes.
+        w({ id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'first' } });
+        w({ id: 'b', type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+        setTimeout(() => {
+          w({ id: 'c', type: 'session.text.delta', data: { sessionID: 'child', delta: 'subagent working' } });
+        }, 20);
+        setTimeout(() => {
+          w({ id: 'd', type: 'session.text.delta', data: { sessionID: 's1', delta: 'second' } });
+          w({ id: 'e', type: 'session.execution.succeeded', data: { sessionID: 's1' } });
+        }, 160);
+        req.on('close', () => {});
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const addr = server.address();
+    const url = `http://${addr.address}:${addr.port}`;
+
+    // With a 100ms grace, the initial execution.succeeded at t=0 would resolve
+    // at ~100ms — BEFORE the parent keeps talking at t=160ms. Child activity at
+    // t=20ms must defer completion so the whole answer is collected.
+    const result = await opencode.listenForSessionEvents(url, 's1', {});
+    server.close();
+    opencode._setApiVersion('legacy');
+    opencode._setCompletionGraceMs(1500);
+    assert.strictEqual(result, 'firstsecond');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// sortSessionsByRecency
+// ───────────────────────────────────────────────────────────────────
+describe('sortSessionsByRecency', () => {
+  it('sorts by time.viewed first, then updated, then created', () => {
+    const rows = [
+      { id: 'a', time: { updated: 10, created: 1 } },
+      { id: 'b', time: { viewed: 30, updated: 5, created: 1 } },
+      { id: 'c', time: { viewed: 20, updated: 99, created: 1 } },
+      { id: 'd' }, // no timestamps
+    ];
+    const sorted = opencode.sortSessionsByRecency(rows).map(s => s.id);
+    assert.deepStrictEqual(sorted, ['b', 'c', 'a', 'd']);
+  });
+
+  it('returns a new array and tolerates null/[]', () => {
+    assert.deepStrictEqual(opencode.sortSessionsByRecency(null), []);
+    const rows = [{ id: 'x', time: { updated: 1 } }];
+    const out = opencode.sortSessionsByRecency(rows);
+    assert.notStrictEqual(out, rows);
+    assert.strictEqual(out.length, 1);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// deleteSession (v2)
+// ───────────────────────────────────────────────────────────────────
+describe('v2 deleteSession', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { opencode._setApiVersion('v2'); ctrl = setupMock({ status: 204, body: '' }); });
+  after(() => { tearDownMock(); opencode._setApiVersion('legacy'); });
+
+  it('DELETE /api/session/:id', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await opencode.deleteSession('http://localhost:4096', 'ses_1');
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.path, '/api/session/ses_1');
+    assert.strictEqual(req.opts.method, 'DELETE');
+  });
+
+  it('throws on non-success status', async () => {
+    ctrl.reset({ status: 500, body: '' });
+    await assert.rejects(
+      () => opencode.deleteSession('http://localhost:4096', 'ses_1'),
+      /Failed to delete session/,
+    );
+  });
+});
+
+describe('legacy deleteSession rejects', { concurrency: false }, () => {
+  it('is unsupported on legacy servers', async () => {
+    await assert.rejects(
+      () => opencode.deleteSession('http://localhost:4096', 'ses_1'),
+      /not supported on legacy servers/,
+    );
   });
 });
