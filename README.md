@@ -281,8 +281,8 @@ the project found upward from `<directory>` (default: `$PWD`):
 - new sessions inherit the model of the previously selected session (v2
   sessions created via the API have no model and won't run a prompt until set)
 
-Reminders (`R`) are stored in an `annotations.json` sidecar; `agentp` prepends a
-session's reminder to every prompt sent to it.
+Reminders (`R`) are stored in the `.ocmux.json` `annotations` map; `agentp`
+prepends a session's reminder to every prompt sent to it.
 
 Subcommands:
 

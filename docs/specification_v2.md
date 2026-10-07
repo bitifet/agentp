@@ -79,6 +79,7 @@ Placed at the **project root** (found by upward search, git-like).
 | `directory` | yes (written) | Absolute, realpath'd project root. Guard against file moves: if `realpath(dirname(file)) !== directory`, warn and repair. |
 | `session` | yes (written) | OpenCode session ID to target. May be absent until first `ocmux serve`/`agentp` run. |
 | `server` | no | Cached shared-server URL. **Not authoritative** — the global server state wins. Kept for self-containment/offline diagnostics. |
+| `annotations` | no | Map `sessionID → reminder text` (the picker's `R` key). Prepended by `agentp` to every prompt for that session. |
 
 **Legacy tolerance (read):** old files `{url, logfile, window_index}` must still
 parse. On read:
@@ -553,9 +554,10 @@ The `R` (Shift+r) key in the `ocmux` session picker attaches a short
 foobar"*). Annotated sessions are marked with `◈`. `agentp` prepends the
 reminder (plus a blank line) to **every prompt** sent to that session.
 
-Persistence: an `annotations.json` **sidecar** next to `.ocmux.json`
-(project-scoped), mapping `sessionID → text`; empty text removes the entry.
-Written atomically (tmp + rename).
+Persistence: an **`annotations` map (sessionID → text) inside `.ocmux.json`**,
+so a project keeps all its state in one file; empty text removes the entry.
+Written atomically (tmp + rename). A legacy `annotations.json` sidecar is read
+for back-compat and folded into the state file on the next write.
 
 Integration points (implemented):
 - `lib/project-state.js`: `readAnnotations(dir)`, `writeAnnotation(dir, id, text)`.
