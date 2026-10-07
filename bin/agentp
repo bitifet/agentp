@@ -15,7 +15,9 @@ const {
   createSession,
   getSession,
   selectSession,
+  sortSessionsByRecency,
 } = require('../lib/opencode');
+const projectState = require('../lib/project-state');
 
 const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
 
@@ -201,15 +203,23 @@ function printTicketAndExit(ticket, onlineTicket) {
   process.exit(0);
 }
 
-async function resolveTargetSession(serverBase, sessionName, newSession) {
+async function resolveTargetSession(serverBase, sessionName, newSession, opts = {}) {
+  // opts: { directory, preferredSession } — v2 project/session resolution from
+  // the nearest .ocmux.json. `directory` scopes the listing to the project;
+  // `preferredSession` is a stored session ID validated against that listing.
+  const directory = opts.directory || undefined;
+  const preferredSession = opts.preferredSession || null;
+
   let sessions;
   try {
-    sessions = await listSessions(serverBase);
+    sessions = await listSessions(serverBase, directory);
   } catch (err) {
     throw new Error(`Error connecting to server: ${err.message}`);
   }
 
   if (sessionName) {
+    const byId = sessions.find(s => String(s.id) === sessionName);
+    if (byId) return byId.id;
     const matches = sessions.filter(s => {
       const title = s.title || s.slug || s.id;
       return title.toLowerCase() === sessionName.toLowerCase();
@@ -223,7 +233,7 @@ async function resolveTargetSession(serverBase, sessionName, newSession) {
       if (partial.length > 1) throw new Error(`Error: multiple sessions match "${sessionName}"`);
       if (!newSession) throw new Error(`Error: no session found matching "${sessionName}"`);
       try {
-        const session = await createSession(serverBase, sessionName);
+        const session = await createSession(serverBase, sessionName, directory);
         await selectSession(serverBase, session.id);
         return session.id;
       } catch (err) {
@@ -233,19 +243,18 @@ async function resolveTargetSession(serverBase, sessionName, newSession) {
     return matches[0].id;
   }
 
+  // Prefer the session recorded in .ocmux.json when it still exists.
+  if (preferredSession && sessions.some(s => String(s.id) === String(preferredSession))) {
+    return preferredSession;
+  }
+
   if (sessions && sessions.length > 0) {
-    const sorted = sessions
-      .filter(s => s.time && (s.time.updated || s.time.created))
-      .sort((a, b) => {
-        const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
-        const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
-        return bTime - aTime;
-      });
+    const sorted = sortSessionsByRecency(sessions).filter(s => s.id);
     if (sorted.length > 0) return sorted[0].id;
   }
 
   try {
-    const session = await createSession(serverBase, 'agentp');
+    const session = await createSession(serverBase, 'agentp', directory);
     return session.id;
   } catch (err) {
     throw new Error(`Error creating session: ${err.message}`);
@@ -357,14 +366,15 @@ function injectQueuedFollowups(result, followups) {
   return before + (before.endsWith('\n') ? '' : '\n') + addition + after;
 }
 
-function formatDeferredResult(filePath, result, qaMode, unusedFollowupText) {
+function formatDeferredResult(filePath, result, qaMode, unusedFollowupText, header) {
   const followups = qaMode ? readQueuedFollowups(filePath) : [];
   const output = qaMode ? injectQueuedFollowups(result, followups) : result;
-  return appendUnusedFollowup(output, unusedFollowupText);
+  const withHeader = qaMode && header ? header + output : output;
+  return appendUnusedFollowup(withHeader, unusedFollowupText);
 }
 
 // Output a ready deferred result, clean up its temp files, and exit 0.
-function outputReadyResult(filePath, result, qaMode, unusedFollowupText) {
+function outputReadyResult(filePath, result, qaMode, unusedFollowupText, header) {
   try {
     fs.unlinkSync(filePath);
   } catch (err) {
@@ -372,9 +382,35 @@ function outputReadyResult(filePath, result, qaMode, unusedFollowupText) {
     process.exit(1);
   }
   try { fs.unlinkSync(filePath + '.lock'); } catch {}
-  process.stdout.write(formatDeferredResult(filePath, result, qaMode, unusedFollowupText));
+  process.stdout.write(formatDeferredResult(filePath, result, qaMode, unusedFollowupText, header));
   removeQueuedFollowups(filePath);
   process.exit(0);
+}
+
+// Structured header (project path + session id/title) prepended to --qa output,
+// so a piped answer is self-describing about where it came from.
+async function buildSessionHeader(server, sessionId) {
+  let title = sessionId;
+  let dir = '';
+  try {
+    const s = await getSession(server, sessionId);
+    if (s && (s.title || s.id)) title = s.title || s.id;
+    if (s && s.location && s.location.directory) dir = s.location.directory;
+  } catch {
+    // keep the plain id form
+  }
+  let out = '';
+  if (dir) out += `📂 ${dir}\n`;
+  out += `💬 ${title} [${sessionId}]\n`;
+  return out;
+}
+
+// Header for deferred-ticket retrieval (ticket carries server + sessionId).
+async function ticketHeader(ticket, qaMode) {
+  if (qaMode && ticket && ticket.server && ticket.sessionId) {
+    try { return await buildSessionHeader(ticket.server, ticket.sessionId); } catch {}
+  }
+  return '';
 }
 
 async function readAllStdin() {
@@ -442,6 +478,16 @@ async function main() {
   let flushMode = false;
   let deferMode = false;
   let deferSeconds = 0;
+  // Project context from the nearest .ocmux.json (v2 model): project directory,
+  // stored session ID, and cached server URL. All null when no state file
+  // applies, in which case agentp keeps its legacy (unscoped) behavior.
+  const ctx = projectState.resolveContext();
+  const projectDir = ctx.directory;
+  const stateSession = ctx.session;
+  // Adopt the project's cached server (from .ocmux.json) unless an explicit
+  // server/port is given later in the argument loop (--getLast runs mid-loop,
+  // so adoption must happen before it).
+  if (ctx.server) serverBase = ctx.server;
   let deferChildMode = false;
   let onlineTicket = false;
   let promptFile = null;
@@ -494,8 +540,9 @@ async function main() {
       console.error('');
       console.error('Arguments:');
       console.error('  url        OpenCode server URL or port number (default: 4096)');
-      console.error('             Examples: 4096, http://localhost:4096, http://192.168.1.50:4096');
-      console.error('             Tip: $(ocmux) expands to the URL of the current project\'s server.');
+      console.error('             Example: 4096, http://localhost:4096, http://192.168.1.50:4096');
+      console.error('             Omit it to resolve from the nearest .ocmux.json');
+      console.error('             (its directory selects the project, its session id the target).');
       console.error('');
       console.error('See also: tgagentp -- Telegram bridge (tgagentp --help), ocmux -- manage OpenCode tmux sessions (ocmux --help)');
       console.error('');
@@ -559,18 +606,12 @@ async function main() {
       }
       const n = parseInt(nStr, 10);
       try {
-        const sessions = await listSessions(serverBase);
+        const sessions = await listSessions(serverBase, projectDir || undefined);
         if (!sessions || sessions.length === 0) {
           console.error('No sessions found.');
           process.exit(1);
         }
-        const sorted = sessions
-          .filter(s => s.time && (s.time.updated || s.time.created))
-          .sort((a, b) => {
-            const aTime = (a.time && a.time.updated) || (a.time && a.time.created) || 0;
-            const bTime = (b.time && b.time.updated) || (b.time && b.time.created) || 0;
-            return bTime - aTime;
-          });
+        const sorted = sortSessionsByRecency(sessions);
         const sessionId = sorted[0].id;
 
         function buildPairsFromMessages(messages) {
@@ -666,6 +707,8 @@ async function main() {
     }
   }
 
+  const preferredSession = (sessionName || newSession || resolvedSessionId) ? null : stateSession;
+
   // Resolve default: --qa → auto-detect, standalone → disabled
   if (tgMode === null) {
     tgMode = qaMode ? 'auto' : false;
@@ -717,7 +760,7 @@ async function main() {
           process.exit(1);
         }
         try { fs.unlinkSync(deferredPath + '.lock'); } catch {}
-        process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, ticket.followupText));
+        process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, ticket.followupText, await ticketHeader(ticket, qaMode)));
         removeQueuedFollowups(deferredPath);
         process.exit(0);
       }
@@ -746,7 +789,7 @@ async function main() {
             process.exit(1);
           }
           try { fs.unlinkSync(deferredPath + '.lock'); } catch {}
-          process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, ''));
+          process.stdout.write(formatDeferredResult(deferredPath, result, qaMode, '', await ticketHeader(ticket, qaMode)));
           removeQueuedFollowups(deferredPath);
           process.exit(0);
         }
@@ -763,7 +806,10 @@ async function main() {
     // This is a regular prompt — create deferred execution
     let targetSessionId;
     try {
-      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession);
+      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
+        directory: projectDir,
+        preferredSession,
+      });
     } catch (err) {
       console.error(err.message);
       process.exit(1);
@@ -823,7 +869,7 @@ async function main() {
       // If the answer is already ready, return it immediately.
       let result = ticket.followupText ? readDeferredResult(deferredPath) : null;
       if (result !== null) {
-        outputReadyResult(deferredPath, result, qaMode, unusedFollowup);
+        outputReadyResult(deferredPath, result, qaMode, unusedFollowup, await ticketHeader(ticket, qaMode));
       }
 
       // Queue any follow-up text to the original session (same as --defer).
@@ -844,13 +890,16 @@ async function main() {
 
       const wait = await waitForDeferredResultForever(deferredPath);
       if (wait.interrupted) printTicketAndExit(ticket, onlineTicket);
-      outputReadyResult(deferredPath, wait.result, qaMode, unusedFollowup);
+      outputReadyResult(deferredPath, wait.result, qaMode, unusedFollowup, await ticketHeader(ticket, qaMode));
     }
 
     // Regular prompt: submit via a detached child and wait for the answer.
     let targetSessionId;
     try {
-      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession);
+      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
+        directory: projectDir,
+        preferredSession,
+      });
     } catch (err) {
       console.error(err.message);
       process.exit(1);
@@ -900,7 +949,10 @@ async function main() {
   // Wrap main processing in try-catch for deferChildMode to write errors to output file
   let tgError = null;
   async function runMain() {
-    const sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession);
+    const sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession, {
+      directory: projectDir,
+      preferredSession,
+    });
 
     let answer;
     try {
@@ -912,7 +964,9 @@ async function main() {
     // Build the message to send to Telegram (QA pair with rulers)
     let tgMessage = answer;
     if (qaMode) {
-      tgMessage = HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
+      let header = '';
+      try { header = await buildSessionHeader(serverBase, sessionId); } catch {}
+      tgMessage = header + HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
       if (!answer.endsWith('\n')) tgMessage += '\n';
       tgMessage += FINAL_ROW;
     }

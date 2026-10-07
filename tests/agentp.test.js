@@ -1,5 +1,9 @@
 'use strict';
 
+// Deterministic tests: never discover the live `.ocmux.json` of whatever
+// directory the test process happens to run in (typically the repo root).
+process.env.AGENTP_NO_STATE = '1';
+
 const { describe, it, before, after, beforeEach, afterEach, mock: nodeMock } = require('node:test');
 const assert = require('node:assert');
 const http = require('http');
@@ -668,7 +672,7 @@ describe('agentp CLI', () => {
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
       assert.strictEqual(mockCfg._sendToSessionAsyncCalled, undefined);
-      assert.strictEqual(stdout.join(''), qaOutput + 'Next prompt draft.');
+      assert.strictEqual(stdout.join(''), '💬 s42 [s42]\n' + qaOutput + 'Next prompt draft.');
       assert.ok(!fs.existsSync(tmp));
     });
 
@@ -681,7 +685,7 @@ describe('agentp CLI', () => {
       provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
-      assert.strictEqual(stdout.join(''), '👤: —————————————————\nQuestion\n📝 —————————————————\nFirst extra.\n📝 —————————————————\nSecond extra.\n🤖: —————————————————\nAnswer\n    —————————————————\n');
+      assert.strictEqual(stdout.join(''), '💬 s42 [s42]\n👤: —————————————————\nQuestion\n📝 —————————————————\nFirst extra.\n📝 —————————————————\nSecond extra.\n🤖: —————————————————\nAnswer\n    —————————————————\n');
       assert.ok(!fs.existsSync(tmp));
       assert.ok(!fs.existsSync(tmp + '.followups'));
     });
@@ -697,6 +701,14 @@ describe('agentp CLI', () => {
       assert.strictEqual(stdout.join(''), 'plain answer');
       assert.ok(!fs.existsSync(tmp));
       assert.ok(!fs.existsSync(tmp + '.followups'));
+    });
+
+    it('--qa output includes a project-path and session header', async () => {
+      mockCfg.answer = 'Hi there!';
+      mockCfg.session = { id: 's1', title: 'My Task', location: { directory: '/home/proj' } };
+      const out = await runDeferChild(['--qa'], 'Hello');
+      assert.ok(out.includes('📂 /home/proj'));
+      assert.ok(out.includes('💬 My Task [s1]'));
     });
 
     it('queues follow-up text before applying the ticket defer wait', async () => {
