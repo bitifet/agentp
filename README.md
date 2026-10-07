@@ -273,13 +273,16 @@ the project found upward from `<directory>` (default: `$PWD`):
 
 - sessions are listed most-recently-viewed first
 - `Enter`/`Space` switches (menu stays open) · `n` create (name input) ·
-  `r` rename (edit in place) · `d` delete (confirm) · `a` annotate ·
-  `p` project switcher · `h` help · `q`/`Ctrl+C` quit
+  `r` rename (edit in place) · `R` set a reminder · `d` delete (confirm) ·
+  `a` switch agent · `m` switch model · `p` project switcher · `h` help ·
+  `q`/`Ctrl+C` quit
 - switching updates `.ocmux.json` and relaunches the TUI on the chosen session
   (`opencode --server <url> --session <id>`); silent on success
+- new sessions inherit the model of the previously selected session (v2
+  sessions created via the API have no model and won't run a prompt until set)
 
-Annotations (`a`) are stored in an `annotations.json` sidecar; `agentp`
-prepends a session's annotation to every prompt sent to it.
+Reminders (`R`) are stored in an `annotations.json` sidecar; `agentp` prepends a
+session's reminder to every prompt sent to it.
 
 Subcommands:
 

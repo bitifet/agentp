@@ -158,11 +158,12 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    `GET /api/session?directory=<dir>`, **most recently viewed first**:
    - rows: `title | age (by viewed) | current(*)`, cursor on the current session
    - `Enter`/`Space` switches to the row but **stays open**; `n` creates (name
-     input, blank = auto-title); `r` renames; `d` deletes (y/N); `h` toggles
-     help; `q`/`Ctrl+C` quits
-   - a fixed bottom bar shows the key hints
-   - On select/create: atomic write of `session`, relaunch TUI, keep window
-     focused.
+     input, blank = auto-title); `r` renames; `R` (Shift+r) sets a reminder;
+     `d` deletes (y/N); `a` switches agent; `m` switches model; `p` opens the
+     project switcher; `h` toggles help; `q`/`Ctrl+C` quits
+   - **new sessions inherit the model of the previously selected session**
+     (falling back to the server default) — v2 sessions created via the API
+     have no model and will not execute a prompt until one is set.
 5. If **not** a TTY: focus the window and print the selected session ID on
    stdout (non-interactive).
 
@@ -515,8 +516,9 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
    switcher. Any diagnostics go to stderr. The `switch` subcommand was removed;
    **`p`** in the picker opens the project switcher.
 4b. **Session picker keys:** `Enter` switch (stays open) · `n` create · `r`
-   rename (readline-style caret editing) · `d` delete · `a` annotate · `p`
-   projects · `h` help · `q` quit.
+   rename (readline-style caret editing) · `R` reminder (annotation) · `d`
+   delete · `a` agents · `m` model · `p` projects · `h` help · `q` quit. The
+   `model` subcommand was removed (use `m`), like `switch` (use `p`).
 5. **tgagentp is deferred** to a follow-up release (workstream E).
 6. **Server URL source:** per-project `.ocmux.json.server`, overridable by
    `--server`/`OPENCODE_SERVER_URL`; default `http://localhost:4096`. Recorded by
@@ -546,11 +548,10 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
 
 **Status: IMPLEMENTED (2026-10-07).**
 
-The `a` key in the `ocmux` session picker attaches a short **annotation** to the
-selected session (e.g. *"Remember to work in the worktree foobar"*). Annotated
-sessions are marked with `◈`. `agentp` prepends the annotation (plus a blank
-line) to **every prompt** sent to that session, so steering context survives
-across invocations.
+The `R` (Shift+r) key in the `ocmux` session picker attaches a short
+**reminder** to the selected session (e.g. *"Remember to work in the worktree
+foobar"*). Annotated sessions are marked with `◈`. `agentp` prepends the
+reminder (plus a blank line) to **every prompt** sent to that session.
 
 Persistence: an `annotations.json` **sidecar** next to `.ocmux.json`
 (project-scoped), mapping `sessionID → text`; empty text removes the entry.
