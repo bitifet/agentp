@@ -379,7 +379,7 @@ function formatDeferredResult(filePath, result, qaMode, unusedFollowupText, head
 
 // Does the text already begin with the 📂 / 💬 header lines?
 function carriesHeader(text) {
-  return /^[\u{1F4CC}\u{1F4AC}]/u.test(String(text || '').trimStart());
+  return /^(?:\u{1F4C2}|\u{1F4AC})/u.test(String(text || '').trimStart());
 }
 
 // Output a ready deferred result, clean up its temp files, and exit 0.
