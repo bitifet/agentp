@@ -34,7 +34,9 @@ let httpMode = 'ok';          // 'ok' | 'down' (net error)
 function mockHttpRequest(opts, callback) {
   const res = {
     statusCode: 200,
-    on(ev, fn) { return this; },
+    _listeners: {},
+    on(ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); return this; },
+    _emit(ev, d) { (this._listeners[ev] || []).forEach(fn => fn(d)); },
     resume() {},
     destroy() {},
   };
@@ -47,11 +49,14 @@ function mockHttpRequest(opts, callback) {
     setTimeout(ms, fn) { /* no-op */ },
     destroy() {},
     end() {
-      if (httpMode === 'ok') {
-        callback(res);
-      } else if (httpMode === 'down' && req._errHandler) {
-        req._errHandler(new Error('ECONNREFUSED'));
+      if (httpMode === 'down') {
+        if (req._errHandler) req._errHandler(new Error('ECONNREFUSED'));
+        return;
       }
+      callback(res);
+      // Emit an empty v2 envelope so makeRequest()-based helpers settle.
+      res._emit('data', '{"data":[]}');
+      res._emit('end');
     },
   };
   return req;
@@ -226,6 +231,62 @@ describe('renderList', () => {
     });
     assert.ok(out.includes('\x1b[7m'));
     assert.ok(out.includes('Prompt: '));
+  });
+});
+
+describe('formatters', () => {
+  it('fmtDuration formats HH:MM:SS', () => {
+    assert.strictEqual(binOcmux.fmtDuration(0), '00:00:00');
+    assert.strictEqual(binOcmux.fmtDuration(3723000), '01:02:03');
+  });
+
+  it('fmtTokens humanizes magnitudes', () => {
+    assert.strictEqual(binOcmux.fmtTokens(999), '999');
+    assert.strictEqual(binOcmux.fmtTokens(1500), '2K');
+    assert.strictEqual(binOcmux.fmtTokens(3400000), '3.4M');
+    assert.strictEqual(binOcmux.fmtTokens(null), null);
+  });
+
+  it('fmtClock shows HH:MM recently and DD/MM/YYYY when older, --:-- when unknown', () => {
+    const now = Date.now();
+    assert.match(binOcmux.fmtClock(now), /^\d{2}:\d{2}$/);
+    assert.match(binOcmux.fmtClock(now - 3 * 86400000), /^\d{2}\/\d{2}\/\d{4}$/);
+    assert.strictEqual(binOcmux.fmtClock(null), '--:--');
+  });
+});
+
+describe('layoutCells', () => {
+  it('lays out row-major and collapses columns when narrow', () => {
+    const cells = ['a', 'b', 'c', 'd'];
+    assert.strictEqual(binOcmux.layoutCells(cells, 200).length, 1); // 4 columns
+    assert.strictEqual(binOcmux.layoutCells(cells, 60, 26).length, 2); // 2 columns
+    assert.strictEqual(binOcmux.layoutCells(cells, 20, 26).length, 4); // 1 column
+  });
+});
+
+describe('sessionInfoLines', () => {
+  it('includes title/location and a detail grid', () => {
+    const s = {
+      id: 's1', title: 'My Task', agent: 'build',
+      model: { providerID: 'p', id: 'm' }, cost: 0.5,
+      tokens: { input: 1000, output: 500, reasoning: 0 },
+      outcome: 'succeeded', location: { directory: '/x' },
+    };
+    const text = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120).join('\n');
+    assert.ok(text.includes('Title:    My Task'));
+    assert.ok(text.includes('Location: /x'));
+    assert.ok(text.includes('Model: p/m'));
+    assert.ok(text.includes('Agent: build'));
+    assert.ok(text.includes('Status: IDLE'));
+    assert.ok(text.includes('Cost: $0.5000'));
+    assert.ok(text.includes('Outcome: succeeded'));
+  });
+
+  it('uses placeholders for missing fields', () => {
+    const text = binOcmux.sessionInfoLines({ id: 's2' }, new Set(), new Map(), 120).join('\n');
+    assert.ok(text.includes('Title:    Untitled'));
+    assert.ok(text.includes('Location: Unknown'));
+    assert.ok(text.includes('Model: Unknown'));
   });
 });
 

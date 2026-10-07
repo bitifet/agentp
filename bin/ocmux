@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -175,28 +175,127 @@ function windowFor(len, cursor, height) {
   return { start, count };
 }
 
+// ── Small formatting / layout helpers ──────────────────────────────
+function centerIn(s, w) {
+  const str = String(s);
+  if (str.length >= w) return str.slice(0, w);
+  const left = Math.floor((w - str.length) / 2);
+  return ' '.repeat(left) + str + ' '.repeat(w - str.length - left);
+}
+function padLeft(s, w) {
+  const str = String(s);
+  return ' '.repeat(Math.max(0, w - str.length)) + str;
+}
+// Last-view stamp: HH:MM within the last 24h, else DD/MM/YYYY; '--:--' if unknown.
+function fmtClock(ts) {
+  if (!ts) return '--:--';
+  const d = new Date(ts);
+  if (Date.now() - ts < 24 * 3600 * 1000) {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  }
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+function fmtDuration(ms) {
+  const s = Math.max(0, Math.floor((Number(ms) || 0) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+function fmtTokens(n) {
+  if (n == null) return null;
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  if (v >= 1e9) return (v / 1e9).toFixed(1) + 'B';
+  if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
+  if (v >= 1e3) return Math.round(v / 1e3) + 'K';
+  return String(v);
+}
+function fmtCost(c) {
+  if (c == null) return null;
+  const v = Number(c);
+  return Number.isFinite(v) ? '$' + v.toFixed(4) : null;
+}
+
+// Lay cells out in a responsive grid (row-major), collapsing columns when narrow.
+function layoutCells(cells, cols, minCell = 26) {
+  if (!cells || cells.length === 0) return [];
+  const nCols = Math.max(1, Math.min(cells.length, Math.floor(Math.max(cols, 1) / minCell)));
+  const nRows = Math.ceil(cells.length / nCols);
+  const widths = new Array(nCols).fill(0);
+  cells.forEach((c, i) => { widths[i % nCols] = Math.max(widths[i % nCols], String(c).length); });
+  const lines = [];
+  for (let r = 0; r < nRows; r++) {
+    const parts = [];
+    for (let c = 0; c < nCols; c++) {
+      const idx = r * nCols + c;
+      if (idx >= cells.length) break;
+      parts.push(String(cells[idx]).padEnd(widths[c]));
+    }
+    lines.push(parts.join('  ').trimEnd().slice(0, cols));
+  }
+  return lines;
+}
+
+// Info lines about the selected session (title + location + a responsive grid).
+function sessionInfoLines(s, runningIds, modelContext, cols) {
+  if (!s) return [];
+  const out = [];
+  out.push(('Title:    ' + ((s.title && s.title.trim()) || 'Untitled')).slice(0, cols));
+  out.push(('Location: ' + ((s.location && s.location.directory) || 'Unknown')).slice(0, cols));
+
+  const cells = [];
+  const model = s.model ? `${s.model.providerID}/${s.model.id}` : null;
+  cells.push('Model: ' + (model
+    ? model + (s.model.variant && s.model.variant !== 'default' ? '#' + s.model.variant : '')
+    : 'Unknown'));
+  cells.push('Agent: ' + (s.agent || 'Unknown'));
+  const busy = !!(runningIds && runningIds.has(s.id));
+  const since = busy
+    ? (s.time && (s.time.updated || s.time.created))
+    : (s.time && (s.time.idle || s.time.updated || s.time.created));
+  cells.push(`Status: ${busy ? 'BUSY' : 'IDLE'}${since ? ' ' + fmtDuration(Date.now() - since) : ''}`);
+  if (s.tokens) {
+    const t = s.tokens;
+    const total = (t.input || 0) + (t.output || 0) + (t.reasoning || 0);
+    let txt = 'Tokens: ' + fmtTokens(total);
+    if (t.cache && t.cache.read) txt += ' (+' + fmtTokens(t.cache.read) + ' cache)';
+    cells.push(txt);
+  }
+  const cost = fmtCost(s.cost);
+  if (cost) cells.push('Cost: ' + cost);
+  if (model && modelContext && modelContext.get(model)) cells.push('Ctx: ' + fmtTokens(modelContext.get(model)));
+  if (s.outcome) cells.push('Outcome: ' + s.outcome);
+
+  return out.concat(layoutCells(cells, cols)).filter((l) => l !== '');
+}
+
 // Render a scrollable list into the alternate screen.
+//   heading    -> centered + inverted heading
 //   row(index, item) -> string | { text, reverse }
-//   extraLines       -> lines shown right after the list (input/confirm prompts)
-//   footer           -> bottom hint bar
-// A "(start-end/total)" range is appended to the title when scrolling.
-function renderList({ title, items, cursor, row, footer, extraLines = [], cols: colsArg, rows: rowsArg }) {
+//   extraLines -> prompt/confirm lines right after the list (normal colors)
+//   infoLines  -> details about the selection (normal colors)
+//   footer     -> inverted, left-aligned bottom hint bar
+// A "(start-end/total)" range is appended to the heading when scrolling.
+function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg }) {
   const cols = colsArg || process.stdout.columns || 80;
   const termRows = rowsArg || process.stdout.rows || 24;
   const extras = (extraLines || []).filter((l) => l != null && l !== '');
+  const infos = (infoLines || []).filter((l) => l != null && l !== '');
 
-  // Lines reserved for chrome: title + blank, extras, blank + separator + footer.
-  const reserved = 2 + extras.length + 3;
+  // Chrome: heading + blank, extras, blank + infos, footer.
+  const reserved = 2 + extras.length + (infos.length ? infos.length + 1 : 0) + 1;
   const viewHeight = Math.max(1, termRows - reserved);
   const cursorIdx = items.length ? Math.max(0, Math.min(cursor, items.length - 1)) : 0;
   const win = windowFor(items.length, cursorIdx, viewHeight);
 
-  let out = '\x1b[2J\x1b[H';
   let titleLine = title;
   if (items.length > win.count) {
     titleLine += `  (${win.start + 1}-${win.start + win.count}/${items.length})`;
   }
-  out += titleLine + '\n\n';
+
+  let out = '\x1b[2J\x1b[H';
+  out += '\x1b[7m' + centerIn(titleLine, cols) + '\x1b[0m\n\n';
 
   if (items.length === 0) {
     out += '  (none)\n';
@@ -211,8 +310,11 @@ function renderList({ title, items, cursor, row, footer, extraLines = [], cols: 
     }
   }
   for (const l of extras) out += l + '\n';
-  out += '\n' + '═'.repeat(Math.max(0, cols)) + '\n';
-  out += footer;
+  if (infos.length) {
+    out += '\n';
+    for (const l of infos) out += l + '\n';
+  }
+  out += '\x1b[7m' + (footer.length > cols ? footer.slice(0, cols) : footer.padEnd(cols)) + '\x1b[0m';
   return out;
 }
 
@@ -222,7 +324,7 @@ function renderList({ title, items, cursor, row, footer, extraLines = [], cols: 
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -235,6 +337,9 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let list = null;            // { title, items, format, onEnter }
     let listCursor = 0;
     let done = false;
+    const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let spinIdx = 0;
+    let spinTimer = null;
 
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
@@ -260,6 +365,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     const cleanup = () => {
       process.stderr.write('\x1b[?25h');
       process.stderr.write('\x1b[?1049l');
+      if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
       process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
       process.stdin.pause();
@@ -300,9 +406,11 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         return;
       }
       const cols = process.stdout.columns || 80;
+      const showTime = cols >= 48;
+      const TIME_W = 10; // dd/mm/yyyy worst case
       const maxLen = Math.min(
-        Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 12,
-        Math.max(10, cols - 20),
+        Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 6,
+        Math.max(8, cols - (showTime ? TIME_W + 6 : 6)),
       );
       const extras = [];
       if (mode === 'confirm' && confirmDel) {
@@ -310,20 +418,22 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       } else if (mode === 'input' && input) {
         extras.push(`${input.label} ${renderInputValue(input.value)}`);
       }
+      const selected = rows[cursor];
+      const infoLines = sessionInfoLines(selected, runningIds, modelContext, cols);
       process.stderr.write(renderList({
-        title: 'ocmux — sessions (most recently viewed first)',
+        title: 'ocmux — sessions',
         items: rows,
         cursor,
         row: (i, s) => {
-          const title = (s.title || s.id || '').slice(0, 60);
-          const age = s.time && s.time.viewed
-            ? `${Math.max(0, Math.floor((Date.now() - s.time.viewed) / 60000))}m`
-            : '';
+          const title = (s.title || s.id || '').slice(0, maxLen);
+          const timeStr = showTime ? '  ' + padLeft(fmtClock(s.time && s.time.viewed), TIME_W) : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
-          return `${pad(title, maxLen)}  ${age}${mark}${hasNote}`;
+          const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
+          return `${spin}${pad(title, maxLen)}${timeStr}${mark}${hasNote}`;
         },
         footer: 'Enter: switch · h: help · q: quit',
+        infoLines,
         extraLines: extras,
       }));
     };
@@ -563,6 +673,10 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdout.on('resize', draw);
+    // Animate the spinner while any listed session is running.
+    if (rows.some(s => runningIds && runningIds.has(s.id))) {
+      spinTimer = setInterval(() => { spinIdx++; draw(); }, 120);
+    }
     process.stderr.write('\x1b[?1049h\x1b[?25l');
     draw();
   });
@@ -714,6 +828,12 @@ async function cmdSessionSwitch(targetDir, directRef) {
     });
     const sorted = sortSessionsByRecency(sessions);
     const annotations = projectState.readAnnotations(sf);
+    const runningIds = await getActiveSessions(server);
+    let modelContext = new Map();
+    try {
+      const models = await listModels(server);
+      modelContext = new Map(models.filter(m => m.context).map(m => [`${m.providerID}/${m.id}`, m.context]));
+    } catch { /* context limits unavailable */ }
 
     const applySession = (id) => {
       projectState.writeProjectState(sf, { session: id });
@@ -744,6 +864,8 @@ async function cmdSessionSwitch(targetDir, directRef) {
     let lastRef = (state.session && sorted.find(s => String(s.id) === String(state.session))) || sorted[0] || null;
     const result = await new Promise((resolve) => {
       sessionMenu(sorted, state.session, annotations, server, {
+        runningIds,
+        modelContext,
         onPick: async (row) => {
           if (row.new) {
             const created = await createSessionWithModel(server, row.name || undefined, dir, [lastRef, ...sorted]).catch((err) => {
@@ -1178,4 +1300,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList };
+module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn };

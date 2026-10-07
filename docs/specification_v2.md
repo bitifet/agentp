@@ -157,17 +157,18 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    `state.session`, relaunch it (see §5).
 4. If `stdin.isTTY`: open an alt-screen picker listing sessions
    `GET /api/session?directory=<dir>`, **most recently viewed first**:
-   - rows: `title | age (by viewed) | current(*)`, cursor on the current session
+   - rows: an **active spinner** (⠋…), title, last-view time (`HH:MM`, or
+     `dd/mm/yyyy` when older than 24h; column dropped on narrow terminals),
+     current `*`, reminder `◈`
+   - a **centered, inverted heading** and a **scrollable viewport** (range in the
+     heading) that re-renders on terminal resize
    - `Enter`/`Space` switches to the row but **stays open**; `n` creates (name
      input, blank = auto-title); `r` renames; `R` (Shift+r) sets a reminder;
      `d` deletes (y/N); `a` switches agent; `m` switches model; `p` opens the
      project switcher; `h` toggles help; `q`/`Ctrl+C` quits
-   - **new sessions inherit the model of the previously selected session**
-     (falling back to the server default) — v2 sessions created via the API
-     have no model and will not execute a prompt until one is set.
-   - the list is a **scrollable viewport**: only the rows that fit are drawn
-     (title shows `(start-end/total)` when scrolling), and it re-renders on
-     terminal **resize** (`process.stdout` `resize` event).
+   - an **inverted footer** with the key hints, plus info lines about the
+     selected session (title, location, and a responsive grid of model, agent,
+     status + time in status, tokens, cost, context limit, outcome).
 5. If **not** a TTY: focus the window and print the selected session ID on
    stdout (non-interactive).
 
