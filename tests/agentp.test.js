@@ -183,6 +183,10 @@ function setupOpencodeMocks() {
     mockCfg._createSessionCalled = { server, title };
     return mockCfg.newSession || { id: 'new-session-id', title };
   });
+  nodeMock.method(opencode, 'createSessionWithModel', async (server, title) => {
+    mockCfg._createSessionCalled = { server, title };
+    return mockCfg.newSession || { id: 'new-session-id', title };
+  });
   nodeMock.method(opencode, 'sendToSession', async (server, sessionId, text) => {
     mockCfg._sendToSessionCalled = { server, sessionId, text };
     return mockCfg.answer || 'test answer';
