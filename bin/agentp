@@ -550,6 +550,7 @@ async function main() {
       console.error('  --getLast   Retrieve last N assistant answers (or QA pairs with --qa) from session history');
       console.error('  --session   Target a specific session by name (creates it if not found with --new)');
       console.error('  --new       Create a new session with the given title (requires --session)');
+      console.error('  --server    OpenCode server URL (overrides .ocmux.json); e.g. http://host:4096');
       console.error('  --help      Show this help message');
       console.error('');
       console.error('By default, --qa auto-detects tgagentp; standalone mode implies --no-tg.');
@@ -720,6 +721,13 @@ async function main() {
       tgMode = true;
     } else if (args[i] === '--no-tg') {
       tgMode = false;
+    } else if (args[i] === '--server') {
+      i++;
+      if (!args[i]) {
+        console.error("Error: '--server' requires a URL (e.g. http://host:4096)");
+        process.exit(1);
+      }
+      serverBase = args[i].replace(/\/+$/, '');
     } else if (args[i].includes('://')) {
       serverBase = args[i].replace(/\/+$/, '');
     } else if (/^\d+$/.test(args[i])) {

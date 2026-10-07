@@ -742,6 +742,15 @@ describe('agentp CLI', () => {
       assert.strictEqual(t.cancelled, false);
     });
 
+    it('--server overrides the server URL', async () => {
+      mockCfg.sessions = [{ id: 's1', time: { updated: 1 } }];
+      setArgv(['--defer', '--server', 'http://remote:9999']);
+      provideStdin('hello\n');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._listSessionsCalled, 'http://remote:9999');
+    });
+
     it('queues follow-up text before applying the ticket defer wait', async () => {
       const tmp = path.join(os.tmpdir(), `agentp_test_followup_wait_${Date.now()}.tmp`);
       fs.writeFileSync(tmp, '');

@@ -218,64 +218,107 @@ function fmtCost(c) {
 }
 
 // Lay cells out in a responsive grid (row-major), collapsing columns when narrow.
+// A cell is a plain string or { label, value } (label rendered bold).
+function cellPlain(c) {
+  return (c && typeof c === 'object') ? `${c.label}: ${c.value}` : String(c);
+}
+function cellRender(c, width) {
+  if (c && typeof c === 'object') {
+    const label = `${c.label}:`;
+    const avail = Math.max(0, width - label.length - 1);
+    let value = String(c.value == null ? '' : c.value);
+    if (value.length > avail) value = value.slice(0, avail);
+    const plainLen = label.length + 1 + value.length;
+    return `\x1b[1m${label}\x1b[0m ${value}` + ' '.repeat(Math.max(0, width - plainLen));
+  }
+  return String(c) + ' '.repeat(Math.max(0, width - String(c).length));
+}
 function layoutCells(cells, cols, minCell = 26) {
   if (!cells || cells.length === 0) return [];
-  const nCols = Math.max(1, Math.min(cells.length, Math.floor(Math.max(cols, 1) / minCell)));
+  const plains = cells.map(cellPlain);
+  let nCols = Math.max(1, Math.min(cells.length, Math.floor(Math.max(cols, 1) / minCell)));
+  const colWidths = (nc) => {
+    const w = new Array(nc).fill(0);
+    plains.forEach((p, i) => { w[i % nc] = Math.max(w[i % nc], p.length); });
+    return w;
+  };
+  let widths = colWidths(nCols);
+  while (nCols > 1 && widths.reduce((a, b) => a + b, 0) + 2 * (nCols - 1) > cols) {
+    nCols--;
+    widths = colWidths(nCols);
+  }
   const nRows = Math.ceil(cells.length / nCols);
-  const widths = new Array(nCols).fill(0);
-  cells.forEach((c, i) => { widths[i % nCols] = Math.max(widths[i % nCols], String(c).length); });
   const lines = [];
   for (let r = 0; r < nRows; r++) {
     const parts = [];
     for (let c = 0; c < nCols; c++) {
       const idx = r * nCols + c;
       if (idx >= cells.length) break;
-      parts.push(String(cells[idx]).padEnd(widths[c]));
+      parts.push(cellRender(cells[idx], widths[c]));
     }
-    lines.push(parts.join('  ').trimEnd().slice(0, cols));
+    lines.push(parts.join('  ').trimEnd());
   }
   return lines;
 }
 
-// Info lines about the selected session (title + location + a responsive grid).
+// Bold a label and append a (truncated) value, fitting `cols`.
+function labeledLine(label, value, cols) {
+  const lbl = `${label}:`;
+  const avail = Math.max(0, cols - lbl.length - 1);
+  let v = String(value == null ? '' : value);
+  if (v.length > avail) v = v.slice(0, avail);
+  return `\x1b[1m${lbl}\x1b[0m ${v}`;
+}
+
+// Info lines about the selected session: title + location (bold labels) and a
+// responsive grid. Fields are ALWAYS present (placeholders when unknown).
 function sessionInfoLines(s, runningIds, modelContext, cols) {
   if (!s) return [];
-  const out = [];
-  out.push(('Title:    ' + ((s.title && s.title.trim()) || 'Untitled')).slice(0, cols));
-  out.push(('Location: ' + ((s.location && s.location.directory) || 'Unknown')).slice(0, cols));
+  const title = (s.title && s.title.trim()) || 'Untitled';
+  const location = (s.location && s.location.directory) || 'Unknown';
+  const out = [
+    labeledLine('Title', title, cols),
+    labeledLine('Location', location, cols),
+  ];
 
-  const cells = [];
   const model = s.model ? `${s.model.providerID}/${s.model.id}` : null;
-  cells.push('Model: ' + (model
+  const modelLabel = model
     ? model + (s.model.variant && s.model.variant !== 'default' ? '#' + s.model.variant : '')
-    : 'Unknown'));
-  cells.push('Agent: ' + (s.agent || 'Unknown'));
+    : 'Unknown';
   const busy = !!(runningIds && runningIds.has(s.id));
   const since = busy
     ? (s.time && (s.time.updated || s.time.created))
     : (s.time && (s.time.idle || s.time.updated || s.time.created));
-  cells.push(`Status: ${busy ? 'BUSY' : 'IDLE'}${since ? ' ' + fmtDuration(Date.now() - since) : ''}`);
+  const status = `${busy ? 'BUSY' : 'IDLE'}${since ? ' ' + fmtDuration(Date.now() - since) : ' --:--:--'}`;
+
+  let tokensTxt = '--';
   if (s.tokens) {
     const t = s.tokens;
     const total = (t.input || 0) + (t.output || 0) + (t.reasoning || 0);
-    let txt = 'Tokens: ' + fmtTokens(total);
-    if (t.cache && t.cache.read) txt += ' (+' + fmtTokens(t.cache.read) + ' cache)';
-    cells.push(txt);
+    tokensTxt = fmtTokens(total) || '--';
+    if (t.cache && t.cache.read) tokensTxt += ' (+' + fmtTokens(t.cache.read) + ' cache)';
   }
-  const cost = fmtCost(s.cost);
-  if (cost) cells.push('Cost: ' + cost);
-  if (model && modelContext && modelContext.get(model)) cells.push('Ctx: ' + fmtTokens(modelContext.get(model)));
-  if (s.outcome) cells.push('Outcome: ' + s.outcome);
+  const cost = fmtCost(s.cost) || '--';
+  const ctx = (model && modelContext && modelContext.get(model)) ? fmtTokens(modelContext.get(model)) : '--';
 
-  return out.concat(layoutCells(cells, cols)).filter((l) => l !== '');
+  const cells = [
+    { label: 'Model', value: modelLabel },
+    { label: 'Agent', value: s.agent || 'Unknown' },
+    { label: 'Status', value: status },
+    { label: 'Tokens', value: tokensTxt },
+    { label: 'Cost', value: cost },
+    { label: 'Ctx', value: ctx },
+    { label: 'Outcome', value: s.outcome || 'Unknown' },
+  ];
+  return out.concat(layoutCells(cells, cols));
 }
 
 // Render a scrollable list into the alternate screen.
-//   heading    -> centered + inverted heading
+//   heading    -> centered + bold + inverted heading
 //   row(index, item) -> string | { text, reverse }
 //   extraLines -> prompt/confirm lines right after the list (normal colors)
-//   infoLines  -> details about the selection (normal colors)
-//   footer     -> inverted, left-aligned bottom hint bar
+//   footer     -> inverted, RIGHT-aligned key-hint bar (acts as a separator)
+//   infoLines  -> details below the footer (normal colors, bold labels)
 // A "(start-end/total)" range is appended to the heading when scrolling.
 function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg }) {
   const cols = colsArg || process.stdout.columns || 80;
@@ -283,8 +326,8 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
   const extras = (extraLines || []).filter((l) => l != null && l !== '');
   const infos = (infoLines || []).filter((l) => l != null && l !== '');
 
-  // Chrome: heading + blank, extras, blank + infos, footer.
-  const reserved = 2 + extras.length + (infos.length ? infos.length + 1 : 0) + 1;
+  // Chrome: heading + blank, extras, footer bar, infos.
+  const reserved = 2 + extras.length + 1 + infos.length;
   const viewHeight = Math.max(1, termRows - reserved);
   const cursorIdx = items.length ? Math.max(0, Math.min(cursor, items.length - 1)) : 0;
   const win = windowFor(items.length, cursorIdx, viewHeight);
@@ -295,7 +338,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
   }
 
   let out = '\x1b[2J\x1b[H';
-  out += '\x1b[7m' + centerIn(titleLine, cols) + '\x1b[0m\n\n';
+  out += '\x1b[1;7m' + centerIn(titleLine, cols) + '\x1b[0m\n\n';
 
   if (items.length === 0) {
     out += '  (none)\n';
@@ -310,12 +353,10 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
     }
   }
   for (const l of extras) out += l + '\n';
-  if (infos.length) {
-    out += '\n';
-    for (const l of infos) out += l + '\n';
-  }
-  out += '\x1b[7m' + (footer.length > cols ? footer.slice(0, cols) : footer.padEnd(cols)) + '\x1b[0m';
-  return out;
+  const hint = footer.length > cols ? footer.slice(0, cols) : padLeft(footer, cols);
+  out += '\x1b[7m' + hint + '\x1b[0m\n';
+  for (const l of infos) out += l + '\n';
+  return out.replace(/\n$/, '');
 }
 
 // Render an interactive session picker (alt screen). Sorted most-recently-viewed
@@ -410,7 +451,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       const TIME_W = 10; // dd/mm/yyyy worst case
       const maxLen = Math.min(
         Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 6,
-        Math.max(8, cols - (showTime ? TIME_W + 6 : 6)),
+        Math.max(8, cols - (showTime ? TIME_W + 10 : 8)),
       );
       const extras = [];
       if (mode === 'confirm' && confirmDel) {
@@ -426,11 +467,11 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         cursor,
         row: (i, s) => {
           const title = (s.title || s.id || '').slice(0, maxLen);
-          const timeStr = showTime ? '  ' + padLeft(fmtClock(s.time && s.time.viewed), TIME_W) : '';
+          const timeStr = showTime ? padLeft(fmtClock(s.time && s.time.viewed), TIME_W) + '  ' : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
           const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
-          return `${spin}${pad(title, maxLen)}${timeStr}${mark}${hasNote}`;
+          return `${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
         },
         footer: 'Enter: switch · h: help · q: quit',
         infoLines,
@@ -922,21 +963,24 @@ async function cmdSessionSwitch(targetDir, directRef) {
 // Subcommand: serve — create a project TUI window (server is user-managed)
 // ---------------------------------------------------------------------------
 
-async function cmdServeNew(targetDir, serverArg) {
+async function cmdServeNew(targetDir, serverArg, force) {
   try { targetDir = fs.realpathSync(targetDir); } catch {}
 
   const sf = path.join(targetDir, '.ocmux.json');
   if (fs.existsSync(sf)) {
-    console.error(`Error: a project window already exists in ${targetDir}.`);
-    console.error(`Run 'ocmux' without arguments to switch sessions there.`);
-    process.exit(1);
+    if (!force) {
+      console.error(`Error: a project window already exists in ${targetDir}.`);
+      console.error(`Use 'ocmux' to switch sessions there, or 'ocmux serve --server <url> --force' to repoint it.`);
+      process.exit(1);
+    }
+    return doForceServe(targetDir, sf, serverArg || DEFAULT_SERVER);
   }
 
   const parent = findParentStatefile(path.dirname(targetDir));
   if (parent) {
     const parentDir = path.dirname(parent);
     console.error(`Warning: there is already an opencode project in ${parentDir}.`);
-    console.error(`Run 'ocmux switch' to move between project windows.`);
+    console.error(`Run 'ocmux' and press 'p' to move between project windows.`);
 
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
     rl.question('Are you sure you want to create a new project window here? [y/N] ', (answer) => {
@@ -953,6 +997,38 @@ async function cmdServeNew(targetDir, serverArg) {
     return;
   }
   return doServeNew(targetDir, serverArg);
+}
+
+// Repoint an existing project to a (possibly new) server: update .ocmux.json's
+// `server`, keep the session if it still exists, and (re)launch the TUI on it.
+async function doForceServe(targetDir, sf, server) {
+  const alive = await checkServer(server);
+  if (!alive) {
+    console.error(`Error: OpenCode server not reachable at ${server}.`);
+    console.error(`Start it with 'opencode serve' (or pass --server <url>).`);
+    process.exit(1);
+  }
+  const state = projectState.readProjectState(sf);
+  const sessions = await listSessions(server, targetDir).catch((err) => {
+    console.error(`Error connecting to ${server}: ${err.message}`);
+    process.exit(1);
+  });
+  let session = (state && state.session && sessions.some(s => String(s.id) === String(state.session)))
+    ? state.session
+    : newestSessionId(sessions);
+  if (!session) {
+    const created = await createSessionWithModel(server, undefined, targetDir, sessions);
+    session = created.id;
+  }
+  projectState.writeProjectState(sf, { server, session });
+  const winIdx = windowByDir(targetDir);
+  if (winIdx != null) {
+    relaunchTui(winIdx, targetDir, server, session);
+    console.error(`Repointed ${targetDir} to ${server} (session ${session}).`);
+  } else {
+    createProjectWindow(targetDir, server, session);
+    console.error(`Recreated project window for ${targetDir} → ${server} (session ${session}).`);
+  }
 }
 
 async function doServeNew(targetDir, serverArg) {
@@ -1123,6 +1199,7 @@ function printHelp() {
   console.error('Subcommands:');
   console.error('  serve     Create a TUI window for <directory> (default: $PWD).');
   console.error('            --server <url>  Server to record (default: $OCMUX_SERVER or http://localhost:4096).');
+  console.error('            --force         Repoint an existing project to --server (overwrites .ocmux.json).');
   console.error('            --git / --GIT   Use the nearest parent with a .git entry / directory.');
   console.error('            Aliased as "new" for backwards compatibility.');
   console.error('  session <id|title>');
@@ -1153,6 +1230,7 @@ function main() {
   let longMode = false;
   let gitMode = null;
   let serverArg = null;
+  let force = false;
   const positional = [];
   let dirIsForced = false;
 
@@ -1173,6 +1251,8 @@ function main() {
       console.error(`Error: the '${arg}' subcommand was removed.`);
       console.error(`Press '${arg === 'switch' ? 'p' : 'm'}' inside the session picker (ocmux) for that action.`);
       process.exit(1);
+    } else if (arg === '--force') {
+      force = true;
     } else if (arg === '--git') {
       if (gitMode && gitMode !== 'nearest') {
         console.error("Error: cannot combine '--git' with '--GIT'.");
@@ -1277,7 +1357,7 @@ function main() {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
       targetDir = resolveGitDir(targetDir, gitMode === 'root', flagLabel);
     }
-    p = cmdServeNew(targetDir, serverArg);
+    p = cmdServeNew(targetDir, serverArg, force);
   } else {
     // Default: session switcher for the current project.
     if (gitMode) {

@@ -265,6 +265,8 @@ describe('layoutCells', () => {
 });
 
 describe('sessionInfoLines', () => {
+  const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
   it('includes title/location and a detail grid', () => {
     const s = {
       id: 's1', title: 'My Task', agent: 'build',
@@ -272,8 +274,8 @@ describe('sessionInfoLines', () => {
       tokens: { input: 1000, output: 500, reasoning: 0 },
       outcome: 'succeeded', location: { directory: '/x' },
     };
-    const text = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120).join('\n');
-    assert.ok(text.includes('Title:    My Task'));
+    const text = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120).map(strip).join('\n');
+    assert.ok(text.includes('Title: My Task'));
     assert.ok(text.includes('Location: /x'));
     assert.ok(text.includes('Model: p/m'));
     assert.ok(text.includes('Agent: build'));
@@ -282,11 +284,16 @@ describe('sessionInfoLines', () => {
     assert.ok(text.includes('Outcome: succeeded'));
   });
 
-  it('uses placeholders for missing fields', () => {
-    const text = binOcmux.sessionInfoLines({ id: 's2' }, new Set(), new Map(), 120).join('\n');
-    assert.ok(text.includes('Title:    Untitled'));
+  it('always includes fields, using placeholders when unknown', () => {
+    const text = binOcmux.sessionInfoLines({ id: 's2' }, new Set(), new Map(), 200).map(strip).join('\n');
+    assert.ok(text.includes('Title: Untitled'));
     assert.ok(text.includes('Location: Unknown'));
     assert.ok(text.includes('Model: Unknown'));
+    assert.ok(text.includes('Agent: Unknown'));
+    assert.ok(text.includes('Tokens: --'));
+    assert.ok(text.includes('Cost: --'));
+    assert.ok(text.includes('Ctx: --'));
+    assert.ok(text.includes('Outcome: Unknown'));
   });
 });
 
@@ -782,6 +789,31 @@ describe('ocmux CLI', () => {
     assert.strictEqual(state.version, 2);
     assert.strictEqual(state.server, 'http://x:4096');
     assert.strictEqual(state.directory, '/proj');
+  });
+
+  it('serve --force repoints an existing project to a new server', async () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] =
+      JSON.stringify({ version: 2, directory: '/proj', session: 's1', server: 'http://old:4096' });
+    tmuxHandler = (args) => {
+      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
+      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
+      return tmuxOk('');
+    };
+    nodeMock.method(opencode, 'listSessions', async () => [{ id: 's1' }, { id: 's2' }]);
+    await runMain(['serve', '/proj', '--server', 'http://new:4096', '--force']);
+    assert.strictEqual(exitThrown, null);
+    const w = lastStateWrite('/proj');
+    assert.ok(w);
+    const st = JSON.parse(w.data);
+    assert.strictEqual(st.server, 'http://new:4096');
+    assert.strictEqual(st.session, 's1');
+  });
+
+  it('serve without --force still refuses an existing project', async () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] = JSON.stringify({ version: 2, directory: '/proj', server: 'http://x:4096' });
+    await runMain(['serve', '/proj', '--server', 'http://new:4096']);
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.join('').includes('already exists'));
   });
 
   it('--help exits 0 with usage', async () => {
