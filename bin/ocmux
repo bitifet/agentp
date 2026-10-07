@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -166,7 +166,7 @@ function newestSessionId(sessions) {
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
-function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, onDelete, onAnnotate } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -176,6 +176,8 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
     let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input'
     let confirmDel = null;
     let input = null;           // { label, value, kind, caret }
+    let list = null;            // { title, items, format, onEnter }
+    let listCursor = 0;
     let done = false;
 
     const cols = process.stderr.columns || 80;
@@ -185,15 +187,18 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
     const helpLines = [
       'Enter / Space    switch to the selected session (stays open)',
       'n                create a new session (type a name, Enter; blank = auto)',
-      'r                rename the selected session (ESC cancels)',
+      'r                rename the selected session (edit in place; ESC cancels)',
+      'R (Shift+r)      set a REMINDER for the selected session (sent in front of',
+      '                  every agentp prompt; blank clears)',
       'd                delete the selected session (then y/N to confirm)',
-      'a                annotate the selected session (sent in front of every agentp prompt)',
+      'a                switch the AGENT of the selected session',
+      'm                switch the MODEL of the selected session',
       'p                open the project switcher',
       'j / k, arrows    move the cursor',
       'h                toggle this help',
       'q / Ctrl+C       quit',
       '',
-      'While typing a name/annotation:',
+      'While typing (n/r/R):',
       '  left/right, Home/End   move the caret',
       '  Backspace / Delete     edit in place',
       '  Enter                  confirm, ESC cancels',
@@ -227,6 +232,15 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
         out += 'ocmux session picker — help\n\n';
         for (const l of helpLines) out += '  ' + l + '\n';
         out += '\nPress any key to return.\n';
+      } else if (mode === 'list' && list) {
+        out += `ocmux — ${list.title}\n\n`;
+        if (list.items.length === 0) out += '  (none available)\n';
+        for (let i = 0; i < list.items.length; i++) {
+          const line = `${i === listCursor ? '▶ ' : '  '}${list.format(list.items[i]) || ''}`;
+          out += line + '\n';
+        }
+        out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
+        out += 'Enter: select · j/k: move · ESC: back · q: back';
       } else {
         out += 'ocmux — sessions (most recently viewed first)\n\n';
         if (rows.length === 0) {
@@ -249,7 +263,7 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
           out += `\n${input.label} ${renderInputValue(input.value)}`;
         }
         out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += 'Enter: switch · n:new · r:rename · d:del · a:note · p:project · h:help · q:quit';
+        out += '↵ switch · n new · r rename · R remind · d del · a agents · m model · p proj · h help · q quit';
       }
       process.stderr.write(out);
     };
@@ -263,8 +277,8 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
     const applyRenameWith = (name) => {
       const row = rows[cursor];
       if (!row || !onRename || !name) return;
-      Promise.resolve(onRename(row, name)).then(() => {
-        row.title = name;
+      Promise.resolve(onRename(row, name)).then((updated) => {
+        row.title = (updated && updated.title) || name;
         draw();
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
@@ -272,10 +286,10 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
       });
     };
 
-    const applyAnnotate = () => {
+    const applyReminder = (text) => {
       const row = rows[cursor];
-      if (!row || !onAnnotate) return;
-      Promise.resolve(onAnnotate(row, input.value.trim())).then((saved) => {
+      if (!row || !onReminder) return;
+      Promise.resolve(onReminder(row, text)).then((saved) => {
         if (saved) annotations[row.id] = saved;
         else delete annotations[row.id];
         draw();
@@ -320,6 +334,23 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
       });
     };
 
+    const openList = (title, items, format, onEnter) => {
+      if (!items || items.length === 0) {
+        process.stderr.write(`\nNo ${title.toLowerCase()} available.\n`);
+        draw();
+        return;
+      }
+      list = { title, items, format, onEnter };
+      listCursor = 0;
+      mode = 'list';
+      draw();
+    };
+
+    const commandErr = (err) => {
+      process.stderr.write(`\nError: ${err.message}\n`);
+      draw();
+    };
+
     process.stdin.on('keypress', (str, key) => {
       if (mode === 'help') {
         mode = 'normal';
@@ -348,8 +379,8 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
           draw();
           if (kind === 'create') {
             applyPick({ new: true, name: v.trim() });
-          } else if (kind === 'annotate') {
-            applyAnnotate();
+          } else if (kind === 'reminder') {
+            applyReminder(v.trim());
           } else if (v.trim()) {
             applyRenameWith(v.trim());
           }
@@ -383,6 +414,27 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
         }
         return;
       }
+      if (mode === 'list') {
+        if (key.name === 'escape' || key.name === 'q' || key.name === 'backspace') {
+          list = null;
+          mode = 'normal';
+          draw();
+        } else if (key.name === 'up' || str === 'k') {
+          listCursor = (listCursor - 1 + list.items.length) % list.items.length;
+          draw();
+        } else if (key.name === 'down' || str === 'j') {
+          listCursor = (listCursor + 1) % list.items.length;
+          draw();
+        } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+          const item = list.items[listCursor];
+          const onEnter = list.onEnter;
+          list = null;
+          mode = 'normal';
+          draw();
+          Promise.resolve(onEnter(item)).then(() => draw()).catch(commandErr);
+        }
+        return;
+      }
       if (key.ctrl && key.name === 'c') return finish(null);
       if (key.name === 'q') return finish(null);
       if (key.name === 'p') return finish('switch-project');
@@ -395,13 +447,35 @@ function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, 
         startInput('New session name (blank for auto; ESC cancels):', '', 'create');
         return;
       }
+      // Shift+r → Reminder; lowercase r → Rename.
+      if (str === 'R') {
+        const row = rows[cursor];
+        const note = (row && annotations && annotations[row.id]) || '';
+        startInput('Reminder for this session (blank clears; ESC cancels):', note, 'reminder');
+        return;
+      }
       if (key.name === 'r' && cursor < rows.length) {
         startInput('Rename to (ESC cancels):', rows[cursor].title || '', 'rename');
         return;
       }
-      if (key.name === 'a' && cursor < rows.length) {
-        const note = (annotations && annotations[rows[cursor].id]) || '';
-        startInput('Annotation for this session (blank clears; ESC cancels):', note, 'annotate');
+      if (key.name === 'a') {
+        const target = rows[cursor];
+        if (target) {
+          listAgents(server).then((agents) => {
+            openList('Agents', agents, (x) => x.name || x.id, (item) =>
+              updateSession(server, target.id, null, item.id));
+          }).catch(commandErr);
+        }
+        return;
+      }
+      if (key.name === 'm') {
+        const target = rows[cursor];
+        if (target) {
+          listModels(server).then((models) => {
+            openList('Models', models, (x) => `${x.label}${x.variant ? `#${x.variant}` : ''}`, (item) =>
+              switchModel(server, target.id, item));
+          }).catch(commandErr);
+        }
         return;
       }
       if (key.name === 'd') {
@@ -602,26 +676,30 @@ async function cmdSessionSwitch(targetDir, directRef) {
       return;
     }
 
-    // Interactive: Enter switches but stays open; n creates; r renames;
-    // d deletes; a annotates; p switches project; q quits.
+    // Interactive: Enter switches but stays open; n creates (inheriting the
+    // model of the previously selected session); r renames; R sets a reminder;
+    // d deletes; a switches agent; m switches model; p switches project; q quits.
+    let lastRef = (state.session && sorted.find(s => String(s.id) === String(state.session))) || sorted[0] || null;
     const result = await new Promise((resolve) => {
-      sessionMenu(sorted, state.session, annotations, {
+      sessionMenu(sorted, state.session, annotations, server, {
         onPick: async (row) => {
           if (row.new) {
-            const created = await createSession(server, row.name || undefined, dir).catch((err) => {
+            const created = await createSessionWithModel(server, row.name || undefined, dir, [lastRef, ...sorted]).catch((err) => {
               console.error(`Error creating session: ${err.message}`);
               return null;
             });
             if (created) applySession(created.id);
             return created || null;
           }
+          lastRef = row;
           applySession(row.id);
         },
         onRename: async (row, name) => {
-          await updateSession(server, row.id, name).catch((err) => {
+          const updated = await updateSession(server, row.id, name).catch((err) => {
             console.error(`Error renaming session: ${err.message}`);
             throw err;
           });
+          return updated;
         },
         onDelete: async (row) => {
           await deleteSession(server, row.id).catch((err) => {
@@ -632,11 +710,11 @@ async function cmdSessionSwitch(targetDir, directRef) {
             projectState.writeProjectState(sf, { session: null });
           }
         },
-        onAnnotate: async (row, text) => {
+        onReminder: async (row, text) => {
           try {
             return projectState.writeAnnotation(sf, row.id, text);
           } catch (err) {
-            console.error(`Error saving annotation: ${err.message}`);
+            console.error(`Error saving reminder: ${err.message}`);
             throw err;
           }
         },
@@ -714,7 +792,7 @@ async function doServeNew(targetDir, serverArg) {
   let session = newestSessionId(sessions);
   if (!session) {
     try {
-      const created = await createSession(server, undefined, targetDir);
+      const created = await createSessionWithModel(server, undefined, targetDir, sessions);
       session = created.id;
     } catch (err) {
       console.error(`Error creating session: ${err.message}`);
@@ -839,151 +917,6 @@ function cmdMigrate() {
 }
 
 // ---------------------------------------------------------------------------
-// Subcommand: model — switch the model of the selected session
-// ---------------------------------------------------------------------------
-
-async function cmdModel(modelRef) {
-  const sf = findParentStatefile(process.cwd());
-  if (!sf) {
-    console.error(`Error: no opencode server found in ${process.cwd()} or any of its parents.`);
-    console.error(`Run 'ocmux serve' to create a project window.`);
-    process.exit(1);
-  }
-  const state = projectState.readProjectState(sf);
-  const server = state.server;
-  if (!server) {
-    console.error(`Error: ${sf} does not record a server.`);
-    process.exit(1);
-  }
-  const dir = state.directory;
-
-  // Fail fast before any HTTP: interactive picker requires a TTY.
-  if (!modelRef && !process.stdin.isTTY) {
-    console.error('Error: "model" with no argument is interactive and requires a TTY.');
-    console.error('Use "ocmux model <ref>" (partial matches allowed when unique) to switch directly.');
-    process.exit(1);
-  }
-
-  const sessions = await listSessions(server, dir).catch((err) => {
-    console.error(`Error connecting to ${server}: ${err.message}`);
-    process.exit(1);
-  });
-  const sessionId = state.session && sessions.some(s => String(s.id) === String(state.session))
-    ? state.session
-    : newestSessionId(sessions);
-  if (!sessionId) {
-    console.error(`Error: no sessions found in ${dir}.`);
-    console.error('Open a session in the TUI first, or send a prompt with agentp.');
-    process.exit(1);
-  }
-
-  const models = await listModels(server).catch((err) => {
-    console.error(`Error listing models: ${err.message}`);
-    process.exit(1);
-  });
-  if (models.length === 0) {
-    console.error('Error: no models available from this server.');
-    process.exit(1);
-  }
-
-  let pick = null;
-  if (modelRef) {
-    const { model, matches, error } = resolveModelRef(models, modelRef);
-    if (model) {
-      pick = model;
-    } else if (matches.length > 1 && process.stdin.isTTY) {
-      console.error(`Multiple models match "${modelRef}", select one:`);
-      pick = await modelMenu(matches);
-    } else {
-      console.error(`Error: ${error}`);
-      process.exit(1);
-    }
-  } else if (process.stdin.isTTY) {
-    pick = await modelMenu(models);
-  }
-
-  if (!pick) {
-    console.error('Cancelled.');
-    return;
-  }
-
-  await switchModel(server, sessionId, pick).catch((err) => {
-    console.error(`Error switching model: ${err.message}`);
-    process.exit(1);
-  });
-  const label = pick.label + (pick.variant ? `#${pick.variant}` : '');
-  console.error(`Switched session ${sessionId} to ${label}.`);
-}
-
-// ---------------------------------------------------------------------------
-// modelMenu — interactive model picker (unchanged from previous versions)
-// ---------------------------------------------------------------------------
-
-function modelMenu(rows) {
-  return new Promise((resolve) => {
-    if (!process.stdin.isTTY || rows.length === 0) return resolve(null);
-
-    const display = (r) => (r.name && r.name !== r.label ? `${r.name} (${r.label})` : r.label);
-    const maxLen = Math.max(
-      ...rows.map(r => display(r).length),
-      ...rows.map(r => (r.variants || []).join(',').length),
-      8,
-    );
-    const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
-    let cursor = 0;
-    let done = false;
-
-    const cleanup = () => {
-      process.stderr.write('\x1b[?25h');
-      process.stderr.write('\x1b[?1049l');
-      try { process.stdin.setRawMode(false); } catch {}
-      process.stdin.pause();
-    };
-    const finish = (value) => {
-      if (done) return;
-      done = true;
-      cleanup();
-      process.stdin.removeAllListeners('keypress');
-      process.removeListener('SIGINT', onSig);
-      resolve(value);
-    };
-    const onSig = () => finish(null);
-    process.on('SIGINT', onSig);
-
-    const draw = () => {
-      let out = '\x1b[2J\x1b[H';
-      out += 'ocmux model — j/k or arrows: move, Enter: switch, q/Ctrl+C: quit\n\n';
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const marker = i === cursor ? '▶ ' : '  ';
-        const variants = (row.variants || []).join(',') || '—';
-        out += `${marker}${pad(display(row), maxLen)}  ${variants}\n`;
-      }
-      process.stderr.write(out);
-    };
-
-    process.stdin.on('keypress', (str, key) => {
-      if (key.ctrl && key.name === 'c') return finish(null);
-      if (key.name === 'q') return finish(null);
-      if (key.name === 'up' || str === 'k') {
-        cursor = (cursor + rows.length - 1) % rows.length;
-        draw();
-      } else if (key.name === 'down' || str === 'j') {
-        cursor = (cursor + 1) % rows.length;
-        draw();
-      } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
-        finish(rows[cursor]);
-      }
-    });
-
-    readline.emitKeypressEvents(process.stdin);
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stderr.write('\x1b[?1049h\x1b[?25l');
-    draw();
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -997,7 +930,8 @@ function printHelp() {
   console.error('Without arguments, searches upward from <directory> (default: $PWD)');
   console.error('for .ocmux.json and opens an interactive SESSION picker for that');
   console.error('project (requires a TTY). In the picker:');
-  console.error('  Enter switch · n new · r rename · d delete · a annotate · p projects · h help · q quit');
+  console.error('  Enter switch · n new · r rename · R remind · d delete · a agents · m model');
+  console.error('  p projects · h help · q quit');
   console.error('Selecting updates .ocmux.json and relaunches the project TUI on the');
   console.error('chosen session. Silent on success. (p opens the read-only project');
   console.error('switcher; it never modifies .ocmux.json.)');
@@ -1010,14 +944,12 @@ function printHelp() {
   console.error('  session <id|title>');
   console.error('            Non-interactive session switch for the current project.');
   console.error('  list [-l] List project windows (with -l, their server URL).');
-  console.error('  model [ref]');
-  console.error('            Switch the model of the selected session (interactive picker without ref).');
   console.error('  kill      Close the current project window. KEEPS .ocmux.json (session memory).');
   console.error('  resurrect Recreate the project window from its .ocmux.json.');
   console.error('  migrate   Rewrite legacy .ocmux.json files to the v2 schema.');
   console.error('');
-  console.error('Annotations: the "a" key in the session picker attaches a note to');
-  console.error('a session; agentp prepends it to every prompt sent to that session.');
+  console.error('Reminders: the R key in the session picker attaches a note to a');
+  console.error('session; agentp prepends it to every prompt sent to that session.');
   console.error('');
   console.error('Options:');
   console.error('  -l          Long output (list: also show server URL).');
@@ -1053,9 +985,9 @@ function main() {
       }
       serverArg = val;
       i++;
-    } else if (arg === 'switch') {
-      console.error("Error: the 'switch' subcommand was removed.");
-      console.error("Press 'p' inside the session picker (ocmux) to switch projects.");
+    } else if (arg === 'switch' || arg === 'model') {
+      console.error(`Error: the '${arg}' subcommand was removed.`);
+      console.error(`Press '${arg === 'switch' ? 'p' : 'm'}' inside the session picker (ocmux) for that action.`);
       process.exit(1);
     } else if (arg === '--git') {
       if (gitMode && gitMode !== 'nearest') {
@@ -1090,7 +1022,6 @@ function main() {
   let subcommand = null;
   let targetDir = null;
   let directRef = null;
-  let modelRef = null;
 
   for (const arg of positional) {
     if (dirIsForced) {
@@ -1101,15 +1032,13 @@ function main() {
       }
       targetDir = resolveDir(arg);
     } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list'
-      || arg === 'resurrect' || arg === 'model' || arg === 'session'
+      || arg === 'resurrect' || arg === 'session'
       || arg === 'migrate') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
         process.exit(1);
       }
       subcommand = arg;
-    } else if (subcommand === 'model' && modelRef === null) {
-      modelRef = arg;
     } else if (subcommand === 'session' && directRef === null) {
       directRef = arg;
     } else {
@@ -1145,12 +1074,6 @@ function main() {
       process.exit(1);
     }
     p = cmdSessionSwitch(targetDir, directRef);
-  } else if (subcommand === 'model') {
-    if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
-      process.exit(1);
-    }
-    p = cmdModel(modelRef);
   } else if (subcommand === 'kill') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");

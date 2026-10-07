@@ -508,6 +508,7 @@ describe('ocmux CLI', () => {
     };
     nodeMock.method(opencode, 'listSessions', async (server, dir) => []);
     nodeMock.method(opencode, 'createSession', async (server, title, loc) => ({ id: 'new_ses' }));
+    nodeMock.method(opencode, 'createSessionWithModel', async (server, title, loc) => ({ id: 'new_ses' }));
     await runMain(['serve', '/proj', '--server', 'http://x:4096']);
     assert.strictEqual(exitThrown, null, 'stderr=' + JSON.stringify(stderrOutput));
     const stateWrite = lastStateWrite('/proj');
@@ -642,15 +643,16 @@ describe('ocmux CLI', () => {
     assert.ok(write && JSON.parse(write.data).session === 's1');
   });
 
-  it('model without a state file errors', async () => {
+  it('reports that the model subcommand was removed (use m in the picker)', async () => {
     await runMain(['model', 'deepseek']);
     assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.join('').includes("'model' subcommand was removed"));
   });
 
-  it('rejects --git with model', async () => {
+  it('reports the model removal even combined with --git', async () => {
     await runMain(['--git', 'model']);
     assert.strictEqual(exitThrown, 1);
-    assert.ok(stderrOutput.some(s => s.includes("'--git' and '--GIT' are only valid with 'serve'")));
+    assert.ok(stderrOutput.join('').includes("'model' subcommand was removed"));
   });
 
   it('rejects --git with switch', async () => {
