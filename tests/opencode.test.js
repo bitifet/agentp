@@ -718,6 +718,46 @@ describe('deleteSession (v2)', { concurrency: false }, () => {
   });
 });
 
+describe('createSessionWithModel (v2)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('inherits the model of a reference session', async () => {
+    const paths = [];
+    ctrl.reset({ status: 200, body: '' });
+    mockCfg.factory = (idx, opts) => {
+      paths.push(opts.path);
+      if (opts.path === '/api/session' && opts.method === 'POST') {
+        return { status: 200, body: JSON.stringify({ data: { id: 's_new' } }) };
+      }
+      return { status: 204, body: '' };
+    };
+    const created = await opencode.createSessionWithModel('http://localhost:4096', 'T', '/dir', [
+      { model: { providerID: 'p', id: 'm' } },
+    ]);
+    assert.strictEqual(created.id, 's_new');
+    assert.ok(paths.includes('/api/session/s_new/model'));
+  });
+
+  it('falls back to the server default model', async () => {
+    const paths = [];
+    ctrl.reset({ status: 200, body: '' });
+    mockCfg.factory = (idx, opts) => {
+      paths.push(opts.path);
+      if (opts.path === '/api/model/default') {
+        return { status: 200, body: JSON.stringify({ location: {}, data: { providerID: 'dp', id: 'dm' } }) };
+      }
+      if (opts.path === '/api/session' && opts.method === 'POST') {
+        return { status: 200, body: JSON.stringify({ data: { id: 's2' } }) };
+      }
+      return { status: 204, body: '' };
+    };
+    await opencode.createSessionWithModel('http://localhost:4096', 'T', '/dir', []);
+    assert.ok(paths.includes('/api/session/s2/model'));
+  });
+});
+
 describe('isServerAlive', { concurrency: false }, () => {
   let ctrl;
   before(() => { ctrl = setupMock({}); });
