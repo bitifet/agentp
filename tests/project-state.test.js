@@ -126,22 +126,38 @@ describe('project-state', { concurrency: false }, () => {
     assert.strictEqual(ctx.session, 'ses_3');
   });
 
-  it('annotations: read/write/clear the sidecar next to the state file', (t) => {
+  it('annotations live inside .ocmux.json (single file)', (t) => {
     const root = makeTempProject(t);
     const sf = path.join(root, '.ocmux.json');
-    fs.writeFileSync(sf, '{}');
+    fs.writeFileSync(sf, JSON.stringify({ version: 2, directory: root }));
     assert.deepStrictEqual(ps.readAnnotations(sf), {});
     assert.strictEqual(ps.writeAnnotation(sf, 'ses_a', 'Remember the worktree'), 'Remember the worktree');
     assert.strictEqual(ps.readAnnotations(sf).ses_a, 'Remember the worktree');
-    // update
+    // the state file now carries the annotation, and no sidecar exists
+    const raw = JSON.parse(fs.readFileSync(sf, 'utf8'));
+    assert.strictEqual(raw.annotations.ses_a, 'Remember the worktree');
+    assert.ok(!fs.existsSync(ps.annotationsPath(sf)));
+    // update / clear
     ps.writeAnnotation(sf, 'ses_a', 'New note');
     assert.strictEqual(ps.readAnnotations(sf).ses_a, 'New note');
-    // clear (empty text removes)
     assert.strictEqual(ps.writeAnnotation(sf, 'ses_a', ''), null);
     assert.deepStrictEqual(ps.readAnnotations(sf), {});
     // multiple sessions coexist
     ps.writeAnnotation(sf, 'ses_a', 'x');
     ps.writeAnnotation(sf, 'ses_b', 'y');
     assert.deepStrictEqual(ps.readAnnotations(sf), { ses_a: 'x', ses_b: 'y' });
+  });
+
+  it('reads and migrates a legacy annotations.json sidecar', (t) => {
+    const root = makeTempProject(t);
+    const sf = path.join(root, '.ocmux.json');
+    fs.writeFileSync(sf, JSON.stringify({ version: 2, directory: root }));
+    fs.writeFileSync(ps.annotationsPath(sf), JSON.stringify({ ses_old: 'legacy note' }));
+    assert.strictEqual(ps.readAnnotations(sf).ses_old, 'legacy note');
+    // a write folds it into the state file and removes the sidecar
+    ps.writeAnnotation(sf, 'ses_new', 'fresh');
+    assert.ok(!fs.existsSync(ps.annotationsPath(sf)));
+    assert.strictEqual(ps.readAnnotations(sf).ses_old, 'legacy note');
+    assert.strictEqual(ps.readAnnotations(sf).ses_new, 'fresh');
   });
 });
