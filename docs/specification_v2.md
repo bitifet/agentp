@@ -165,6 +165,9 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    - **new sessions inherit the model of the previously selected session**
      (falling back to the server default) — v2 sessions created via the API
      have no model and will not execute a prompt until one is set.
+   - the list is a **scrollable viewport**: only the rows that fit are drawn
+     (title shows `(start-end/total)` when scrolling), and it re-renders on
+     terminal **resize** (`process.stdout` `resize` event).
 5. If **not** a TTY: focus the window and print the selected session ID on
    stdout (non-interactive).
 

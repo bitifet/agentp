@@ -160,6 +160,62 @@ function newestSessionId(sessions) {
   return sorted.length > 0 ? sorted[0].id : null;
 }
 
+// ---------------------------------------------------------------------------
+// Shared list rendering (scrollable viewport + resize-aware)
+// ---------------------------------------------------------------------------
+
+// Visible window for a list rendered in `height` rows around `cursor`.
+// Pure (unit-tested). Returns { start, count }.
+function windowFor(len, cursor, height) {
+  if (len <= 0 || height <= 0) return { start: 0, count: 0 };
+  const count = Math.min(len, height);
+  if (len <= count) return { start: 0, count };
+  let start = cursor - Math.floor(count / 2);
+  start = Math.max(0, Math.min(start, len - count));
+  return { start, count };
+}
+
+// Render a scrollable list into the alternate screen.
+//   row(index, item) -> string | { text, reverse }
+//   extraLines       -> lines shown right after the list (input/confirm prompts)
+//   footer           -> bottom hint bar
+// A "(start-end/total)" range is appended to the title when scrolling.
+function renderList({ title, items, cursor, row, footer, extraLines = [], cols: colsArg, rows: rowsArg }) {
+  const cols = colsArg || process.stdout.columns || 80;
+  const termRows = rowsArg || process.stdout.rows || 24;
+  const extras = (extraLines || []).filter((l) => l != null && l !== '');
+
+  // Lines reserved for chrome: title + blank, extras, blank + separator + footer.
+  const reserved = 2 + extras.length + 3;
+  const viewHeight = Math.max(1, termRows - reserved);
+  const cursorIdx = items.length ? Math.max(0, Math.min(cursor, items.length - 1)) : 0;
+  const win = windowFor(items.length, cursorIdx, viewHeight);
+
+  let out = '\x1b[2J\x1b[H';
+  let titleLine = title;
+  if (items.length > win.count) {
+    titleLine += `  (${win.start + 1}-${win.start + win.count}/${items.length})`;
+  }
+  out += titleLine + '\n\n';
+
+  if (items.length === 0) {
+    out += '  (none)\n';
+  } else {
+    for (let i = 0; i < win.count; i++) {
+      const idx = win.start + i;
+      const r = row(idx, items[idx]);
+      const text = r && typeof r === 'object' ? r.text : r;
+      const reverse = r && typeof r === 'object' && r.reverse;
+      const line = `${idx === cursor ? '▶ ' : '  '}${text == null ? '' : text}`;
+      out += (reverse ? `\x1b[7m${line}\x1b[0m` : line) + '\n';
+    }
+  }
+  for (const l of extras) out += l + '\n';
+  out += '\n' + '═'.repeat(Math.max(0, cols)) + '\n';
+  out += footer;
+  return out;
+}
+
 // Render an interactive session picker (alt screen). Sorted most-recently-viewed
 // first by the caller. Keys: Enter/Space switch (menu stays open), n create,
 // r rename, d delete (confirm), a annotate, p switch project, h help,
@@ -180,9 +236,6 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let listCursor = 0;
     let done = false;
 
-    const cols = process.stderr.columns || 80;
-    const maxLen = Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 12;
-    const lineWidth = Math.max(cols, maxLen + 8);
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
       'Enter / Space    switch to the selected session (stays open)',
@@ -207,6 +260,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     const cleanup = () => {
       process.stderr.write('\x1b[?25h');
       process.stderr.write('\x1b[?1049l');
+      process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
       process.stdin.pause();
     };
@@ -227,45 +281,51 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const draw = () => {
-      let out = '\x1b[2J\x1b[H';
       if (mode === 'help') {
+        let out = '\x1b[2J\x1b[H';
         out += 'ocmux session picker — help\n\n';
         for (const l of helpLines) out += '  ' + l + '\n';
         out += '\nPress any key to return.\n';
-      } else if (mode === 'list' && list) {
-        out += `ocmux — ${list.title}\n\n`;
-        if (list.items.length === 0) out += '  (none available)\n';
-        for (let i = 0; i < list.items.length; i++) {
-          const line = `${i === listCursor ? '▶ ' : '  '}${list.format(list.items[i]) || ''}`;
-          out += line + '\n';
-        }
-        out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += 'Enter: select · ESC: back';
-      } else {
-        out += 'ocmux — sessions (most recently viewed first)\n\n';
-        if (rows.length === 0) {
-          out += '  (no sessions yet — press n to create one)\n';
-        }
-        for (let i = 0; i < rows.length; i++) {
-          const s = rows[i];
+        process.stderr.write(out);
+        return;
+      }
+      if (mode === 'list' && list) {
+        process.stderr.write(renderList({
+          title: `ocmux — ${list.title}`,
+          items: list.items,
+          cursor: listCursor,
+          row: (i, item) => list.format(item) || '',
+          footer: 'Enter: select · ESC: back',
+        }));
+        return;
+      }
+      const cols = process.stdout.columns || 80;
+      const maxLen = Math.min(
+        Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 12,
+        Math.max(10, cols - 20),
+      );
+      const extras = [];
+      if (mode === 'confirm' && confirmDel) {
+        extras.push(`Delete session "${confirmDel.title || confirmDel.id || ''}"? (y/N) `);
+      } else if (mode === 'input' && input) {
+        extras.push(`${input.label} ${renderInputValue(input.value)}`);
+      }
+      process.stderr.write(renderList({
+        title: 'ocmux — sessions (most recently viewed first)',
+        items: rows,
+        cursor,
+        row: (i, s) => {
           const title = (s.title || s.id || '').slice(0, 60);
           const age = s.time && s.time.viewed
             ? `${Math.max(0, Math.floor((Date.now() - s.time.viewed) / 60000))}m`
             : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
-          const line = `${i === cursor ? '▶ ' : '  '}${pad(title, maxLen)}  ${age}${mark}${hasNote}`;
-          out += pad(line, lineWidth) + '\n';
-        }
-        if (mode === 'confirm' && confirmDel) {
-          out += `\nDelete session "` + (confirmDel.title || confirmDel.id || '') + `"? (y/N) `;
-        } else if (mode === 'input' && input) {
-          out += `\n${input.label} ${renderInputValue(input.value)}`;
-        }
-        out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += 'Enter: switch · h: help · q: quit';
-      }
-      process.stderr.write(out);
+          return `${pad(title, maxLen)}  ${age}${mark}${hasNote}`;
+        },
+        footer: 'Enter: switch · h: help · q: quit',
+        extraLines: extras,
+      }));
     };
 
     const startInput = (label, value, kind) => {
@@ -502,6 +562,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     process.stdin.resume();
+    process.stdout.on('resize', draw);
     process.stderr.write('\x1b[?1049h\x1b[?25l');
     draw();
   });
@@ -543,6 +604,7 @@ function switchMenu(rows, longMode) {
     const cleanup = () => {
       process.stderr.write('\x1b[?25h');
       process.stderr.write('\x1b[?1049l');
+      process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
     };
 
@@ -556,20 +618,17 @@ function switchMenu(rows, longMode) {
 
     const draw = () => {
       refreshActive();
-      let out = '\x1b[2J\x1b[H';
-      out += 'ocmux — project switcher · j/k or arrows: move, Enter/Space: focus, q/Ctrl+C: quit\n\n';
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const marker = i === cursor ? '▶ ' : '  ';
-        const session = row.session ? row.session.slice(0, 14) : '(none)';
-        const line = `${marker}${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(session, ssnW)}  ${row.dir}`;
-        if (i === activeRow) {
-          out += '\x1b[7m' + pad(line, lineWidth) + '\x1b[0m\n';
-        } else {
-          out += line + '\n';
-        }
-      }
-      process.stderr.write(out);
+      process.stderr.write(renderList({
+        title: 'ocmux — project switcher',
+        items: rows,
+        cursor,
+        row: (i, row) => {
+          const session = row.session ? row.session.slice(0, 14) : '(none)';
+          const text = `${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(session, ssnW)}  ${row.dir}`;
+          return i === activeRow ? { text, reverse: true } : text;
+        },
+        footer: 'Enter: focus · q: quit',
+      }));
     };
 
     const activate = (i) => {
@@ -607,6 +666,7 @@ function switchMenu(rows, longMode) {
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
     process.stdin.resume();
+    process.stdout.on('resize', draw);
     process.stderr.write('\x1b[?1049h\x1b[?25l');
     draw();
   });
@@ -1118,4 +1178,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate };
+module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList };

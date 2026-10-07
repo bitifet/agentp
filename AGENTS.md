@@ -27,7 +27,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 248 tests (60 + 8 + 55 + 62 + 12 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 253 tests (60 + 8 + 60 + 62 + 12 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
@@ -51,6 +51,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 - Shared state lives in module-level variables (`chatStates`, `serverOwners`, `agentpQueues`).
 - `activateProject()` is safe to call repeatedly: it checks `activeWindowIndex()` internally and is a no-op on the same window.
 - Server is **user-managed** (`opencode serve`); `ocmux`/`agentp` only health-check it (`checkServer`/connection errors). No per-project servers.
+- The interactive menus share `windowFor()`/`renderList()` in `bin/ocmux` (scrollable viewport, `resize`-aware, tested with explicit cols/rows).
 
 ## `//command` TUI passthrough (tgagentp)
 

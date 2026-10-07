@@ -9,6 +9,7 @@ const path = require('path');
 const os = require('os');
 
 const ocmux = require('../lib/ocmux');
+const binOcmux = require('../bin/ocmux');
 const opencode = require('../lib/opencode');
 
 // ── Mock infrastructure for spawnSync (tmux) ───────────────────────
@@ -181,6 +182,50 @@ describe('readState', () => {
   it('returns null on malformed JSON', () => {
     mockFiles['/tmp/bad.json'] = '{nope';
     assert.strictEqual(ocmux.readState('/tmp/bad.json'), null);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// windowFor / renderList (scrollable, resize-aware lists)
+// ───────────────────────────────────────────────────────────────────
+describe('windowFor', () => {
+  it('returns the whole list when it fits, empty otherwise', () => {
+    assert.deepStrictEqual(binOcmux.windowFor(3, 1, 10), { start: 0, count: 3 });
+    assert.deepStrictEqual(binOcmux.windowFor(0, 0, 10), { start: 0, count: 0 });
+    assert.deepStrictEqual(binOcmux.windowFor(5, 0, 0), { start: 0, count: 0 });
+  });
+
+  it('centers the cursor and clamps to bounds', () => {
+    assert.deepStrictEqual(binOcmux.windowFor(20, 0, 5), { start: 0, count: 5 });
+    assert.deepStrictEqual(binOcmux.windowFor(20, 10, 5), { start: 8, count: 5 });
+    assert.deepStrictEqual(binOcmux.windowFor(20, 19, 5), { start: 15, count: 5 });
+  });
+});
+
+describe('renderList', () => {
+  it('renders only the visible window and shows a range in the title', () => {
+    const items = Array.from({ length: 20 }, (_, i) => 'item' + i);
+    const out = binOcmux.renderList({ title: 'T', items, cursor: 0, row: (i, it) => it, footer: 'F', cols: 40, rows: 10 });
+    assert.ok(out.includes('item0'));
+    assert.ok(!out.includes('item19'));
+    assert.ok(out.includes('/20'));
+  });
+
+  it('renders everything when it fits (no range suffix)', () => {
+    const out = binOcmux.renderList({ title: 'T', items: ['a', 'b'], cursor: 1, row: (i, it) => it, footer: 'F', cols: 40, rows: 24 });
+    assert.ok(out.includes('  a'));
+    assert.ok(out.includes('▶ b'));
+    assert.ok(!out.includes('/2'));
+  });
+
+  it('supports reverse-video rows and extra lines', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['x'], cursor: 0,
+      row: () => ({ text: 'x', reverse: true }),
+      footer: 'F', extraLines: ['Prompt: '], cols: 40, rows: 24,
+    });
+    assert.ok(out.includes('\x1b[7m'));
+    assert.ok(out.includes('Prompt: '));
   });
 });
 
