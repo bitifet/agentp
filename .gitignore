@@ -4,6 +4,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 **/.ocmux.json
+**/annotations.json
 .DS_Store
 wt/
 debugging_tg_integration.md
