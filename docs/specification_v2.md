@@ -495,6 +495,8 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
 
 ## 11. Decisions (resolved 2026-10-07)
 
+0. **OpenCode v1 is dropped.** `lib/opencode.js` is v2-only; the legacy
+   `/tui/*`, legacy SSE listeners and legacy endpoint paths were removed.
 1. **Server is OUT OF SCOPE.** ocmux/agentp do **not** start, stop, restart, or
    supervise the server. The user starts `opencode serve` manually. The tools
    only **check** that the configured server is reachable and **complain**
@@ -510,7 +512,11 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
    `"status": "stopped"`; `list`/`switch` derive/defunct status from tmux window
    existence. There is no server to kill — only the TUI window.
 4. **`ocmux` (no args) prints nothing** on success; it is the interactive session
-   switcher. Any diagnostics go to stderr.
+   switcher. Any diagnostics go to stderr. The `switch` subcommand was removed;
+   **`p`** in the picker opens the project switcher.
+4b. **Session picker keys:** `Enter` switch (stays open) · `n` create · `r`
+   rename (readline-style caret editing) · `d` delete · `a` annotate · `p`
+   projects · `h` help · `q` quit.
 5. **tgagentp is deferred** to a follow-up release (workstream E).
 6. **Server URL source:** per-project `.ocmux.json.server`, overridable by
    `--server`/`OPENCODE_SERVER_URL`; default `http://localhost:4096`. Recorded by
@@ -538,30 +544,28 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
 
 ### 13.1 Per-session annotations (`a` key in the session picker)
 
-**Status: future work — NOT implemented.**
+**Status: IMPLEMENTED (2026-10-07).**
 
-Idea: an `a` key in the `ocmux` session picker to attach a short **annotation**
-to the selected session (e.g. *"Remember to work in the worktree foobar"*).
-When defined, `agentp` prepends the annotation (plus a blank line) to **every
-prompt** sent to that session, so steering context survives across invocations.
+The `a` key in the `ocmux` session picker attaches a short **annotation** to the
+selected session (e.g. *"Remember to work in the worktree foobar"*). Annotated
+sessions are marked with `◈`. `agentp` prepends the annotation (plus a blank
+line) to **every prompt** sent to that session, so steering context survives
+across invocations.
 
-Persistence options (choose one):
-1. A `annotations.json` sidecar next to `.ocmux.json` (project-scoped):
-   `{ "<sessionID>": "text" }` — simple, but diverges state.
-2. A field in the session storage itself — OpenCode has no annotation API, so
-   this would live in a separate DB/table we own (heavier).
-3. A file in the session's project, e.g. `.opencode/annotations/<sessionID>`.
+Persistence: an `annotations.json` **sidecar** next to `.ocmux.json`
+(project-scoped), mapping `sessionID → text`; empty text removes the entry.
+Written atomically (tmp + rename).
 
-Recommended for a first pass: option 1 with the same atomic-write discipline as
-`writeProjectState`, plus a `.lock` for the deferred-child path.
-
-Integration points when implemented:
+Integration points (implemented):
 - `lib/project-state.js`: `readAnnotations(dir)`, `writeAnnotation(dir, id, text)`.
-- `bin/ocmux` session picker: `a` key → input mode (reuse the rename input,
-  multi-line tolerant, ESC cancels); document in the `h` help menu.
-- `bin/agentp`: after session resolution, look up the annotation and prepend
-  `annotation + "\n\n"` to the prompt text before `sendToSession`.
-- Ticket/follow-up queuing should preserve the annotation on follow-ups too.
+- `bin/ocmux` session picker: `a` key → input mode (reuses the rename input
+  with caret editing, ESC cancels); documented in the `h` help menu.
+- `bin/agentp`: after session resolution, prepends `annotation + "\n\n"` to the
+  prompt before `sendToSession`.
+
+Known limitation: follow-ups queued via a deferred **ticket** do not re-inject
+the annotation (the ticket carries only `server`/`sessionId`). If needed later,
+the annotation can be looked up from the ticket's session on the server.
 
 ### 13.2 Completion hardening (annotated)
 
