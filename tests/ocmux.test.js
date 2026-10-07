@@ -592,22 +592,16 @@ describe('ocmux CLI', () => {
     assert.ok(stderrOutput.some(s => s.includes('not reachable')));
   });
 
-  it('switch errors without a TTY', async () => {
-    process.stdin.isTTY = false;
+  it('reports that the switch subcommand was removed (use p in the picker)', async () => {
     await runMain(['switch']);
     assert.strictEqual(exitThrown, 1);
-    assert.ok(stderrOutput.some(s => s.includes('requires a TTY')));
+    assert.ok(stderrOutput.join('').includes("'switch' subcommand was removed"));
   });
 
-  it('switch reports no projects when there are none', async () => {
-    tmuxHandler = (args) => (args[0] === 'has-session' ? tmuxFail(1) : tmuxOk(''));
-    await runMain(['switch']);
-    assert.ok(stdoutOutput.join('').includes('No opencode projects running.'));
-  });
-
-  it('switch rejects a directory argument', async () => {
+  it('switch rejects a directory argument with the removal message', async () => {
     await runMain(['switch', '/proj']);
     assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.join('').includes("'switch' subcommand was removed"));
   });
 
   it('kill closes the window but keeps the state file (status: stopped)', async () => {

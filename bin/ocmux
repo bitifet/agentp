@@ -162,8 +162,11 @@ function newestSessionId(sessions) {
 
 // Render an interactive session picker (alt screen). Sorted most-recently-viewed
 // first by the caller. Keys: Enter/Space switch (menu stays open), n create,
-// r rename, d delete (confirm), h help, q/Ctrl+C quit. Resolves on quit.
-function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = {}) {
+// r rename, d delete (confirm), a annotate, p switch project, h help,
+// q/Ctrl+C quit. Input mode offers readline-style caret editing.
+// Resolves on quit (null) or with the string 'switch-project' (caller then runs
+// the project switcher and re-invokes this picker for the new project).
+function sessionMenu(sessions, currentSession, annotations, { onPick, onRename, onDelete, onAnnotate } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -172,21 +175,28 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
     let cursor = 0;
     let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input'
     let confirmDel = null;
-    let input = null;           // { label, value, onConfirm }
+    let input = null;           // { label, value, kind, caret }
     let done = false;
 
     const cols = process.stderr.columns || 80;
     const maxLen = Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 12;
-    const lineWidth = Math.max(cols, maxLen + 6);
+    const lineWidth = Math.max(cols, maxLen + 8);
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
       'Enter / Space    switch to the selected session (stays open)',
-      'n                create a new session (type a name, Enter; or blank for auto)',
+      'n                create a new session (type a name, Enter; blank = auto)',
       'r                rename the selected session (ESC cancels)',
       'd                delete the selected session (then y/N to confirm)',
+      'a                annotate the selected session (sent in front of every agentp prompt)',
+      'p                open the project switcher',
       'j / k, arrows    move the cursor',
       'h                toggle this help',
       'q / Ctrl+C       quit',
+      '',
+      'While typing a name/annotation:',
+      '  left/right, Home/End   move the caret',
+      '  Backspace / Delete     edit in place',
+      '  Enter                  confirm, ESC cancels',
     ];
 
     const cleanup = () => {
@@ -206,6 +216,11 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
     const onSig = () => finish(null);
     process.on('SIGINT', onSig);
 
+    const renderInputValue = (v) => {
+      const c = input.caret;
+      return v.slice(0, c) + '▏' + v.slice(c);
+    };
+
     const draw = () => {
       let out = '\x1b[2J\x1b[H';
       if (mode === 'help') {
@@ -224,22 +239,23 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
             ? `${Math.max(0, Math.floor((Date.now() - s.time.viewed) / 60000))}m`
             : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
-          const line = `${i === cursor ? '▶ ' : '  '}${pad(title, maxLen)}  ${age}${mark}`;
+          const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
+          const line = `${i === cursor ? '▶ ' : '  '}${pad(title, maxLen)}  ${age}${mark}${hasNote}`;
           out += pad(line, lineWidth) + '\n';
         }
         if (mode === 'confirm' && confirmDel) {
           out += `\nDelete session "` + (confirmDel.title || confirmDel.id || '') + `"? (y/N) `;
         } else if (mode === 'input' && input) {
-          out += `\n${input.label} ${input.value}_`;
+          out += `\n${input.label} ${renderInputValue(input.value)}`;
         }
         out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += 'Enter: switch · n: new · r: rename · d: delete · h: help · q: quit';
+        out += 'Enter: switch · n:new · r:rename · d:del · a:note · p:project · h:help · q:quit';
       }
       process.stderr.write(out);
     };
 
     const startInput = (label, value, kind) => {
-      input = { label, value, kind };
+      input = { label, value, kind, caret: value.length };
       mode = 'input';
       draw();
     };
@@ -249,6 +265,19 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
       if (!row || !onRename || !name) return;
       Promise.resolve(onRename(row, name)).then(() => {
         row.title = name;
+        draw();
+      }).catch((err) => {
+        process.stderr.write(`\nError: ${err.message}\n`);
+        draw();
+      });
+    };
+
+    const applyAnnotate = () => {
+      const row = rows[cursor];
+      if (!row || !onAnnotate) return;
+      Promise.resolve(onAnnotate(row, input.value.trim())).then((saved) => {
+        if (saved) annotations[row.id] = saved;
+        else delete annotations[row.id];
         draw();
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
@@ -270,22 +299,6 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
-        draw();
-      });
-    };
-
-    const applyRename = () => {
-      const row = rows[cursor];
-      if (!row || !onRename) return;
-      Promise.resolve(onRename(row, input.value.trim())).then(() => {
-        if (input.value.trim()) row.title = input.value.trim();
-        input = null;
-        mode = 'normal';
-        draw();
-      }).catch((err) => {
-        process.stderr.write(`\nError: ${err.message}\n`);
-        input = null;
-        mode = 'normal';
         draw();
       });
     };
@@ -335,20 +348,44 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
           draw();
           if (kind === 'create') {
             applyPick({ new: true, name: v.trim() });
+          } else if (kind === 'annotate') {
+            applyAnnotate();
           } else if (v.trim()) {
             applyRenameWith(v.trim());
           }
         } else if (key.name === 'backspace') {
-          input.value = input.value.slice(0, -1);
+          if (input.caret > 0) {
+            input.value = input.value.slice(0, input.caret - 1) + input.value.slice(input.caret);
+            input.caret--;
+          }
+          draw();
+        } else if (key.name === 'delete' || key.name === 'del') {
+          if (input.caret < input.value.length) {
+            input.value = input.value.slice(0, input.caret) + input.value.slice(input.caret + 1);
+          }
+          draw();
+        } else if (key.name === 'left' || str === '\u001b[D') {
+          input.caret = Math.max(0, input.caret - 1);
+          draw();
+        } else if (key.name === 'right' || str === '\u001b[C') {
+          input.caret = Math.min(input.value.length, input.caret + 1);
+          draw();
+        } else if (key.name === 'home') {
+          input.caret = 0;
+          draw();
+        } else if (key.name === 'end') {
+          input.caret = input.value.length;
           draw();
         } else if (str && !key.ctrl && !key.meta && str >= ' ') {
-          input.value += str;
+          input.value = input.value.slice(0, input.caret) + str + input.value.slice(input.caret);
+          input.caret++;
           draw();
         }
         return;
       }
       if (key.ctrl && key.name === 'c') return finish(null);
       if (key.name === 'q') return finish(null);
+      if (key.name === 'p') return finish('switch-project');
       if (key.name === 'h') {
         mode = 'help';
         draw();
@@ -358,10 +395,13 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
         startInput('New session name (blank for auto; ESC cancels):', '', 'create');
         return;
       }
-      if (key.name === 'r') {
-        if (cursor < rows.length) {
-          startInput('Rename to (ESC cancels):', rows[cursor].title || '', 'rename');
-        }
+      if (key.name === 'r' && cursor < rows.length) {
+        startInput('Rename to (ESC cancels):', rows[cursor].title || '', 'rename');
+        return;
+      }
+      if (key.name === 'a' && cursor < rows.length) {
+        const note = (annotations && annotations[rows[cursor].id]) || '';
+        startInput('Annotation for this session (blank clears; ESC cancels):', note, 'annotate');
         return;
       }
       if (key.name === 'd') {
@@ -382,9 +422,6 @@ function sessionMenu(sessions, currentSession, { onPick, onRename, onDelete } = 
         if (cursor < rows.length) applyPick(rows[cursor]);
       }
     });
-
-    // Track whether the active input is "create" (n) or "rename" (r) — stored
-    // on the `input` object itself; nothing else needed here.
 
     readline.emitKeypressEvents(process.stdin);
     process.stdin.setRawMode(true);
@@ -416,6 +453,7 @@ function switchMenu(rows, longMode) {
 
     let cursor = 0;
     let activeRow = 0;
+    let lastDir = null;
     let done = false;
 
     const refreshActive = () => {
@@ -437,13 +475,13 @@ function switchMenu(rows, longMode) {
       done = true;
       cleanup();
       process.stdin.pause();
-      resolve(null);
+      resolve(lastDir);
     };
 
     const draw = () => {
       refreshActive();
       let out = '\x1b[2J\x1b[H';
-      out += 'ocmux switch — j/k or arrows: move, Enter/Space: focus, q/Ctrl+C: quit\n\n';
+      out += 'ocmux — project switcher · j/k or arrows: move, Enter/Space: focus, q/Ctrl+C: quit\n\n';
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const marker = i === cursor ? '▶ ' : '  ';
@@ -466,6 +504,7 @@ function switchMenu(rows, longMode) {
         } else {
           tmux(['select-window', '-t', `${SESSION}:${row.index}`]);
         }
+        lastDir = row.dir;
       } catch (err) {
         process.stderr.write(`\nError: ${err.message}\n`);
       }
@@ -502,59 +541,71 @@ function switchMenu(rows, longMode) {
 // ---------------------------------------------------------------------------
 
 async function cmdSessionSwitch(targetDir, directRef) {
-  const sf = findParentStatefile(targetDir);
-  if (!sf) {
-    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
-    console.error(`Run 'ocmux serve' to create a project window.`);
-    process.exit(1);
-  }
-  const state = projectState.readProjectState(sf);
-  const server = state.server;
-  if (!server) {
-    console.error(`Error: ${sf} does not record a server.`);
-    console.error(`Run 'ocmux serve --server <url>' to set it up, or add "server" to the file.`);
-    process.exit(1);
-  }
-  const dir = state.directory;
-
-  const alive = await checkServer(server);
-  if (!alive) {
-    console.error(`Error: OpenCode server not reachable at ${server}.`);
-    console.error(`Start it with 'opencode serve' (or your usual launcher) first.`);
-    process.exit(1);
-  }
-
-  const winIdx = windowByDir(dir);
-  if (winIdx == null) {
-    console.error(`Error: no tmux window for ${dir}.`);
-    console.error(`Run 'ocmux serve' to create it.`);
-    process.exit(1);
-  }
-
-  const sessions = await listSessions(server, dir).catch((err) => {
-    console.error(`Error connecting to ${server}: ${err.message}`);
-    process.exit(1);
-  });
-  const sorted = sortSessionsByRecency(sessions);
-
-  const applySession = (id) => {
-    projectState.writeProjectState(sf, { session: id });
-    relaunchTui(winIdx, dir, server, id);
-  };
-
-  if (directRef) {
-    const pick = sorted.find(s => String(s.id) === directRef)
-      || sorted.find(s => (s.title || '').toLowerCase() === directRef.toLowerCase())
-      || null;
-    if (!pick) {
-      console.error(`Error: no session matching "${directRef}" in ${dir}.`);
+  let target = targetDir;
+  for (;;) {
+    const sf = findParentStatefile(target);
+    if (!sf) {
+      console.error(`Error: no .ocmux.json found in ${target} or any of its parents.`);
+      console.error(`Run 'ocmux serve' to create a project window.`);
       process.exit(1);
     }
-    applySession(pick.id);
-  } else if (process.stdin.isTTY) {
-    // Interactive: Enter switches but stays open; n creates; d deletes; q quits.
-    await new Promise((resolve) => {
-      sessionMenu(sorted, state.session, {
+    const state = projectState.readProjectState(sf);
+    const server = state.server;
+    if (!server) {
+      console.error(`Error: ${sf} does not record a server.`);
+      console.error(`Run 'ocmux serve --server <url>' to set it up, or add "server" to the file.`);
+      process.exit(1);
+    }
+    const dir = state.directory;
+
+    const alive = await checkServer(server);
+    if (!alive) {
+      console.error(`Error: OpenCode server not reachable at ${server}.`);
+      console.error(`Start it with 'opencode serve' (or your usual launcher) first.`);
+      process.exit(1);
+    }
+
+    const winIdx = windowByDir(dir);
+    if (winIdx == null) {
+      console.error(`Error: no tmux window for ${dir}.`);
+      console.error(`Run 'ocmux serve' to create it.`);
+      process.exit(1);
+    }
+
+    const sessions = await listSessions(server, dir).catch((err) => {
+      console.error(`Error connecting to ${server}: ${err.message}`);
+      process.exit(1);
+    });
+    const sorted = sortSessionsByRecency(sessions);
+    const annotations = projectState.readAnnotations(sf);
+
+    const applySession = (id) => {
+      projectState.writeProjectState(sf, { session: id });
+      relaunchTui(winIdx, dir, server, id);
+    };
+
+    if (directRef) {
+      const pick = sorted.find(s => String(s.id) === directRef)
+        || sorted.find(s => (s.title || '').toLowerCase() === directRef.toLowerCase())
+        || null;
+      if (!pick) {
+        console.error(`Error: no session matching "${directRef}" in ${dir}.`);
+        process.exit(1);
+      }
+      applySession(pick.id);
+      return;
+    }
+
+    if (!process.stdin.isTTY) {
+      // Silent path (non-TTY): just make sure the window is focused.
+      activateProject(dir, winIdx, server, state.session);
+      return;
+    }
+
+    // Interactive: Enter switches but stays open; n creates; r renames;
+    // d deletes; a annotates; p switches project; q quits.
+    const result = await new Promise((resolve) => {
+      sessionMenu(sorted, state.session, annotations, {
         onPick: async (row) => {
           if (row.new) {
             const created = await createSession(server, row.name || undefined, dir).catch((err) => {
@@ -581,11 +632,27 @@ async function cmdSessionSwitch(targetDir, directRef) {
             projectState.writeProjectState(sf, { session: null });
           }
         },
+        onAnnotate: async (row, text) => {
+          try {
+            return projectState.writeAnnotation(sf, row.id, text);
+          } catch (err) {
+            console.error(`Error saving annotation: ${err.message}`);
+            throw err;
+          }
+        },
       }).then(resolve);
     });
-  } else {
-    // Silent path (non-TTY): just make sure the window is focused.
-    activateProject(dir, winIdx, server, state.session);
+
+    if (result === 'switch-project') {
+      // 'p' pressed: open the project switcher, then re-run this picker for
+      // the project that was just activated (if any).
+      ensureSession();
+      const lastDir = await switchMenu(listProjects());
+      if (!lastDir) break;
+      target = lastDir;
+      continue;
+    }
+    break;
   }
 }
 
@@ -929,16 +996,17 @@ function printHelp() {
   console.error('');
   console.error('Without arguments, searches upward from <directory> (default: $PWD)');
   console.error('for .ocmux.json and opens an interactive SESSION picker for that');
-  console.error('project (requires a TTY). Selecting updates .ocmux.json and relaunches');
-  console.error('the project TUI on the chosen session. Silent on success.');
+  console.error('project (requires a TTY). In the picker:');
+  console.error('  Enter switch · n new · r rename · d delete · a annotate · p projects · h help · q quit');
+  console.error('Selecting updates .ocmux.json and relaunches the project TUI on the');
+  console.error('chosen session. Silent on success. (p opens the read-only project');
+  console.error('switcher; it never modifies .ocmux.json.)');
   console.error('');
   console.error('Subcommands:');
   console.error('  serve     Create a TUI window for <directory> (default: $PWD).');
   console.error('            --server <url>  Server to record (default: $OCMUX_SERVER or http://localhost:4096).');
   console.error('            --git / --GIT   Use the nearest parent with a .git entry / directory.');
   console.error('            Aliased as "new" for backwards compatibility.');
-  console.error('  switch    Interactive PROJECT picker: focus other project TUI windows.');
-  console.error('            Read-only: never modifies .ocmux.json. Requires a TTY.');
   console.error('  session <id|title>');
   console.error('            Non-interactive session switch for the current project.');
   console.error('  list [-l] List project windows (with -l, their server URL).');
@@ -947,6 +1015,9 @@ function printHelp() {
   console.error('  kill      Close the current project window. KEEPS .ocmux.json (session memory).');
   console.error('  resurrect Recreate the project window from its .ocmux.json.');
   console.error('  migrate   Rewrite legacy .ocmux.json files to the v2 schema.');
+  console.error('');
+  console.error('Annotations: the "a" key in the session picker attaches a note to');
+  console.error('a session; agentp prepends it to every prompt sent to that session.');
   console.error('');
   console.error('Options:');
   console.error('  -l          Long output (list: also show server URL).');
@@ -982,6 +1053,10 @@ function main() {
       }
       serverArg = val;
       i++;
+    } else if (arg === 'switch') {
+      console.error("Error: the 'switch' subcommand was removed.");
+      console.error("Press 'p' inside the session picker (ocmux) to switch projects.");
+      process.exit(1);
     } else if (arg === '--git') {
       if (gitMode && gitMode !== 'nearest') {
         console.error("Error: cannot combine '--git' with '--GIT'.");
@@ -1026,7 +1101,7 @@ function main() {
       }
       targetDir = resolveDir(arg);
     } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list'
-      || arg === 'resurrect' || arg === 'switch' || arg === 'model' || arg === 'session'
+      || arg === 'resurrect' || arg === 'model' || arg === 'session'
       || arg === 'migrate') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
@@ -1064,17 +1139,6 @@ function main() {
     }
     ensureSession();
     cmdList(longMode);
-  } else if (subcommand === 'switch') {
-    if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
-      process.exit(1);
-    }
-    if (targetDir !== process.cwd()) {
-      console.error("Error: 'switch' does not accept a directory path.");
-      process.exit(1);
-    }
-    ensureSession();
-    p = switchMenu(listProjects(), longMode);
   } else if (subcommand === 'session') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
