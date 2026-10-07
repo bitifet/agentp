@@ -461,8 +461,10 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       if (key.name === 'a') {
         const target = rows[cursor];
         if (target) {
-          listAgents(server).then((agents) => {
-            openList('Agents', agents, (x) => x.name || x.id, (item) =>
+          listAgents(server).then((all) => {
+            const primary = all.filter(x => x.mode === 'primary' && !x.hidden);
+            const agents = primary.length ? primary : all;
+            openList('Agents', agents, (x) => `${x.name || x.id}${x.description ? ' — ' + x.description.slice(0, 40) : ''}`, (item) =>
               updateSession(server, target.id, null, item.id));
           }).catch(commandErr);
         }
