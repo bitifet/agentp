@@ -18,6 +18,7 @@ const {
   sortSessionsByRecency,
 } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
+const ocmuxLib = require('../lib/ocmux');
 
 const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
 
@@ -954,9 +955,22 @@ async function main() {
       preferredSession,
     });
 
+    // v2: focus the target project's TUI window so the user sees the prompt
+    // stream, and prepend the session's annotation (if any) to the prompt.
+    let prompt = actualPromptText;
+    try {
+      if (ctx && ctx.statefile) {
+        const ann = projectState.readAnnotations(ctx.statefile)[sessionId];
+        if (ann) prompt = ann + '\n\n' + actualPromptText;
+      }
+      if (projectDir) ocmuxLib.focusWindowByDir(projectDir);
+    } catch {
+      // tmux focus is best-effort; never fail the prompt because of it
+    }
+
     let answer;
     try {
-      answer = await sendToSession(serverBase, sessionId, actualPromptText);
+      answer = await sendToSession(serverBase, sessionId, prompt);
     } catch (err) {
       throw new Error(`Error sending prompt: ${err.message}`);
     }
