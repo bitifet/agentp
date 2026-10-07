@@ -17,6 +17,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 
 - **Zero npm dependencies.** `package.json` `"dependencies"` must stay empty. `package-lock.json` exists but has no deps.
 - **CommonJS only** (`require`/`module.exports`). No ES modules.
+- **OpenCode v2 only.** No v1/legacy code paths anywhere (`lib/opencode.js` is v2-only; `ocmux` targets `opencode --server <url> --session <id>`).
 - **`.ocmux.json` is in `.gitignore`** — do not commit state files.
 - **2-space indent. Single quotes.** `const` over `let`. `async/await` over `.then()`.
 - `lib/tui-cmd.js` is no-semicolons style; `bin/` and other `lib/` files use semicolons. Match the file you're editing.
@@ -26,7 +27,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 305 tests (58 + 8 + 56 + 122 + 10 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 240 tests (58 + 8 + 55 + 57 + 11 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
