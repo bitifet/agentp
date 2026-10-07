@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           out += line + '\n';
         }
         out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += 'Enter: select · j/k: move · ESC: back · q: back';
+        out += 'Enter: select · ESC: back';
       } else {
         out += 'ocmux — sessions (most recently viewed first)\n\n';
         if (rows.length === 0) {
@@ -263,7 +263,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           out += `\n${input.label} ${renderInputValue(input.value)}`;
         }
         out += '\n\n' + '═'.repeat(Math.min(lineWidth, cols)) + '\n';
-        out += '↵ switch · n new · r rename · R remind · d del · a agents · m model · p proj · h help · q quit';
+        out += 'Enter: switch · h: help · q: quit';
       }
       process.stderr.write(out);
     };
