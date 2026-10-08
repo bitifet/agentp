@@ -780,7 +780,7 @@ const openList = (title, items, format, onEnter) => {
       } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
         cursor = (cursor + 1) % rows.length;
         draw();
-      } else if (key.name === 'enter') {
+      } else if (key.name === 'return' || key.name === 'enter') {
         if (cursor < rows.length) applyPick(rows[cursor]);
       } else if (key.name === 'space') {
         // Start broadcast only when adding a DIFFERENT session to the current one.
