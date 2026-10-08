@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, getSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -163,6 +163,24 @@ function newestSessionId(sessions) {
 // ---------------------------------------------------------------------------
 // Shared list rendering (scrollable viewport + resize-aware)
 // ---------------------------------------------------------------------------
+
+// OpenCode's TUI defaults child sessions (parentID set — old subagent runs) to
+// the "Subagents" composer tab instead of the prompt. Sending a couple of
+// Escape keys to the TUI pane collapses it back to the prompt. Timers are
+// fire-and-forget (they keep the process alive briefly after the picker exits).
+function dismissChildSubagentsTab(server, winIdx, sessionId) {
+  getSession(server, sessionId).then((s) => {
+    if (!s || !s.parentID) return;
+    const pane = tuiPaneId(winIdx);
+    if (!pane) return;
+    const sendEsc = () => {
+      const p = tuiPaneId(winIdx);
+      if (p) tmux(['send-keys', '-t', p, 'Escape']);
+    };
+    setTimeout(sendEsc, 900);
+    setTimeout(sendEsc, 2000);
+  }).catch(() => {});
+}
 
 // Visible window for a list rendered in `height` rows around `cursor`.
 // Pure (unit-tested). Returns { start, count }.
@@ -965,6 +983,7 @@ async function cmdSessionSwitch(targetDir, directRef) {
     const applySession = (id) => {
       projectState.writeProjectState(sf, { session: id });
       relaunchTui(winIdx, dir, server, id);
+      dismissChildSubagentsTab(server, winIdx, id);
     };
 
     if (directRef) {
@@ -1111,9 +1130,11 @@ async function doForceServe(targetDir, sf, server) {
   const winIdx = windowByDir(targetDir);
   if (winIdx != null) {
     relaunchTui(winIdx, targetDir, server, session);
+    dismissChildSubagentsTab(server, winIdx, session);
     console.error(`Repointed ${targetDir} to ${server} (session ${session}).`);
   } else {
-    createProjectWindow(targetDir, server, session);
+    const created = createProjectWindow(targetDir, server, session);
+    dismissChildSubagentsTab(server, created.index, session);
     console.error(`Recreated project window for ${targetDir} → ${server} (session ${session}).`);
   }
 }
@@ -1149,7 +1170,8 @@ async function doServeNew(targetDir, serverArg) {
 
   console.error(`Creating project window for ${targetDir} (session ${session})...`);
   try {
-    createProjectWindow(targetDir, server, session);
+    const created = createProjectWindow(targetDir, server, session);
+    dismissChildSubagentsTab(server, created.index, session);
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
@@ -1237,7 +1259,8 @@ async function cmdResurrect(targetDir) {
     process.exit(1);
   }
   console.error(`Recreating project window for ${dir}...`);
-  createProjectWindow(dir, server, state.session);
+  const created = createProjectWindow(dir, server, state.session);
+  dismissChildSubagentsTab(server, created.index, state.session);
 }
 
 // ---------------------------------------------------------------------------
