@@ -329,12 +329,14 @@ the target session; an `Opencode` tmux session holds one window per project
 (TUI only, pane 0).
 
 ```bash
-ocmux [-l] [<subcommand>] [<directory>]
+ocmux [-l] [--all-projects] [<subcommand>] [<directory>]
 ```
 
 Without arguments (and with a TTY), opens an **interactive session picker** for
 the project found upward from `<directory>` (default: `$PWD`):
 
+- the title bar names the project being worked on — `ocmux — <project> sessions`
+  — so the list is never ambiguous
 - sessions are listed most-recently-viewed first
 - `/` starts an **incremental search** of the list (matches title/id,
   case-insensitive, space-separated tokens are ANDed). While the search line is
@@ -351,12 +353,17 @@ the project found upward from `<directory>` (default: `$PWD`):
   every selected session.
 - `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
   `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
-  switcher · `h` help · `q` quit
+  switcher (inspect-only by default) · `h` help · `q` quit
+- `m` opens the model list **sorted by provider** with the cursor already on the
+  session's **current model** — also in broadcast mode, where it starts from the
+  cursor session's model, so a bulk change begins where you are
 - **`q` only quits the session picker.** In every other menu (model/agent
   pickers, project switcher, help/input prompts) `q`/`ESC` just closes that menu
   and returns to the previous one. **`Ctrl+C` fully exits** `ocmux` from any menu.
 - switching updates `.ocmux.json` and relaunches the TUI on the chosen session
-  (`opencode --server <url> --session <id>`); silent on success
+  (`opencode --server <url> --session <id>`); silent on success. The file
+  updated is always the one of the project being listed — your own project
+  unless ocmux was started with `--all-projects`
 - new sessions inherit the model of the previously selected session (v2
   sessions created via the API have no model and won't run a prompt until set)
 
@@ -383,11 +390,28 @@ Subcommands:
 - **`migrate`** — rewrite legacy (v1-style) `.ocmux.json` files to the v2 schema.
 
 The old `switch` subcommand is gone: press **`p`** inside the session picker to
-open the (read-only) project switcher instead. `ocmux` never starts or stops the
+open the project switcher instead. The switcher is a **foldable tree**: `▸`/`▾`
+marks a project as folded/unfolded, `Space` folds/unfolds a project's sessions
+(fetched once per project, most recent first), and `/` searches projects *and*
+their unfolded sessions (a matching session keeps its project header visible).
+
+By default the switcher is an **inspector**: `Enter` on a project row focuses it
+(and shows its current session), `Enter`/`Space` on a session row shows that
+session in the project's TUI, and you **always come back to your own project's
+list** when you leave it (`q`). No `.ocmux.json` is ever written from there, so
+`agentp` — which reads the state file of the directory it runs in — keeps
+prompting your own project's session.
+
+Pass **`--all-projects`** to turn it into a real switcher: selecting a project
+then moves the session picker over to that project, and picking a session there
+updates *that* project's `.ocmux.json` (which is what `agentp` reads when it
+runs in that directory). The title bar always names the project being listed, so
+either way you can tell where you are. `ocmux` never starts or stops the
 OpenCode server — run `opencode serve` yourself (see [Versioning](#versioning)
 for the pairing policy).
 
-Options: `-l` · `--version` · `-h` · `--` (treat the next argument as a directory).
+Options: `-l` · `--all-projects` · `--version` · `-h` · `--` (treat the next
+argument as a directory).
 
 Notes:
 

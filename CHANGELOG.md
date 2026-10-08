@@ -2,6 +2,48 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Model picker starts where you are.** `m` now opens the model list with the
+  cursor on the session's **current model** (normal and broadcast mode), and the
+  models are **sorted by provider then id** — so a broadcast change starts from
+  the model already in use instead of the top of the list.
+- **The project switcher is now a foldable tree.** `Space` folds/unfolds a
+  project's sessions (fetched once per project, main sessions only, most recent
+  first; `▸`/`▾` mark the fold state). Navigating and `/` search cover the
+  sessions too, and a project header stays visible when one of its unfolded
+  sessions matches the filter.
+  - `Enter` on a **project row** still focuses it and shows its current session.
+  - `Enter`/`Space` on a **session row** shows that session in the project's
+    TUI. This is a **view selector only**: `.ocmux.json` is never written, so
+    `agentp` keeps prompting the stored session.
+- **The project switcher inspects by default; `--all-projects` unlocks it.**
+  Selecting another project (or one of its sessions) now only moves the *view*
+  — leaving the switcher always returns to the project `ocmux` was started in,
+  and nothing is ever written to another project's `.ocmux.json`. Since `agentp`
+  sends prompts to whatever the state file **of the directory it runs in**
+  records, the default is safe and unambiguous: you can look around, but your
+  own project is what `agentp` keeps targeting. The new **`--all-projects`**
+  flag opts into the multi-project mode: the picker follows the switcher to the
+  selected project, and a session picked there updates *that* project's
+  `.ocmux.json` — the file `agentp` reads when it runs in that directory.
+- **The session list says where you are.** The title bar is now
+  `ocmux — <project> sessions` (basename of the project directory) instead of
+  the fixed `ocmux — sessions`, so a list is never mistaken for another
+  project's.
+
+### Changed
+
+- **One brown/light-yellow theme for the list chrome.** The title bar and the
+  bottom status bar (key hints + search line) are now drawn **black on
+  brown/dark-yellow** instead of reverse video; the cursor pointer `▶` is
+  **light-yellow**; and the info-panel labels are **brown**, turning
+  **light-yellow** when the pointed row is the session currently selected in the
+  TUI (they were plain bold white before). The pointer is painted outside the
+  row's own styling so it stays visible on reverse-video rows.
+
 ## [2.0.1] - 2026-10-08
 
 The **broadcast** release. Fixes deferred/explicit broadcast delivery, hardens
