@@ -530,6 +530,11 @@ describe('createProjectWindow', () => {
 });
 
 // ───────────────────────────────────────────────────────────────────
+// bin/ocmux — the child-session "Subagents" panel workaround was removed:
+// child/subagent sessions are no longer listed in the picker, so the Escape
+// key trick (which could in theory interrupt a running prompt) is unnecessary.
+
+// ───────────────────────────────────────────────────────────────────
 // bin/ocmux — CLI behavior
 // ───────────────────────────────────────────────────────────────────
 describe('ocmux CLI', () => {

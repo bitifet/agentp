@@ -751,6 +751,19 @@ describe('agentp CLI', () => {
       assert.strictEqual(mockCfg._listSessionsCalled, 'http://remote:9999');
     });
 
+    it('ignores child/subagent sessions when picking the newest target', async () => {
+      mockCfg.sessions = [
+        { id: 'child', parentID: 'parent', time: { updated: 200 } }, // newest, but a subagent
+        { id: 'main', time: { updated: 100 } },
+      ];
+      setArgv(['--defer']);
+      provideStdin('hello\n');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(t.sessionId, 'main');
+    });
+
     it('queues follow-up text before applying the ticket defer wait', async () => {
       const tmp = path.join(os.tmpdir(), `agentp_test_followup_wait_${Date.now()}.tmp`);
       fs.writeFileSync(tmp, '');

@@ -179,10 +179,10 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    - an **inverted footer** with the key hints, plus info lines about the
      selected session (title, location, and a responsive grid of model, agent,
      status + time in status, tokens, cost, context limit, outcome).
-   - **child/subagent sessions** (`parentID` set — e.g. old `@explore`/`@general`
-     runs) make OpenCode's TUI default to its "Subagents" tab instead of the
-     prompt; `ocmux` collapses it by sending `Escape` to the TUI pane after
-     launching on such a session.
+   - only **main** sessions are listed — child/subagent sessions (`parentID`
+     set, e.g. old `@explore`/`@general` runs) are hidden: OpenCode's TUI
+     defaults those to a "Subagents" tab, so they are not offered as targets
+     (`ocmux session <id>` / `agentp --session` can still reach one explicitly).
    - **new sessions inherit the model of the previously selected session**
      (falling back to the server default) — API-created v2 sessions have no
      model and won't run a prompt until one is set.

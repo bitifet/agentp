@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, getSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -163,24 +163,6 @@ function newestSessionId(sessions) {
 // ---------------------------------------------------------------------------
 // Shared list rendering (scrollable viewport + resize-aware)
 // ---------------------------------------------------------------------------
-
-// OpenCode's TUI defaults child sessions (parentID set — old subagent runs) to
-// the "Subagents" composer tab instead of the prompt. Sending a couple of
-// Escape keys to the TUI pane collapses it back to the prompt. Timers are
-// fire-and-forget (they keep the process alive briefly after the picker exits).
-function dismissChildSubagentsTab(server, winIdx, sessionId) {
-  getSession(server, sessionId).then((s) => {
-    if (!s || !s.parentID) return;
-    const pane = tuiPaneId(winIdx);
-    if (!pane) return;
-    const sendEsc = () => {
-      const p = tuiPaneId(winIdx);
-      if (p) tmux(['send-keys', '-t', p, 'Escape']);
-    };
-    setTimeout(sendEsc, 900);
-    setTimeout(sendEsc, 2000);
-  }).catch(() => {});
-}
 
 // Visible window for a list rendered in `height` rows around `cursor`.
 // Pure (unit-tested). Returns { start, count }.
@@ -972,6 +954,10 @@ async function cmdSessionSwitch(targetDir, directRef) {
       process.exit(1);
     });
     const sorted = sortSessionsByRecency(sessions);
+    // Only "main" sessions are listed in the picker: exclude child/subagent
+    // sessions (parentID set) — they are work products of a main session, not
+    // targets. Explicit --session can still reach one by id/title.
+    const mainSessions = sorted.filter(s => !s.parentID);
     const annotations = projectState.readAnnotations(sf);
     const runningIds = await getActiveSessions(server);
     let modelContext = new Map();
@@ -983,7 +969,6 @@ async function cmdSessionSwitch(targetDir, directRef) {
     const applySession = (id) => {
       projectState.writeProjectState(sf, { session: id });
       relaunchTui(winIdx, dir, server, id);
-      dismissChildSubagentsTab(server, winIdx, id);
     };
 
     if (directRef) {
@@ -1007,9 +992,9 @@ async function cmdSessionSwitch(targetDir, directRef) {
     // Interactive: Enter switches but stays open; n creates (inheriting the
     // model of the previously selected session); r renames; R sets a reminder;
     // d deletes; a switches agent; m switches model; p switches project; q quits.
-    let lastRef = (state.session && sorted.find(s => String(s.id) === String(state.session))) || sorted[0] || null;
+    let lastRef = (state.session && mainSessions.find(s => String(s.id) === String(state.session))) || mainSessions[0] || null;
     const result = await new Promise((resolve) => {
-      sessionMenu(sorted, state.session, annotations, server, {
+      sessionMenu(mainSessions, state.session, annotations, server, {
         runningIds,
         modelContext,
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
@@ -1130,11 +1115,9 @@ async function doForceServe(targetDir, sf, server) {
   const winIdx = windowByDir(targetDir);
   if (winIdx != null) {
     relaunchTui(winIdx, targetDir, server, session);
-    dismissChildSubagentsTab(server, winIdx, session);
     console.error(`Repointed ${targetDir} to ${server} (session ${session}).`);
   } else {
-    const created = createProjectWindow(targetDir, server, session);
-    dismissChildSubagentsTab(server, created.index, session);
+    createProjectWindow(targetDir, server, session);
     console.error(`Recreated project window for ${targetDir} → ${server} (session ${session}).`);
   }
 }
@@ -1170,8 +1153,7 @@ async function doServeNew(targetDir, serverArg) {
 
   console.error(`Creating project window for ${targetDir} (session ${session})...`);
   try {
-    const created = createProjectWindow(targetDir, server, session);
-    dismissChildSubagentsTab(server, created.index, session);
+    createProjectWindow(targetDir, server, session);
   } catch (err) {
     console.error(`Error: ${err.message}`);
     process.exit(1);
@@ -1259,8 +1241,7 @@ async function cmdResurrect(targetDir) {
     process.exit(1);
   }
   console.error(`Recreating project window for ${dir}...`);
-  const created = createProjectWindow(dir, server, state.session);
-  dismissChildSubagentsTab(server, created.index, state.session);
+  createProjectWindow(dir, server, state.session);
 }
 
 // ---------------------------------------------------------------------------

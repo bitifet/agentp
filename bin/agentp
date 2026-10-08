@@ -270,7 +270,9 @@ async function resolveTargetSession(serverBase, sessionName, newSession, opts = 
   }
 
   if (sessions && sessions.length > 0) {
-    const sorted = sortSessionsByRecency(sessions).filter(s => s.id);
+    // Only "main" sessions (no parentID) are considered as implicit targets —
+    // child/subagent sessions are work products, not conversation targets.
+    const sorted = sortSessionsByRecency(sessions).filter(s => s.id && !s.parentID);
     if (sorted.length > 0) return sorted[0].id;
   }
 
