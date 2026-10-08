@@ -146,8 +146,10 @@ exits 1 with a hint to start `opencode serve`. It is never started or managed.
 
 There is **no `ocmux down`/`up`** — the server is user-managed (§11.1).
 
-Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
-`serve` aliases: `new` (deprecated).
+Retained flags: `--git`, `--GIT`, `-l`, `--all-projects`, `--print-logs`,
+`--version`, `-h`. `serve` aliases: `new` (deprecated).
+`--all-projects` only affects the interactive picker (§4.2) — it is accepted
+(and inert) elsewhere.
 
 ### 4.2 `ocmux` (no arguments) — session picker
 
@@ -161,23 +163,51 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    - rows: an **active spinner** (⠋…), title, last-view time (`HH:MM`, or
      `dd/mm/yyyy` when older than 24h; column dropped on narrow terminals),
      current `*`, reminder `◈`
-   - a **centered, inverted heading** and a **scrollable viewport** (range in the
-     heading) that re-renders on terminal resize
+   - a **centered title bar** and a **scrollable viewport** (range in the
+     heading) that re-renders on terminal resize. The title reads
+     **`ocmux — <project> sessions`** (basename of the project dir; plain
+     `ocmux — sessions` only when no project is known), so the list never hides
+     which project it is showing. Title bar and status bar are
+     drawn **black on brown/dark-yellow**, the cursor pointer `▶` is
+     **light-yellow**, and info-panel labels are brown (light-yellow when the
+     pointed row is the session currently selected in the TUI)
    - `Enter`/`Space` switches to the row but **stays open**; `n` creates (name
      input, blank = auto-title); `r` renames; `R` (Shift+r) sets a reminder;
-     `d` deletes (y/N); `a` switches agent; `m` switches model; `p` opens the
-     project switcher; `h` toggles help; `q` quits (only here — see below)
+     `d` deletes (y/N); `a` switches agent; `m` switches model (the list is
+     sorted by provider and opens on the session's **current model**, also in
+     broadcast mode where it starts from the cursor session's model); `p` opens
+     the project switcher; `h` toggles help; `q` quits (only here — see below)
     - **Menu exit rule**: `q`/`ESC` only *close the current menu and return to the
       previous one* in every menu except the session picker itself; **`Ctrl+C`
       fully exits `ocmux` from any menu** (help, input/confirm prompts, pickers,
       broadcast).
    - **`/` incremental search** (session picker, model/agent pickers and project
      switcher): typing filters the list live (case-insensitive; whitespace
-     tokens are ANDed), the inverted bottom line shows `Search: <pattern>▏`, and
+     tokens are ANDed), the status bar shows `Search: <pattern>▏`, and
      its right end shows `Enter: confirm · Esc: cancel`. `Enter` keeps the filter
      and returns to normal navigation, `ESC` clears it, `/` resumes editing it,
      arrows still move through the filtered view, and `Backspace` on an
      already-empty search also exits it.
+   - **Project switcher (`p`)**: a foldable tree of the project windows, `▸`/`▾`
+     marking each project as folded/unfolded. `Space` folds/unfolds a project's
+     sessions (fetched once per project via `GET /api/session?directory=…`, main
+     sessions only, most recently viewed first); while fetching it shows a
+     loading line, and a project without a recorded server reports an error
+     instead of hanging. `/` searches projects *and* their unfolded sessions — a
+     matching session keeps its project header visible.
+     - **Default — inspector.** `Enter` on a **project row** focuses it and shows
+       its current session (`state.session`); `Enter`/`Space` on a **session
+       row** relaunches that project's TUI on the chosen session. Either way
+       **no `.ocmux.json` is written** and leaving the switcher (`q`) returns to
+       **the picker's own project** — the switcher only moves the *view*, so
+       `agentp` (which reads the state file of the directory it runs in) keeps
+       prompting the current project's session.
+     - **`--all-projects` — switcher.** Selecting a row also moves the session
+       picker to that project (its name heads the title), and picking a session
+       there updates **that** project's `.ocmux.json` — the file `agentp` reads
+       when run in that directory. The switcher itself still writes nothing; the
+       write happens when the picker picks.
+     - `h` toggles help, `q` returns to the session menu, `Ctrl+C` exits.
    - **Broadcast (`Space`)**: only `Enter` switches. `Space` over a *different*
      session enters broadcast mode: `Space` toggles each session (selection
      persists to `.ocmux.json` `broadcast`), `Enter` keeps the selection and
@@ -198,9 +228,11 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
      Deferred broadcast tickets carry `sessionIds` (not a misleading single
      `sessionId`) and preserve the target list for the detached child even if
      `.ocmux.json` changes later.
-   - an **inverted footer** with the key hints, plus info lines about the
-     selected session (title, location, and a responsive grid of model, agent,
-     status + time in status, tokens, cost, context limit, outcome).
+   - a **status bar** (black on brown/dark-yellow) with the key hints, plus info
+     lines about the selected session (title, location, and a responsive grid of
+     model, agent, status + time in status, tokens, cost, context limit,
+     outcome) whose labels are brown, turning light-yellow when the pointed row
+     is the session currently selected in the TUI.
    - only **main** sessions are listed — child/subagent sessions (`parentID`
      set, e.g. old `@explore`/`@general` runs) are hidden: OpenCode's TUI
      defaults those to a "Subagents" tab, so they are not offered as targets
@@ -552,15 +584,21 @@ Parallelization: C and D after A; E deferred; F continuously; G last.
    - Note: a server's launch directory is only its *default location*; it can
      serve any location via `directory`/`location` parameters.
 2. **No in-TUI drift handling.** The TUI is used **only for viewing** (reasoning
-   + colored markdown). Sessions are never switched inside the TUI. `.ocmux.json`
-   is authoritative; no `ocmux sync`/adoption logic.
+   + colored markdown). Session switches are always driven *by* `ocmux`; the TUI
+   never becomes a source of truth — the project switcher's session rows only
+   change what the TUI displays and never write `.ocmux.json`, and by default
+   they cannot even move the picker off the current project (§4.2). Only
+   `--all-projects` lets the picker follow a switcher selection into another
+   project, where its *own* picker becomes the writer. `.ocmux.json` is
+   authoritative; no `ocmux sync`/adoption logic.
 3. **`kill` keeps `.ocmux.json`.** Closing a project removes the tmux window/TUI
    but preserves the state file (session memory). `kill` may mark it
    `"status": "stopped"`; `list`/`switch` derive/defunct status from tmux window
    existence. There is no server to kill — only the TUI window.
 4. **`ocmux` (no args) prints nothing** on success; it is the interactive session
    switcher. Any diagnostics go to stderr. The `switch` subcommand was removed;
-   **`p`** in the picker opens the project switcher.
+   **`p`** in the picker opens the project switcher — an *inspector* of other
+   projects unless `--all-projects` is passed (§4.2).
 4b. **Session picker keys:** `Enter` switch (stays open) · `n` create · `r`
    rename (readline-style caret editing) · `R` reminder (annotation) · `d`
    delete · `a` agents · `m` model · `p` projects · `h` help · `q` quit. The

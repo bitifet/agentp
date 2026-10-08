@@ -30,6 +30,7 @@ function mockExecSync() { /* no-op */ }
 
 // ── Mock infrastructure for http.request (checkServer) ─────────────
 let httpMode = 'ok';          // 'ok' | 'down' (net error)
+let httpResponder = null;     // (opts) => body-string | null, per-request override
 
 function mockHttpRequest(opts, callback) {
   const res = {
@@ -54,8 +55,9 @@ function mockHttpRequest(opts, callback) {
         return;
       }
       callback(res);
-      // Emit an empty v2 envelope so makeRequest()-based helpers settle.
-      res._emit('data', '{"data":[]}');
+      const custom = httpResponder ? httpResponder(opts) : null;
+      // Emit a v2 envelope so makeRequest()-based helpers settle.
+      res._emit('data', custom != null ? custom : '{"data":[]}');
       res._emit('end');
     },
   };
@@ -93,6 +95,7 @@ function setupMocks() {
   tmuxHandler = null;
   spawnSyncCalls = [];
   httpMode = 'ok';
+  httpResponder = null;
   mockFiles = {};
   mockDirs = { '/proj': true, '/nope': true, '/proj1': true, '/proj2': true, '/other': true };
   fsWrites = [];
@@ -115,6 +118,7 @@ function tearDownMocks() {
   tmuxHandler = null;
   spawnSyncCalls = [];
   httpMode = 'ok';
+  httpResponder = null;
   mockFiles = {};
   mockDirs = {};
   fsWrites = [];
@@ -218,9 +222,31 @@ describe('renderList', () => {
 
   it('renders everything when it fits (no range suffix)', () => {
     const out = binOcmux.renderList({ title: 'T', items: ['a', 'b'], cursor: 1, row: (i, it) => it, footer: 'F', cols: 40, rows: 24 });
-    assert.ok(out.includes('  a'));
-    assert.ok(out.includes('▶ b'));
+    const plain = out.replace(/\x1b\[[0-9;]*m/g, '');
+    assert.ok(plain.includes('  a'));
+    assert.ok(plain.includes('▶ b'));
     assert.ok(!out.includes('/2'));
+  });
+
+  it('paints the pointer light-yellow and keeps it visible on reverse rows', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['a', 'b'], cursor: 1,
+      row: (i, it) => (it === 'b' ? { text: 'b', reverse: true } : it),
+      footer: 'F', cols: 40, rows: 24,
+    });
+    assert.ok(out.includes(`${binOcmux.LIGHT_YELLOW}▶\x1b[0m `));
+    // The pointer's own reset must not swallow the row's reverse video.
+    assert.ok(out.includes('\x1b[7mb\x1b[0m'));
+  });
+
+  it('uses the brown title/status bars instead of reverse video', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
+      footer: 'Key hints', cols: 30, rows: 8,
+    });
+    const lines = out.split('\n').filter((l) => l.includes(binOcmux.BAR_BG));
+    assert.strictEqual(lines.length, 2, 'expected the title and status bar');
+    assert.ok(!out.includes('\x1b[7m'));
   });
 
   it('supports reverse-video rows and extra lines', () => {
@@ -295,13 +321,14 @@ describe('sessionInfoLines', () => {
     assert.ok(text.includes('Ctx: --'));
   });
 
-  it('colours labels yellow when highlighted (current session under cursor)', () => {
+  it('colours labels light-yellow when highlighted, brown otherwise', () => {
     const s = { id: 's1', title: 'T' };
     const plain = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120, false).join('\n');
     const yellow = binOcmux.sessionInfoLines(s, new Set(), new Map(), 120, true).join('\n');
-    assert.ok(plain.includes('\x1b[1m'));
-    assert.ok(!plain.includes('\x1b[1;33m'));
-    assert.ok(yellow.includes('\x1b[1;33m'));
+    assert.ok(plain.includes(binOcmux.BROWN));
+    assert.ok(!plain.includes(binOcmux.LIGHT_YELLOW));
+    assert.ok(yellow.includes(binOcmux.LIGHT_YELLOW));
+    assert.ok(!yellow.includes(binOcmux.BROWN));
   });
 });
 
@@ -857,6 +884,21 @@ describe('ocmux CLI', () => {
     assert.ok(stderrOutput.some(s => s.includes('Usage: ocmux')));
   });
 
+  it('--help documents --all-projects', async () => {
+    await runMain(['--help']);
+    const out = stderrOutput.join('');
+    assert.ok(out.includes('--all-projects'), 'expected the flag in the options list');
+    assert.ok(out.includes('you always return to your own project’s list.'));
+  });
+
+  it('--all-projects is a known option (dispatch still runs)', async () => {
+    await runMain(['--all-projects']);
+    const out = stderrOutput.join('');
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(out.includes('no .ocmux.json found'), 'expected the default command to dispatch');
+    assert.ok(!out.includes('unknown option'));
+  });
+
   it('--version prints the package version', async () => {
     await runMain(['--version']);
     assert.strictEqual(exitThrown, 0);
@@ -938,19 +980,18 @@ describe('search helpers', () => {
       title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
       footer: 'Search: ab', footerLeft: true, cols: 20, rows: 10,
     });
-    assert.ok(out.includes('\x1b[7mSearch: ab' + ' '.repeat(10) + '\x1b[0m'));
+    assert.ok(out.includes(binOcmux.BAR_BG + 'Search: ab' + ' '.repeat(10) + '\x1b[0m'));
   });
 
-  it('renderList pins a right-aligned hint (footerRight) on the footer bar', () => {
+  it('renderList pins a right-aligned hint (footerRight) on the status bar', () => {
     const out = binOcmux.renderList({
       title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
       footer: 'Search: ab', footerLeft: true, footerRight: 'Enter: confirm · Esc: cancel',
       cols: 40, rows: 10,
     });
     assert.ok(out.includes('Search: ab'));
-    // The right hint ends the (full-width) inverted bar.
-    assert.ok(/\x1b\[7m.*Enter: confirm · Esc: cancel\x1b\[0m/.test(out));
-    const bar = out.split('\n').find((l) => l.includes('Search: ab'));
+    const bar = out.split('\n').find((l) => l.includes('Enter: confirm · Esc: cancel'));
+    assert.ok(bar && bar.includes(binOcmux.BAR_BG), 'expected the hint on the status bar');
     assert.strictEqual(bar.replace(/\x1b\[[0-9;]*m/g, '').length, 40);
   });
 });
@@ -1153,7 +1194,7 @@ describe('sessionMenu broadcast exit', () => {
 });
 
 // Interactive project switcher harness (mirrors driveSessionMenu).
-async function driveSwitchMenu(rows, keys) {
+async function driveSwitchMenu(rows, keys, options = {}) {
   const output = [];
   const orig = {
     isTTY: process.stdin.isTTY,
@@ -1168,7 +1209,7 @@ async function driveSwitchMenu(rows, keys) {
   process.stdin.pause = () => {};
   process.stderr.write = (s) => { output.push(String(s)); return true; };
   try {
-    const p = binOcmux.switchMenu(rows, false);
+    const p = binOcmux.switchMenu(rows, options);
     for (const [str, name, ctrl] of keys) {
       await new Promise((r) => setTimeout(r, 5));
       process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false });
@@ -1190,6 +1231,11 @@ async function driveSwitchMenu(rows, keys) {
 
 describe('switchMenu (project switcher)', () => {
   const rows = [
+    { dir: '/proj1', status: 'running', session: 's1', index: 1, server: 'http://server' },
+    { dir: '/proj2', status: 'running', session: 's2', index: 2, server: 'http://server' },
+  ];
+  // A project window recorded before `--server` was mandatory.
+  const noServerRows = [
     { dir: '/proj1', status: 'running', session: 's1', index: 1 },
     { dir: '/proj2', status: 'running', session: 's2', index: 2 },
   ];
@@ -1201,9 +1247,24 @@ describe('switchMenu (project switcher)', () => {
     assert.ok(!output.some((o) => o.includes('project switcher — help')));
   });
 
-  it('Enter focuses a project and q returns its directory', async () => {
-    const { result } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']]);
+  it('Enter focuses a project for inspection but never leaves the current project', async () => {
+    // Pretend another project's window is the one currently on screen.
+    tmuxHandler = (args) => (args[0] === 'list-windows' && args.includes('#{window_index} #{window_active}')
+      ? tmuxOk('1 0\n2 1\n')
+      : tmuxOk(''));
+    const { result, output } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']]);
+    assert.strictEqual(result, null, 'the switcher must not move the picker by default');
+    assert.ok(spawnSyncCalls.some((c) => c.cmd === 'tmux' && c.args[0] === 'select-window'
+      && c.args.includes('Opencode:1')),
+    'expected the inspected project’s window to be focused');
+    assert.ok(output.some((o) => o.includes('Enter: view')), 'expected the inspect-mode status bar');
+    assert.strictEqual(fsWrites.length, 0, '.ocmux.json must stay untouched');
+  });
+
+  it('--all-projects lets Enter move the picker to the selected project', async () => {
+    const { result, output } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']], { allProjects: true });
     assert.strictEqual(result, '/proj1');
+    assert.ok(output.some((o) => o.includes('Enter: switch')), 'expected the switch-mode status bar');
   });
 
   it("'h' opens the help overlay", async () => {
@@ -1220,5 +1281,155 @@ describe('switchMenu (project switcher)', () => {
   it('search shows the confirm/cancel hint on the right', async () => {
     const { output } = await driveSwitchMenu(rows, [['/', 'slash'], ['p', 'p'], ['', 'escape'], ['q', 'q']]);
     assert.ok(output.some((o) => o.includes('Search: p') && o.includes('Enter: confirm · Esc: cancel')));
+  });
+
+  const serveProjectSessions = () => {
+    httpResponder = (opts) => (opts.path && opts.path.startsWith('/api/session')
+      ? JSON.stringify({ data: [
+          { id: 'sX', title: 'Other', time: {} },
+          { id: 's1', title: 'Stored', time: {} },
+        ] })
+      : null);
+  };
+  const projRows = [{ dir: '/proj1', status: 'alive', session: 's1', index: 1, server: 'http://server' }];
+  const viewSessionKeys = [
+    [' ', 'space'],   // unfold
+    ['', 'down'],     // first session row
+    ['', 'return'],   // show it in the TUI
+    ['q', 'q'],       // leave the switcher
+  ];
+
+  it('Space unfolds a project’s sessions and Enter views one without writing state', async () => {
+    serveProjectSessions();
+    const { result, output } = await driveSwitchMenu(projRows, viewSessionKeys);
+    assert.strictEqual(result, null, 'inspection must not move the picker');
+    const frame = output.find((o) => o.includes('Other'));
+    assert.ok(frame, 'expected unfolded session rows');
+    const plain = frame.replace(/\x1b\[[0-9;]*m/g, '');
+    assert.ok(plain.includes('▾ proj1'), 'expected the project shown as unfolded');
+    assert.ok(plain.includes('Stored  *  s1'), 'expected the stored session marked');
+    const relaunch = spawnSyncCalls.find((c) => c.cmd === 'tmux' && c.args[0] === 'send-keys'
+      && c.args.some((a) => typeof a === 'string' && a.includes("--session 'sX'")));
+    assert.ok(relaunch, 'expected the TUI relaunched on the chosen session');
+    assert.strictEqual(fsWrites.length, 0, '.ocmux.json must stay untouched (view selector)');
+  });
+
+  it('--all-projects lets a session row move the picker to that project', async () => {
+    serveProjectSessions();
+    const { result } = await driveSwitchMenu(projRows, viewSessionKeys, { allProjects: true });
+    assert.strictEqual(result, '/proj1');
+    const relaunch = spawnSyncCalls.find((c) => c.cmd === 'tmux' && c.args[0] === 'send-keys'
+      && c.args.some((a) => typeof a === 'string' && a.includes("--session 'sX'")));
+    assert.ok(relaunch, 'expected the TUI relaunched on the chosen session');
+    assert.strictEqual(fsWrites.length, 0, 'the switcher itself never writes state');
+  });
+
+  it('Space on a project without a server reports it; Enter still activates it', async () => {
+    const { result, output } = await driveSwitchMenu(noServerRows, [[' ', 'space'], ['', 'return'], ['q', 'q']]);
+    assert.strictEqual(result, null, 'inspection must not move the picker');
+    assert.ok(spawnSyncCalls.some((c) => c.cmd === 'tmux' && c.args[0] === 'select-window'
+      && c.args.includes('Opencode:1')),
+    'expected Enter to focus the project anyway');
+    const plain = output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
+    assert.ok(plain.includes('! proj1: no server recorded'), 'expected a fold error, not a hang');
+    const unfolded = output.find((o) => o.includes('no server recorded'));
+    assert.ok(unfolded && unfolded.includes('▾ proj1'), 'expected the project shown as open');
+  });
+
+  it('help explains the mode: inspect-only vs --all-projects', async () => {
+    const inspect = await driveSwitchMenu(rows, [['h', 'h'], ['q', 'q'], ['q', 'q']]);
+    assert.ok(inspect.output.some((o) => o.includes('You always come back to your own project’s list')));
+    const multi = await driveSwitchMenu(rows, [['h', 'h'], ['q', 'q'], ['q', 'q']], { allProjects: true });
+    assert.ok(multi.output.some((o) => o.includes('--all-projects: selecting moves the picker')));
+    assert.ok(multi.output.some((o) => o.includes('ocmux — project switcher (all projects)')));
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Model picker: sorted by provider, cursor on the current model
+// ───────────────────────────────────────────────────────────────────
+describe('model picker ordering', () => {
+  const models = [
+    { providerID: 'zzz', id: 'model' },
+    { providerID: 'aaa', id: 'model' },
+    { providerID: 'openai', id: 'gpt' },
+  ];
+  const sortedLabels = ['aaa/model', 'openai/gpt', 'zzz/model'];
+  const serveModels = () => {
+    httpResponder = (opts) => (opts.path && opts.path.startsWith('/api/model')
+      ? JSON.stringify({ data: models })
+      : null);
+  };
+  const pointerLine = (output, title = 'ocmux — Models') => {
+    const frame = output.find((o) => o.includes(title));
+    assert.ok(frame, `expected "${title}" to open`);
+    const plain = frame.replace(/\x1b\[[0-9;]*m/g, '');
+    const order = sortedLabels.map((t) => plain.indexOf(t));
+    assert.ok(order.every((v) => v >= 0), 'expected every model listed');
+    assert.ok(order[0] < order[1] && order[1] < order[2], 'expected models sorted by provider');
+    return plain.split('\n').find((l) => l.includes('▶'));
+  };
+
+  it('sortModels orders by provider then id', () => {
+    const sorted = binOcmux.sortModels(models);
+    assert.deepStrictEqual(sorted.map((m) => `${m.providerID}/${m.id}`), sortedLabels);
+    assert.deepStrictEqual(binOcmux.sortModels(null), []);
+  });
+
+  it('indexOfModel locates a session’s current model (or -1)', () => {
+    // `models` is deliberately unsorted: openai/gpt sits at index 2 there.
+    assert.strictEqual(binOcmux.indexOfModel(models, { providerID: 'openai', id: 'gpt' }), 2);
+    assert.strictEqual(binOcmux.indexOfModel(models, { providerID: 'OpenAI', id: 'GPT' }), 2);
+    assert.strictEqual(binOcmux.indexOfModel(models, { providerID: 'nope', id: 'x' }), -1);
+    assert.strictEqual(binOcmux.indexOfModel(models, null), -1);
+  });
+
+  it('m opens the picker with the cursor on the current model', async () => {
+    serveModels();
+    const { output } = await driveSessionMenu({
+      sessions: [{ id: 'sA', title: 'Alpha', model: { providerID: 'openai', id: 'gpt' } }],
+      current: 'sA', opts: {},
+      keys: [['m', 'm'], ['q', 'q'], ['q', 'q']],
+    });
+    assert.strictEqual(pointerLine(output), '▶ openai/gpt');
+  });
+
+  it('broadcast m starts from the cursor session’s model', async () => {
+    serveModels();
+    const { output } = await driveSessionMenu({
+      sessions: [
+        { id: 'sA', title: 'Alpha', model: { providerID: 'openai', id: 'gpt' } },
+        { id: 'sB', title: 'Beta', model: { providerID: 'aaa', id: 'model' } },
+      ],
+      current: 'sA', opts: {},
+      keys: [['', 'down'], [' ', 'space'], ['m', 'm'], ['q', 'q'], ['q', 'q'], ['q', 'q']],
+    });
+    assert.strictEqual(pointerLine(output, 'ocmux — Broadcast model'), '▶ aaa/model');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// The session list names the project it is showing
+// ───────────────────────────────────────────────────────────────────
+describe('session list title', () => {
+  const sessions = [{ id: 'sA', title: 'Alpha' }];
+
+  it('heads the title bar with the project name', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: { dir: '/home/joanmi/Nextcloud/prj/tools/agentp' },
+      keys: [['q', 'q']],
+    });
+    assert.ok(output.some((o) => o.includes('ocmux — agentp sessions')));
+    assert.ok(!output.some((o) => o.includes('ocmux — sessions')),
+      'the bare title must not appear once a project is known');
+  });
+
+  it('falls back to the plain title when no project dir is given', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['q', 'q']],
+    });
+    assert.ok(output.some((o) => o.includes('ocmux — sessions')));
   });
 });
