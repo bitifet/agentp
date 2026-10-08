@@ -239,6 +239,20 @@ describe('listSessions', { concurrency: false }, () => {
     assert.match(ctrl.lastReq().opts.path, /directory=/);
     assert.match(ctrl.lastReq().opts.path, /%2Fhome%2Fproj/);
   });
+
+  it('follows pagination cursors', async () => {
+    const paths = [];
+    ctrl.reset({ status: 200, body: '' });
+    mockCfg.factory = (idx, opts) => {
+      paths.push(opts.path);
+      return idx === 1
+        ? { body: JSON.stringify({ data: [{ id: 's2' }], cursor: { next: 'next-page' } }) }
+        : { body: JSON.stringify({ data: [{ id: 's1' }], cursor: {} }) };
+    };
+    const result = await opencode.listSessions('http://localhost:4096', '/home/proj');
+    assert.deepStrictEqual(result.map(s => s.id), ['s2', 's1']);
+    assert.match(paths[1], /cursor=next-page/);
+  });
 });
 
 describe('createSession (v2)', { concurrency: false }, () => {
@@ -499,6 +513,20 @@ describe('listenForFinalAnswer (v2)', { concurrency: false }, () => {
     assert.strictEqual(r, 'PONG');
   });
 
+  it('uses session.text.ended as the authoritative final segment text', async () => {
+    opencode._setCompletionGraceMs(60);
+    const server = await startSseServer([
+      { id: 'a', type: 'session.text.started', data: {} },
+      { id: 'b', type: 'session.text.delta', data: { delta: 'incom' } },
+      { id: 'c', type: 'session.text.ended', data: { text: 'complete' } },
+      { id: 'd', type: 'session.execution.succeeded', data: {} },
+    ]);
+    const r = await opencode.listenForFinalAnswer(serverUrl(server));
+    server.close();
+    opencode._setCompletionGraceMs(5000);
+    assert.strictEqual(r, 'complete');
+  });
+
   it('resolves immediately on interruption', async () => {
     const server = await startSseServer([
       { id: 'a', type: 'session.text.delta', data: { delta: 'partial' } },
@@ -511,34 +539,80 @@ describe('listenForFinalAnswer (v2)', { concurrency: false }, () => {
 });
 
 describe('sendToSession (v2)', { concurrency: false }, () => {
-  it('attaches the listener first, steers the prompt, and returns the answer', async () => {
-    opencode._setCompletionGraceMs(60);
-    const server = await startSseServer([
-      { id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'Done' } },
-      { id: 'b', type: 'session.execution.succeeded', data: { sessionID: 's1' } },
-    ]);
+  async function startDurableServer(messages, requests) {
+    const server = http.createServer((req, res) => {
+      requests.push({ method: req.method, url: req.url });
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        if (req.url === '/api/session/s1/prompt') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: { id: 'msg_prompt', time: { created: 1000 } } }));
+          return;
+        }
+        if (req.url === '/api/experimental/session/s1/wait') {
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+        if (req.url.startsWith('/api/session/s1/message?')) {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ data: messages, cursor: {} }));
+          return;
+        }
+        res.writeHead(404);
+        res.end();
+      });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    return server;
+  }
+
+  it('waits for idle and returns the durable projected answer', async () => {
+    const requests = [];
+    const server = await startDurableServer([
+      { id: 'msg_idle', type: 'idle', outcome: 'succeeded' },
+      { id: 'msg_answer', type: 'assistant', content: [{ type: 'text', text: 'Done' }] },
+      { id: 'msg_prompt', type: 'user', text: 'go' },
+    ], requests);
     const r = await opencode.sendToSession(serverUrl(server), 's1', 'go');
     server.close();
-    opencode._setCompletionGraceMs(5000);
     assert.strictEqual(r, 'Done');
+    assert.deepStrictEqual(requests.map(x => `${x.method} ${x.url.split('?')[0]}`), [
+      'POST /api/session/s1/prompt',
+      'POST /api/experimental/session/s1/wait',
+      'GET /api/session/s1/message',
+    ]);
   });
 
-  it('returns partial text when execution fails', async () => {
-    opencode._setCompletionGraceMs(60);
-    const server = await startSseServer([
-      { id: 'a', type: 'session.text.delta', data: { sessionID: 's1', delta: 'partial' } },
-      { id: 'b', type: 'session.execution.failed', data: { sessionID: 's1', error: { type: 'provider.auth' } } },
-    ]);
+  it('returns complete persisted partial text when execution fails', async () => {
+    const requests = [];
+    const server = await startDurableServer([
+      { id: 'msg_idle', type: 'idle', outcome: 'failed' },
+      { id: 'msg_answer', type: 'assistant', content: [{ type: 'text', text: 'partial' }] },
+      { id: 'msg_prompt', type: 'user', text: 'go' },
+    ], requests);
     const r = await opencode.sendToSession(serverUrl(server), 's1', 'go');
     server.close();
-    opencode._setCompletionGraceMs(5000);
     assert.strictEqual(r, 'partial');
   });
 });
 
+describe('durable turn reconstruction', () => {
+  it('collects text segments in order and stops at the first idle marker', () => {
+    const result = opencode.answerFromTurn([
+      { type: 'assistant', content: [{ type: 'text', text: 'first' }, { type: 'tool' }] },
+      { type: 'assistant', content: [{ type: 'text', text: 'second' }] },
+      { type: 'idle', outcome: 'succeeded' },
+      { type: 'assistant', content: [{ type: 'text', text: 'later turn' }] },
+    ]);
+    assert.strictEqual(result, 'first\n\nsecond');
+  });
+});
+
 describe('v2 completion quiescence', { concurrency: false }, () => {
-  it('defers completion while sub-agent (child session) activity continues', async () => {
-    opencode._setCompletionGraceMs(100);
+  it('ignores child-session activity when listening to one target session', async () => {
+    opencode._setCompletionGraceMs(60);
     const server = http.createServer((req, res) => {
       if (req.url === '/api/event') {
         res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -550,9 +624,8 @@ describe('v2 completion quiescence', { concurrency: false }, () => {
           w({ id: 'c', type: 'session.text.delta', data: { sessionID: 'child', delta: 'subagent working' } });
         }, 20);
         setTimeout(() => {
-          w({ id: 'd', type: 'session.text.delta', data: { sessionID: 's1', delta: 'second' } });
-          w({ id: 'e', type: 'session.execution.succeeded', data: { sessionID: 's1' } });
-        }, 160);
+          w({ id: 'd', type: 'session.text.delta', data: { sessionID: 'child', delta: 'still unrelated' } });
+        }, 120);
         req.on('close', () => {});
       } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -568,7 +641,7 @@ describe('v2 completion quiescence', { concurrency: false }, () => {
     const result = await opencode.listenForSessionEvents(url, 's1', {});
     server.close();
     opencode._setCompletionGraceMs(5000);
-    assert.strictEqual(result, 'firstsecond');
+    assert.strictEqual(result, 'first');
   });
 });
 
@@ -577,6 +650,19 @@ describe('listenForSessionEvents (v2)', { concurrency: false }, () => {
     opencode._setCompletionGraceMs(60);
     const server = await startSseServer([
       { id: 'a', type: 'session.text.delta', data: { sessionID: 'other', delta: 'wrong' } },
+      { id: 'b', type: 'session.text.delta', data: { sessionID: 's1', delta: 'right' } },
+      { id: 'c', type: 'session.execution.succeeded', data: { sessionID: 's1' } },
+    ]);
+    const r = await opencode.listenForSessionEvents(serverUrl(server), 's1', {});
+    server.close();
+    opencode._setCompletionGraceMs(5000);
+    assert.strictEqual(r, 'right');
+  });
+
+  it('does not resolve on another session interruption', async () => {
+    opencode._setCompletionGraceMs(60);
+    const server = await startSseServer([
+      { id: 'a', type: 'session.execution.interrupted', data: { sessionID: 'other' } },
       { id: 'b', type: 'session.text.delta', data: { sessionID: 's1', delta: 'right' } },
       { id: 'c', type: 'session.execution.succeeded', data: { sessionID: 's1' } },
     ]);

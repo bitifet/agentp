@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **agentp reads durable OpenCode turn output.** Direct session sends now use
+  `POST /api/experimental/session/:id/wait` and then reconstruct the answer from
+  projected session messages after the admitted prompt ID, avoiding truncation
+  from SSE silence gaps, long runs, missed deltas, and the previous 90-second
+  safety cutoff. Older servers without the wait route fall back to polling for a
+  durable idle marker.
+- **SSE listeners are stricter about session scope.** Targeted listeners no
+  longer finish or reset completion because another session emitted activity or
+  was interrupted, and `session.text.ended` now replaces incomplete delta-built
+  text in the returned answer.
+- **ocmux explains moved sessions.** If the session recorded in `.ocmux.json`
+  still exists but has moved to another directory, the session picker now shows
+  where it moved and suggests opening that directory as its own project.
+- **ocmux loads every listed session page.** Session listing now follows
+  OpenCode pagination cursors instead of silently dropping sessions past the
+  first page.
+
 ## [2.0.1] - 2026-10-08
 
 The **broadcast** release. Fixes deferred/explicit broadcast delivery, hardens

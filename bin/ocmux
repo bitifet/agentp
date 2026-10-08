@@ -24,7 +24,7 @@ const {
   sleep,
   tuiAttachCommand,
 } = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions } = require('../lib/opencode');
+const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions, getSession } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -496,7 +496,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, notices = [] } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -618,7 +618,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         Math.max(8, cols - (showTime ? TIME_W + 10 : 8)),
       );
       const inBc = mode === 'broadcast' || mode === 'broadcast-confirm';
-      const extras = [];
+      const extras = [...notices];
       if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
         extras.push(`Delete session "${confirmDel.title || confirmDel.id || ''}"? (y/N) `);
       } else if (mode === 'input' && input) {
@@ -698,6 +698,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           applySearch();
           const ci = view.indexOf(created);
           cursor = ci >= 0 ? ci : 0;
+          current = created.id;
         } else if (!row.new) {
           current = row.id;
         }
@@ -1232,6 +1233,19 @@ async function cmdSessionSwitch(targetDir, directRef) {
       process.exit(1);
     });
     const sorted = sortSessionsByRecency(sessions);
+    const notices = [];
+    if (state.session && !sorted.some(s => String(s.id) === String(state.session))) {
+      try {
+        const moved = await getSession(server, state.session);
+        const movedDir = moved && moved.location && moved.location.directory;
+        if (movedDir && path.resolve(movedDir) !== path.resolve(dir)) {
+          notices.push(`⚠ Current session moved to ${movedDir}`);
+          notices.push(`  Run: ocmux serve ${JSON.stringify(movedDir)} --server ${JSON.stringify(server)}`);
+        }
+      } catch {
+        // A deleted/stale stored session is handled by the normal picker.
+      }
+    }
     // Only "main" sessions are listed in the picker: exclude child/subagent
     // sessions (parentID set) — they are work products of a main session, not
     // targets. Explicit --session can still reach one by id/title.
@@ -1275,6 +1289,7 @@ async function cmdSessionSwitch(targetDir, directRef) {
       sessionMenu(mainSessions, state.session, annotations, server, {
         runningIds,
         modelContext,
+        notices,
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
         onInspectSession: (id) => relaunchTui(winIdx, dir, server, id),
         onPick: async (row) => {

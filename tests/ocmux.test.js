@@ -1129,6 +1129,27 @@ describe('sessionMenu broadcast exit', () => {
     assert.ok(output.some((o) => o.includes('New session name')),
       'expected the input prompt before quitting');
   });
+
+  it('shows notices about sessions moved to another directory', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: { notices: ['⚠ Current session moved to /worktree', '  Run: ocmux serve /worktree'] },
+      keys: [['q', 'q']],
+    });
+    assert.ok(output.some(o => o.includes('Current session moved to /worktree')));
+    assert.ok(output.some(o => o.includes('ocmux serve /worktree')));
+  });
+
+  it('marks a newly created session as current', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onPick: async (row) => row.new ? { id: 'sNew', title: row.name } : null,
+      },
+      keys: [['n', 'n'], ['N', 'N'], ['e', 'e'], ['w', 'w'], ['', 'return'], ['q', 'q']],
+    });
+    assert.ok(output.some(o => /New\s+\*/.test(o)), 'expected the new session to carry the current marker');
+  });
 });
 
 // Interactive project switcher harness (mirrors driveSessionMenu).
