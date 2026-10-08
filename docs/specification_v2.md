@@ -171,8 +171,11 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
      session enters broadcast mode: `Space` toggles each session (selection
      persists to `.ocmux.json` `broadcast`; back to normal when <2 remain),
      `Enter` keeps the selection and switches to the cursor session, `ESC`/`q`
-     cancels. The footer shows only `Broadcast to sessions: <names>` while
-     selecting. `agentp` then sends the prompt to **all** selected sessions,
+     cancels. **Each newly selected session is opened in the TUI window** (so
+     you can inspect what is going on in it before deciding); deselecting does
+     not switch back. The footer shows only `Broadcast to sessions: <names>`
+     while selecting. `agentp` then sends the prompt to **all** selected
+     sessions,
      waiting for each to become idle first; if the broadcast is cancelled before
      every session answers, the received responses are printed plus a
      "not completed in …" note.

@@ -377,7 +377,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -580,12 +580,15 @@ const startBroadcast = (idx) => {
   broadcastSel = new Set([String(current), String(rows[idx].id)]);
   persistBroadcast([...broadcastSel]);
   mode = 'broadcast';
+  if (onInspectSession) onInspectSession(rows[idx].id);
   draw();
 };
 const toggleBroadcast = (idx) => {
   const id = String(rows[idx].id);
-  if (broadcastSel.has(id)) broadcastSel.delete(id);
-  else broadcastSel.add(id);
+  const adding = !broadcastSel.has(id);
+  if (adding) broadcastSel.add(id);
+  else broadcastSel.delete(id);
+  if (adding && onInspectSession) onInspectSession(id);
   if (broadcastSel.size < 2) {
     persistBroadcast([]);
     broadcastSel = new Set();
@@ -1001,6 +1004,7 @@ async function cmdSessionSwitch(targetDir, directRef) {
         runningIds,
         modelContext,
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
+        onInspectSession: (id) => relaunchTui(winIdx, dir, server, id),
         onPick: async (row) => {
           if (row.new) {
             const created = await createSessionWithModel(server, row.name || undefined, dir, [lastRef, ...sorted]).catch((err) => {
