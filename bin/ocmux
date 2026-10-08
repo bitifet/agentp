@@ -443,10 +443,21 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const draw = () => {
-      if (mode === 'help') {
+      if (mode === 'help' || mode === 'broadcast-help') {
         let out = '\x1b[2J\x1b[H';
-        out += 'ocmux session picker — help\n\n';
-        for (const l of helpLines) out += '  ' + l + '\n';
+        if (mode === 'broadcast-help') {
+          out += 'ocmux broadcast mode — help\n\n';
+          out += '  Space            select/deselect the cursor session\n';
+          out += '  Enter            keep the broadcast selection; switch TUI to cursor\n';
+          out += '  m                switch the model for ALL selected sessions\n';
+          out += '  d                delete the cursor session (with confirmation)\n';
+          out += '  j / k, arrows    move the cursor (selecting shows it in the TUI)\n';
+          out += '  ESC              cancel broadcast mode (clear selection)\n';
+          out += '  q / Ctrl+C       cancel broadcast mode and quit\n';
+        } else {
+          out += 'ocmux session picker — help\n\n';
+          for (const l of helpLines) out += '  ' + l + '\n';
+        }
         out += '\nPress any key to return.\n';
         process.stderr.write(out);
         return;
@@ -559,16 +570,29 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     const applyDelete = () => {
       const s = confirmDel;
       if (!s || !onDelete) return;
+      const wasBroadcast = mode === 'broadcast-confirm';
       Promise.resolve(onDelete(s)).then(() => {
         rows = rows.filter(r => r.id !== s.id);
         if (cursor >= rows.length && cursor > 0) cursor = rows.length - 1;
         confirmDel = null;
-        mode = 'normal';
+        if (wasBroadcast) {
+          broadcastSel.delete(String(s.id));
+          if (broadcastSel.size < 2) {
+            persistBroadcast([]);
+            broadcastSel = new Set();
+            mode = 'normal';
+          } else {
+            persistBroadcast([...broadcastSel]);
+            mode = 'broadcast';
+          }
+        } else {
+          mode = 'normal';
+        }
         draw();
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
-        mode = 'normal';
+        mode = wasBroadcast ? 'broadcast' : 'normal';
         draw();
       });
     };
@@ -600,13 +624,13 @@ const toggleBroadcast = (idx) => {
   draw();
 };
 
-const openList = (title, items, format, onEnter) => {
+    const openList = (title, items, format, onEnter, returnMode = 'normal') => {
       if (!items || items.length === 0) {
         process.stderr.write(`\nNo ${title.toLowerCase()} available.\n`);
         draw();
         return;
       }
-      list = { title, items, format, onEnter };
+      list = { title, items, format, onEnter, returnMode };
       listCursor = 0;
       mode = 'list';
       draw();
@@ -618,16 +642,16 @@ const openList = (title, items, format, onEnter) => {
     };
 
     process.stdin.on('keypress', (str, key) => {
-      if (mode === 'help') {
-        mode = 'normal';
+      if (mode === 'help' || mode === 'broadcast-help') {
+        mode = mode === 'broadcast-help' ? 'broadcast' : 'normal';
         draw();
         return;
       }
-      if (mode === 'confirm') {
+      if (mode === 'confirm' || mode === 'broadcast-confirm') {
         if (key.name === 'y') return applyDelete();
         if (key.name === 'n' || key.name === 'escape' || key.name === 'q' || key.name === 'return') {
           confirmDel = null;
-          mode = 'normal';
+          mode = mode === 'broadcast-confirm' ? 'broadcast' : 'normal';
           draw();
         }
         return;
@@ -682,8 +706,9 @@ const openList = (title, items, format, onEnter) => {
       }
       if (mode === 'list') {
         if (key.name === 'escape' || key.name === 'q' || key.name === 'backspace') {
+          const returnMode = list.returnMode;
           list = null;
-          mode = 'normal';
+          mode = returnMode;
           draw();
         } else if (key.name === 'up' || str === 'k') {
           listCursor = (listCursor - 1 + list.items.length) % list.items.length;
@@ -694,8 +719,9 @@ const openList = (title, items, format, onEnter) => {
         } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
           const item = list.items[listCursor];
           const onEnter = list.onEnter;
+          const returnMode = list.returnMode;
           list = null;
-          mode = 'normal';
+          mode = returnMode;
           draw();
           Promise.resolve(onEnter(item)).then(() => draw()).catch(commandErr);
         }
@@ -710,8 +736,23 @@ const openList = (title, items, format, onEnter) => {
         } else if (key.name === 'q') {
           persistBroadcast([]);
           finish(null);
+        } else if (key.name === 'h') {
+          mode = 'broadcast-help';
+          draw();
         } else if (key.name === 'space') {
           if (cursor < rows.length) toggleBroadcast(cursor);
+        } else if (key.name === 'd') {
+          if (cursor < rows.length) {
+            confirmDel = rows[cursor];
+            mode = 'broadcast-confirm';
+            draw();
+          }
+        } else if (key.name === 'm') {
+          listModels(server).then((models) => {
+            openList('Broadcast model (all selected sessions)', models, (x) => `${x.label}${x.variant ? `#${x.variant}` : ''}`, async (item) => {
+              await Promise.all([...broadcastSel].map(id => switchModel(server, id, item)));
+            }, 'broadcast');
+          }).catch(commandErr);
         } else if (key.name === 'return' || key.name === 'enter') {
           if (cursor < rows.length) {
             mode = 'normal';

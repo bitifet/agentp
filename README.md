@@ -214,7 +214,8 @@ The ticket is `agentp_ticket` followed by a JSON object with these fields:
 - `ctime` — creation timestamp (ISO 8601). Only used to compute `elapsed`.
 - `path` — path to the temp file holding the result.
 - `server` — OpenCode server URL used by the deferred job.
-- `sessionId` — OpenCode session ID used by the deferred job.
+- `sessionId` — OpenCode session ID used by a normal deferred job.
+- `sessionIds` — array of OpenCode session IDs used by a **broadcast** deferred job (replaces `sessionId`).
 - `elapsed` — seconds since `ctime`, included only when the ticket is re-printed (not on first print).
 - `defer` — the timeout requested at submission, included only when it was > 0.
 - `cancelled` — always present (defaults to `false`). Set it to `true` and pipe the ticket back to cancel the running job (see below).
@@ -228,6 +229,13 @@ printf "Refactor the auth module" | agentp --defer --onlineTicket
 ```
 
 Both formats are accepted when piping a ticket back to `agentp --defer`.
+
+When `ocmux` has a broadcast selection, `agentp --defer` creates a ticket with
+`sessionIds` and sends the prompt to every selected session. On retrieval,
+`--qa` includes the original prompt plus one `💬 <name> [<id>]` answer section
+per session. Individual failures/incomplete sessions are listed with an error
+and timestamp. Broadcast tickets do **not** support queued follow-up text (a
+follow-up is inherently ambiguous across multiple sessions).
 
 You can also append follow-up text after a not-yet-ready ticket to queue more
 input into the original running task, similar to typing into the OpenCode TUI
@@ -328,10 +336,14 @@ Without arguments (and with a TTY), opens an **interactive session picker** for
 the project found upward from `<directory>` (default: `$PWD`):
 
 - sessions are listed most-recently-viewed first
-- `Enter`/`Space` switches (menu stays open) · `n` create (name input) ·
-  `r` rename (edit in place) · `R` set a reminder · `d` delete (confirm) ·
-  `a` switch agent · `m` switch model · `p` project switcher · `h` help ·
-  `q`/`Ctrl+C` quit
+- `Enter` switches (menu stays open). `Space` over a different session enters
+  **broadcast mode**: Space selects/deselects sessions; `Enter` keeps the list
+  and switches normally; `ESC`/`q` cancels. New selections open in the TUI for
+  inspection. Broadcast mode also has `h` help, `d` delete, and `m` to change
+  the model for every selected session.
+- `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
+  `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
+  switcher · `h` help · `q`/`Ctrl+C` quit
 - switching updates `.ocmux.json` and relaunches the TUI on the chosen session
   (`opencode --server <url> --session <id>`); silent on success
 - new sessions inherit the model of the previously selected session (v2
@@ -339,6 +351,11 @@ the project found upward from `<directory>` (default: `$PWD`):
 
 Reminders (`R`) are stored in the `.ocmux.json` `annotations` map; `agentp`
 prepends a session's reminder to every prompt sent to it.
+
+Broadcast selections are stored in `.ocmux.json` as `broadcast`. `agentp`
+sends a prompt to all selected sessions (waiting for busy sessions to go idle),
+and prints a labeled answer section for each. Errors/incomplete targets are
+reported individually with session name, id, error, and timestamp.
 
 Subcommands:
 

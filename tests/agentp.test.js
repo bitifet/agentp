@@ -944,6 +944,17 @@ describe('agentp CLI', () => {
       assert.strictEqual(s, 'agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"/tmp/x.tmp","defer":5,"cancelled":false}');
     });
 
+    it('formats and parses broadcast sessionIds without a misleading sessionId', () => {
+      const { formatTicket, parseDeferredTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: 't', path: '/tmp/b.tmp', server: 'http://x', sessionIds: ['s1', 's2'], defer: 0 });
+      const raw = JSON.parse(s.slice('agentp_ticket '.length));
+      assert.deepStrictEqual(raw.sessionIds, ['s1', 's2']);
+      assert.ok(!('sessionId' in raw));
+      const parsed = parseDeferredTicket(s);
+      assert.deepStrictEqual(parsed.sessionIds, ['s1', 's2']);
+      assert.strictEqual(parsed.sessionId, null);
+    });
+
     it('parses a pretty-printed multi-line ticket', () => {
       const { parseDeferredTicket } = require('../bin/agentp');
       const pretty = 'agentp_ticket {\n  "ctime": "2026-08-03T14:30:00.000Z",\n  "path": "/tmp/x.tmp",\n  "defer": 5\n}';
@@ -1009,7 +1020,7 @@ describe('broadcast helpers', () => {
   });
 
   it('formats sections with a title heading, separator and missing note', () => {
-    const sec = buildBroadcastSection('Task A', 'one');
+    const sec = buildBroadcastSection('Task A', 's1', 'one');
     assert.ok(sec.includes('Task A'));
     assert.ok(sec.includes('━'.repeat(40)));
     const out = formatBroadcastResults({
@@ -1019,7 +1030,8 @@ describe('broadcast helpers', () => {
     });
     assert.ok(out.includes('Broadcast to 2 sessions'));
     assert.ok(out.includes('Task A'));
-    assert.ok(out.includes('not completed in the following sessions: Task B'));
+    assert.ok(out.includes('not completed in the following sessions:'));
+    assert.ok(out.includes('💬 Task B [s2]'));
   });
 
   it('sends to all idle sessions and waits for busy ones', async () => {
@@ -1047,5 +1059,30 @@ describe('broadcast helpers', () => {
     });
     assert.strictEqual(res.results.length, 0);
     assert.strictEqual(res.missing.length, 2);
+  });
+
+  it('sends sessions concurrently and discards an in-flight answer after broadcast exit', async () => {
+    let active = true;
+    let resolveSlow;
+    const slow = new Promise((resolve) => { resolveSlow = resolve; });
+    const started = [];
+    const resultPromise = runBroadcastSend('http://x', ['s1', 's2'], 'ping', {
+      getSession: async (s, id) => ({ id, title: 'T' + id.slice(1) }),
+      getActiveSessions: async () => new Set(),
+      sendToSession: async (s, id) => {
+        started.push(id);
+        return id === 's1' ? slow : 'fast';
+      },
+      readBroadcast: () => active ? ['s1', 's2'] : null,
+      pollMs: 5,
+    });
+    await new Promise(r => setTimeout(r, 10));
+    assert.deepStrictEqual(started.sort(), ['s1', 's2']);
+    active = false;
+    const result = await resultPromise;
+    resolveSlow('late'); // underlying request may complete later, but is discarded
+    assert.strictEqual(result.results.length, 1);
+    assert.strictEqual(result.missing.length, 1);
+    assert.match(result.missing[0].error, /cancelled before this session replied/);
   });
 });

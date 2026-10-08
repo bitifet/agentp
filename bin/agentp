@@ -169,7 +169,7 @@ function parseDeferredTicketInput(text) {
   if (!data || typeof data.path !== 'string' || !data.path) return null;
   const rest = afterPrefix.slice(jsonEnd);
   const followupText = rest.trim() ? stripFollowupRow(rest.trimStart()) : '';
-  return {
+  const ticket = {
     ctime: typeof data.ctime === 'string' ? data.ctime : null,
     path: data.path,
     defer: typeof data.defer === 'number' && data.defer > 0 ? data.defer : 0,
@@ -178,6 +178,10 @@ function parseDeferredTicketInput(text) {
     cancelled: data.cancelled === true,
     followupText,
   };
+  if (Array.isArray(data.sessionIds)) {
+    ticket.sessionIds = data.sessionIds.filter(x => typeof x === 'string' && x);
+  }
+  return ticket;
 }
 
 function parseDeferredTicket(text) {
@@ -194,6 +198,7 @@ function formatTicket(ticket, elapsed, compact) {
   const fields = { ctime: ticket.ctime, path: ticket.path };
   if (ticket.server) fields.server = ticket.server;
   if (ticket.sessionId) fields.sessionId = ticket.sessionId;
+  if (Array.isArray(ticket.sessionIds) && ticket.sessionIds.length > 0) fields.sessionIds = ticket.sessionIds;
   if (elapsed !== undefined) fields.elapsed = elapsed;
   if (ticket.defer > 0) fields.defer = ticket.defer;
   // Always present so it can be flipped to true and piped back to cancel.
@@ -205,8 +210,12 @@ function formatTicket(ticket, elapsed, compact) {
 // the ticket. Prints a message and exits 0.
 async function cancelTicket(ticket) {
   let interrupted = false;
-  if (ticket.server && ticket.sessionId) {
-    interrupted = await interruptSession(ticket.server, ticket.sessionId);
+  const ids = Array.isArray(ticket.sessionIds) && ticket.sessionIds.length > 0
+    ? ticket.sessionIds
+    : (ticket.sessionId ? [ticket.sessionId] : []);
+  if (ticket.server && ids.length > 0) {
+    const interruptedAll = await Promise.all(ids.map(id => interruptSession(ticket.server, id)));
+    interrupted = interruptedAll.some(Boolean);
   }
   try { fs.unlinkSync(ticket.path); } catch {}
   try { fs.unlinkSync(ticket.path + '.lock'); } catch {}
@@ -420,8 +429,8 @@ function outputReadyResult(filePath, result, qaMode, unusedFollowupText, header)
 // ── Broadcast (ocmux "Space" multi-session send) ───────────────────
 
 // One answer section: a heading with the session name and a separator below it.
-function buildBroadcastSection(title, answer) {
-  let s = `\n${title}\n${'━'.repeat(40)}\n`;
+function buildBroadcastSection(title, id, answer) {
+  let s = `\n💬 ${title} [${id}]\n${'━'.repeat(40)}\n`;
   s += answer;
   if (!answer.endsWith('\n')) s += '\n';
   return s;
@@ -435,48 +444,71 @@ function buildBroadcastSection(title, answer) {
 // Waits for each session to become idle before sending; stops as soon as the
 // broadcast list disappears (ocmux exited broadcast mode early).
 async function runBroadcastSend(server, ids, prompt, deps) {
-  const { getActiveSessions, getSession, sendToSession, readBroadcast, pollMs = 1000, busyTimeoutMs = 15 * 60 * 1000 } = deps;
+  const { getActiveSessions, getSession, sendToSession, readBroadcast, getPrompt, pollMs = 1000, busyTimeoutMs = 15 * 60 * 1000 } = deps;
   const initial = new Set(ids.map(String));
-  const results = [];   // { id, title, answer }
-  const missing = [];   // { id, title }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const cancelled = () => {
+    try { return !isBroadcastActive(readBroadcast(), initial); } catch { return false; }
+  };
 
-  let cancelledNow = false;
-  for (const id of ids) {
-    if (cancelledNow) {
-      missing.push({ id, title: id });
-      continue;
-    }
+  // Race a sent session's answer against ocmux leaving broadcast mode. We do
+  // not interrupt the model: we merely stop waiting/discard its later answer,
+  // exactly as the UI contract promises.
+  const awaitAnswerOrCancel = (promise) => new Promise((resolve) => {
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      resolve(value);
+    };
+    const timer = setInterval(() => {
+      if (cancelled()) finish({ cancelled: true });
+    }, pollMs);
+    promise.then(answer => finish({ answer }), err => finish({ error: err }));
+  });
+
+  const runOne = async (id) => {
     let title = id;
     try {
       const s = await getSession(server, id);
       title = (s && (s.title || s.id)) || id;
     } catch {
-      missing.push({ id, title });
-      continue;
+      return { missing: { id, title, error: 'Unable to read session', timestamp: new Date().toISOString() } };
     }
     // Wait for the session to become idle (skip prompts into a busy session).
     const deadline = Date.now() + busyTimeoutMs;
     let busy = true;
     while (busy && Date.now() < deadline) {
-      let cancelled = false;
-      try { cancelled = !isBroadcastActive(readBroadcast(), initial); } catch { cancelled = false; }
-      if (cancelled) { cancelledNow = true; break; }
+      if (cancelled()) {
+        return { missing: { id, title, error: 'Broadcast cancelled while waiting for idle', timestamp: new Date().toISOString() } };
+      }
       const active = await getActiveSessions(server);
       if (!active.has(String(id))) busy = false;
       else await sleep(pollMs);
     }
-    if (cancelledNow || busy) {
-      missing.push({ id, title });
-      continue;
+    if (busy) {
+      return { missing: { id, title, error: 'Session stayed busy until timeout', timestamp: new Date().toISOString() } };
     }
     try {
-      const answer = await sendToSession(server, id, prompt);
-      results.push({ id, title, answer });
-    } catch {
-      missing.push({ id, title });
+      const result = await awaitAnswerOrCancel(sendToSession(server, id, getPrompt ? getPrompt(id, prompt) : prompt));
+      if (result.cancelled) {
+        return { missing: { id, title, error: 'Broadcast cancelled before this session replied', timestamp: new Date().toISOString() } };
+      }
+      if (result.error) {
+        return { missing: { id, title, error: result.error.message || String(result.error), timestamp: new Date().toISOString() } };
+      }
+      return { result: { id, title, answer: result.answer } };
+    } catch (err) {
+      return { missing: { id, title, error: err.message || String(err), timestamp: new Date().toISOString() } };
     }
-  }
+  };
+
+  // Run independently so one busy/model-limited session never prevents all
+  // other selected sessions from receiving the prompt.
+  const settled = await Promise.all(ids.map(runOne));
+  const results = settled.filter(x => x.result).map(x => x.result);
+  const missing = settled.filter(x => x.missing).map(x => x.missing);
   return { results, missing, requested: ids.length };
 }
 
@@ -491,9 +523,13 @@ function isBroadcastActive(broadcast, initial) {
 // Assemble the final broadcast output: heading per session + missing note.
 function formatBroadcastResults({ results, missing, requested }) {
   let out = `🌐 Broadcast to ${requested} sessions\n`;
-  for (const r of results) out += buildBroadcastSection(r.title, r.answer);
+  for (const r of results) out += buildBroadcastSection(r.title, r.id, r.answer);
   if (missing.length > 0) {
-    out += `\n⚠️  Prompt not completed in the following sessions: ${missing.map(m => m.title).join(', ')}\n`;
+    out += '\n⚠️  Prompt not completed in the following sessions:\n';
+    for (const m of missing) {
+      out += `- 💬 ${m.title} [${m.id}]\n  - Error: ${m.error || 'Unknown'}\n`;
+      if (m.timestamp) out += `  - At: ${m.timestamp}\n`;
+    }
   }
   return out;
 }
@@ -518,7 +554,7 @@ async function buildSessionHeader(server, sessionId) {
 
 // Header for deferred-ticket retrieval (ticket carries server + sessionId).
 async function ticketHeader(ticket, qaMode) {
-  if (qaMode && ticket && ticket.server && ticket.sessionId) {
+  if (qaMode && ticket && ticket.server && ticket.sessionId && !(Array.isArray(ticket.sessionIds) && ticket.sessionIds.length >= 2)) {
     try { return await buildSessionHeader(ticket.server, ticket.sessionId); } catch {}
   }
   return '';
@@ -541,7 +577,7 @@ const FINAL_ROW = '    —————————————————\n';
 // Write the prompt to a temp file, lock the output file, and spawn a detached
 // `--defer-child` process that runs the prompt and writes the answer. Returns
 // the ticket describing this deferred run.
-function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, qaMode, tgMode, flushMode, targetSessionId, deferSeconds }) {
+function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, qaMode, tgMode, flushMode, targetSessionId, targetSessionIds, deferSeconds }) {
   const tempPath = generateTempFilename();
   const promptTempPath = tempPath + '.prompt';
 
@@ -555,6 +591,7 @@ function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, q
     defer: deferSeconds || 0,
     server: serverBase,
     sessionId: targetSessionId,
+    sessionIds: targetSessionIds,
     cancelled: false,
   };
 
@@ -572,7 +609,10 @@ function spawnDeferredChild({ promptText, serverBase, sessionName, newSession, q
     childArgs.push('--session', sessionName);
     if (newSession) childArgs.push('--new');
   }
-  childArgs.push('--resolved-session-id', targetSessionId);
+  if (targetSessionId) childArgs.push('--resolved-session-id', targetSessionId);
+  if (Array.isArray(targetSessionIds) && targetSessionIds.length > 0) {
+    childArgs.push('--resolved-session-ids', JSON.stringify(targetSessionIds));
+  }
   childArgs.push(serverBase);
 
   const child = child_process.spawn(process.execPath, childArgs, {
@@ -606,6 +646,7 @@ async function main() {
   let outputFile = null;
   let sessionName = null;
   let resolvedSessionId = null;
+  let resolvedSessionIds = null;
   let newSession = false;
   // tgMode: false = disabled, 'auto' = auto-detect, true = explicit --tg
   let tgMode = null;
@@ -706,6 +747,16 @@ async function main() {
       resolvedSessionId = args[i];
       if (!resolvedSessionId) {
         console.error('Error: --resolved-session-id requires a session id');
+        process.exit(1);
+      }
+    } else if (args[i] === '--resolved-session-ids') {
+      i++;
+      try {
+        const ids = JSON.parse(args[i]);
+        if (!Array.isArray(ids) || ids.length < 2 || ids.some(id => typeof id !== 'string' || !id)) throw new Error('bad ids');
+        resolvedSessionIds = ids;
+      } catch {
+        console.error('Error: --resolved-session-ids requires a JSON array of at least two session ids');
         process.exit(1);
       }
     } else if (args[i] === '--new') {
@@ -928,15 +979,22 @@ async function main() {
     }
 
     // This is a regular prompt — create deferred execution
-    let targetSessionId;
-    try {
-      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
-        directory: projectDir,
-        preferredSession,
-      });
-    } catch (err) {
-      console.error(err.message);
-      process.exit(1);
+    const broadcastIds = (resolvedSessionIds && resolvedSessionIds.length >= 2)
+      ? resolvedSessionIds
+      : ((ctx && ctx.state && Array.isArray(ctx.state.broadcast) && ctx.state.broadcast.length >= 2)
+        ? ctx.state.broadcast
+        : null);
+    let targetSessionId = null;
+    if (!broadcastIds) {
+      try {
+        targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
+          directory: projectDir,
+          preferredSession,
+        });
+      } catch (err) {
+        console.error(err.message);
+        process.exit(1);
+      }
     }
 
     const newTicket = spawnDeferredChild({
@@ -948,6 +1006,7 @@ async function main() {
       tgMode,
       flushMode,
       targetSessionId,
+      targetSessionIds: broadcastIds,
       deferSeconds,
     });
 
@@ -1022,15 +1081,20 @@ async function main() {
     }
 
     // Regular prompt: submit via a detached child and wait for the answer.
-    let targetSessionId;
-    try {
-      targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
-        directory: projectDir,
-        preferredSession,
-      });
-    } catch (err) {
-      console.error(err.message);
-      process.exit(1);
+    const broadcastIds = (ctx && ctx.state && Array.isArray(ctx.state.broadcast) && ctx.state.broadcast.length >= 2)
+      ? ctx.state.broadcast
+      : null;
+    let targetSessionId = null;
+    if (!broadcastIds) {
+      try {
+        targetSessionId = await resolveTargetSession(serverBase, sessionName, newSession, {
+          directory: projectDir,
+          preferredSession,
+        });
+      } catch (err) {
+        console.error(err.message);
+        process.exit(1);
+      }
     }
 
     const newTicket = spawnDeferredChild({
@@ -1042,6 +1106,7 @@ async function main() {
       tgMode,
       flushMode,
       targetSessionId,
+      targetSessionIds: broadcastIds,
       deferSeconds: 0,
     });
 
@@ -1091,6 +1156,14 @@ async function main() {
         getActiveSessions,
         getSession,
         sendToSession,
+        getPrompt: (id, text) => {
+          try {
+            const ann = ctx && ctx.statefile && projectState.readAnnotations(ctx.statefile)[id];
+            return ann ? ann + '\n\n' + text : text;
+          } catch {
+            return text;
+          }
+        },
         readBroadcast: () => (ctx && ctx.statefile ? projectState.readProjectState(ctx.statefile).broadcast : null),
       });
       answer = formatBroadcastResults(bres);
@@ -1122,7 +1195,11 @@ async function main() {
 
     // Build the message to send to Telegram (QA pair with rulers)
     let tgMessage = answer;
-    if (qaMode && !broadcastIds) {
+    if (qaMode && broadcastIds) {
+      tgMessage = HUMAN_ROW + actualPromptText + AGENT_ROW + answer;
+      if (!answer.endsWith('\n')) tgMessage += '\n';
+      tgMessage += FINAL_ROW;
+    } else if (qaMode && !broadcastIds) {
       let header = '';
       try { header = await buildSessionHeader(serverBase, sessionId); } catch {}
       tgMessage = header + HUMAN_ROW + actualPromptText + AGENT_ROW + answer;

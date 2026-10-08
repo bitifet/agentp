@@ -173,12 +173,17 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
      `Enter` keeps the selection and switches to the cursor session, `ESC`/`q`
      cancels. **Each newly selected session is opened in the TUI window** (so
      you can inspect what is going on in it before deciding); deselecting does
-     not switch back. The footer shows only `Broadcast to sessions: <names>`
+     not switch back. `h` opens broadcast-specific help, `d` deletes the cursor
+     session with confirmation, and `m` applies a selected model to **all**
+     broadcast sessions. The footer shows only `Broadcast to sessions: <names>`
      while selecting. `agentp` then sends the prompt to **all** selected
      sessions,
      waiting for each to become idle first; if the broadcast is cancelled before
      every session answers, the received responses are printed plus a
-     "not completed in …" note.
+     detailed "not completed" list (session name/id, error, timestamp).
+     Deferred broadcast tickets carry `sessionIds` (not a misleading single
+     `sessionId`) and preserve the target list for the detached child even if
+     `.ocmux.json` changes later.
    - an **inverted footer** with the key hints, plus info lines about the
      selected session (title, location, and a responsive grid of model, agent,
      status + time in status, tokens, cost, context limit, outcome).
