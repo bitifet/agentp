@@ -320,6 +320,28 @@ describe('tuiAttachCommand', () => {
   });
 });
 
+describe('newestSessionId', () => {
+  it('picks the newest main session even when a child is newer', () => {
+    const id = binOcmux.newestSessionId([
+      { id: 'main', time: { updated: 100 } },
+      { id: 'child', parentID: 'main', time: { updated: 200 } },
+    ]);
+    assert.strictEqual(id, 'main');
+  });
+
+  it('returns null when every session is a child (callers create one)', () => {
+    const id = binOcmux.newestSessionId([
+      { id: 'child', parentID: 'main', time: { updated: 200 } },
+    ]);
+    assert.strictEqual(id, null);
+  });
+
+  it('returns null for empty input', () => {
+    assert.strictEqual(binOcmux.newestSessionId([]), null);
+    assert.strictEqual(binOcmux.newestSessionId(null), null);
+  });
+});
+
 // ───────────────────────────────────────────────────────────────────
 // tmux window helpers
 // ───────────────────────────────────────────────────────────────────

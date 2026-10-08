@@ -29,7 +29,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 269 tests (66 + 8 + 69 + 62 + 13 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 272 tests (66 + 8 + 72 + 62 + 13 + 12 + 22 + 17)
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops

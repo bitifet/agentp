@@ -156,7 +156,10 @@ function checkServer(server) {
 
 function newestSessionId(sessions) {
   if (!sessions || sessions.length === 0) return null;
-  const sorted = sortSessionsByRecency(sessions).filter(s => s && s.id);
+  // Implicit targets skip child/subagent sessions (parentID set) — OpenCode's
+  // TUI opens those on its "Subagents" tab instead of the prompt. Callers fall
+  // back to creating a session when this returns null.
+  const sorted = sortSessionsByRecency(sessions).filter(s => s && s.id && !s.parentID);
   return sorted.length > 0 ? sorted[0].id : null;
 }
 
