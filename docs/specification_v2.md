@@ -166,16 +166,30 @@ Retained flags: `--git`, `--GIT`, `-l`, `--print-logs`, `--version`, `-h`.
    - `Enter`/`Space` switches to the row but **stays open**; `n` creates (name
      input, blank = auto-title); `r` renames; `R` (Shift+r) sets a reminder;
      `d` deletes (y/N); `a` switches agent; `m` switches model; `p` opens the
-     project switcher; `h` toggles help; `q`/`Ctrl+C` quits
+     project switcher; `h` toggles help; `q` quits (only here — see below)
+    - **Menu exit rule**: `q`/`ESC` only *close the current menu and return to the
+      previous one* in every menu except the session picker itself; **`Ctrl+C`
+      fully exits `ocmux` from any menu** (help, input/confirm prompts, pickers,
+      broadcast).
+   - **`/` incremental search** (session picker, model/agent pickers and project
+     switcher): typing filters the list live (case-insensitive; whitespace
+     tokens are ANDed), the inverted bottom line shows `Search: <pattern>▏`, and
+     its right end shows `Enter: confirm · Esc: cancel`. `Enter` keeps the filter
+     and returns to normal navigation, `ESC` clears it, `/` resumes editing it,
+     arrows still move through the filtered view, and `Backspace` on an
+     already-empty search also exits it.
    - **Broadcast (`Space`)**: only `Enter` switches. `Space` over a *different*
      session enters broadcast mode: `Space` toggles each session (selection
-     persists to `.ocmux.json` `broadcast`; back to normal when <2 remain),
-     `Enter` keeps the selection and switches to the cursor session, `ESC`/`q`
-     cancels. **Each newly selected session is opened in the TUI window** (so
-     you can inspect what is going on in it before deciding); deselecting does
-     not switch back. `h` opens broadcast-specific help, `d` deletes the cursor
-     session with confirmation, and `m` applies a selected model to **all**
-     broadcast sessions. The footer shows only `Broadcast to sessions: <names>`
+     persists to `.ocmux.json` `broadcast`), `Enter` keeps the selection and
+     switches to the cursor session, `ESC`/`q` cancels and returns to the
+     session list with the TUI back on the stored session. **Each newly selected
+     session is opened in the TUI window** (so you can inspect what is going on
+     in it before deciding); deselecting does not switch back — except
+     **deselecting down to a single session ends broadcast mode by selecting
+     that remaining session**.
+     `h` opens broadcast-specific help, `d` deletes the cursor session with
+     confirmation, and `m` applies a selected model to **all** broadcast
+     sessions. The footer shows only `Broadcast to sessions: <names>`
      while selecting. `agentp` then sends the prompt to **all** selected
      sessions,
      waiting for each to become idle first; if the broadcast is cancelled before
@@ -205,7 +219,9 @@ URL). `agentp` does not depend on this.
 - Lists every tmux window in the `Opencode` session that has a `.ocmux.json`
   (project windows), plus their selected session.
 - Highlights the tmux-active window (live `activeWindowIndex()`).
-- `Enter`/`Space` focuses a window and keeps the menu open; `q` quits.
+- `Enter`/`Space` focuses a window and keeps the menu open; `/` searches
+  (same incremental filter as §4.2); `h` toggles help; `q` closes the switcher
+  and returns to the session picker; `Ctrl+C` fully exits.
 - **Must never write `.ocmux.json`.** The dead-TUI restart path may *read* the
   state file, but only to know which session to relaunch with.
 

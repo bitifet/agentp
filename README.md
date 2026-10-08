@@ -336,14 +336,25 @@ Without arguments (and with a TTY), opens an **interactive session picker** for
 the project found upward from `<directory>` (default: `$PWD`):
 
 - sessions are listed most-recently-viewed first
+- `/` starts an **incremental search** of the list (matches title/id,
+  case-insensitive, space-separated tokens are ANDed). While the search line is
+  active it shows `Enter: confirm · Esc: cancel` on the right: `Enter` keeps the
+  filter and returns to normal navigation, `ESC` clears it, `/` resumes editing
+  it, and `Backspace` on an already-empty search also exits it. The same `/`
+  search works in the model/agent pickers and the project switcher.
 - `Enter` switches (menu stays open). `Space` over a different session enters
   **broadcast mode**: Space selects/deselects sessions; `Enter` keeps the list
-  and switches normally; `ESC`/`q` cancels. New selections open in the TUI for
-  inspection. Broadcast mode also has `h` help, `d` delete, and `m` to change
-  the model for every selected session.
+  and switches normally; `ESC`/`q` cancels back to the session list and returns
+  the TUI to the stored session; deselecting down to a single session selects
+  that remaining session. New selections open in the TUI for inspection.
+  Broadcast mode also has `h` help, `d` delete, and `m` to change the model for
+  every selected session.
 - `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
   `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
-  switcher · `h` help · `q`/`Ctrl+C` quit
+  switcher · `h` help · `q` quit
+- **`q` only quits the session picker.** In every other menu (model/agent
+  pickers, project switcher, help/input prompts) `q`/`ESC` just closes that menu
+  and returns to the previous one. **`Ctrl+C` fully exits** `ocmux` from any menu.
 - switching updates `.ocmux.json` and relaunches the TUI on the chosen session
   (`opencode --server <url> --session <id>`); silent on success
 - new sessions inherit the model of the previously selected session (v2

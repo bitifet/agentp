@@ -862,3 +862,342 @@ describe('ocmux CLI', () => {
     assert.strictEqual(exitThrown, 0);
   });
 });
+// ───────────────────────────────────────────────────────────────────
+// '/' incremental search helpers
+// ───────────────────────────────────────────────────────────────────
+describe('search helpers', () => {
+  it('filterByPattern matches case-insensitively and ANDs whitespace tokens', () => {
+    const items = [{ t: 'Alpha GPT' }, { t: 'Beta' }, { t: 'ALPHA small' }];
+    const text = (x) => x.t;
+    assert.strictEqual(binOcmux.filterByPattern(items, '', text), items);
+    assert.deepStrictEqual(binOcmux.filterByPattern(items, 'alpha', text).map(text), ['Alpha GPT', 'ALPHA small']);
+    assert.deepStrictEqual(binOcmux.filterByPattern(items, 'alpha small', text).map(text), ['ALPHA small']);
+    assert.deepStrictEqual(binOcmux.filterByPattern(items, 'zzz', text), []);
+  });
+
+  it('handleSearch drives the live/committed/clear lifecycle', () => {
+    const s = binOcmux.newSearchState();
+    assert.strictEqual(binOcmux.handleSearch('x', { name: 'x' }, s), 'pass');
+    assert.strictEqual(binOcmux.handleSearch('/', { name: 'slash' }, s), 'edit');
+    assert.ok(s.active && s.live);
+    assert.strictEqual(binOcmux.handleSearch('b', { name: 'b' }, s), 'edit');
+    assert.strictEqual(s.value, 'b');
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'up' }, s), 'pass'); // arrows navigate
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'return' }, s), 'done');
+    assert.strictEqual(s.live, false);
+    assert.strictEqual(s.value, 'b');
+    assert.strictEqual(binOcmux.handleSearch('/', { name: 'slash' }, s), 'edit'); // resume editing
+    assert.ok(s.live);
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'escape' }, s), 'close');
+    assert.ok(!s.active);
+
+    // Committed filter (kept after Enter): ESC clears, Backspace resumes.
+    binOcmux.handleSearch('/', { name: 'slash' }, s);
+    binOcmux.handleSearch('a', { name: 'a' }, s);
+    binOcmux.handleSearch('', { name: 'return' }, s);
+    assert.ok(s.active && !s.live);
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'backspace' }, s), 'edit');
+    assert.ok(s.live && s.value === '');
+
+    // Empty commit closes the search entirely.
+    binOcmux.handleSearch('', { name: 'return' }, s);
+    assert.ok(!s.active);
+  });
+
+  it('searchFooter shows the caret while typing and the kept pattern once committed', () => {
+    const s = binOcmux.newSearchState();
+    assert.strictEqual(binOcmux.searchFooter(s, 'keys'), 'keys');
+    binOcmux.handleSearch('/', { name: 'slash' }, s);
+    binOcmux.handleSearch('a', { name: 'a' }, s);
+    binOcmux.handleSearch('b', { name: 'b' }, s);
+    assert.strictEqual(binOcmux.searchFooter(s, 'keys'), 'Search: ab▏');
+    binOcmux.handleSearch('', { name: 'return' }, s);
+    assert.strictEqual(binOcmux.searchFooter(s, 'keys'), 'Search: ab · /: edit');
+    assert.strictEqual(binOcmux.SEARCH_HINT, 'Enter: confirm · Esc: cancel');
+  });
+
+  it('Backspace on an empty search exits it; removing the last char keeps it open', () => {
+    const s = binOcmux.newSearchState();
+    binOcmux.handleSearch('/', { name: 'slash' }, s);
+    assert.ok(s.active && s.live);
+    // Empty field: Backspace closes the search.
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'backspace' }, s), 'close');
+    assert.ok(!s.active);
+    // One char: Backspace removes it and stays open (now empty).
+    binOcmux.handleSearch('/', { name: 'slash' }, s);
+    binOcmux.handleSearch('a', { name: 'a' }, s);
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'backspace' }, s), 'edit');
+    assert.ok(s.active && s.live && s.value === '');
+    // Now empty: next Backspace closes.
+    assert.strictEqual(binOcmux.handleSearch('', { name: 'backspace' }, s), 'close');
+    assert.ok(!s.active);
+  });
+
+  it('renderList left-aligns the footer when footerLeft is set', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
+      footer: 'Search: ab', footerLeft: true, cols: 20, rows: 10,
+    });
+    assert.ok(out.includes('\x1b[7mSearch: ab' + ' '.repeat(10) + '\x1b[0m'));
+  });
+
+  it('renderList pins a right-aligned hint (footerRight) on the footer bar', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
+      footer: 'Search: ab', footerLeft: true, footerRight: 'Enter: confirm · Esc: cancel',
+      cols: 40, rows: 10,
+    });
+    assert.ok(out.includes('Search: ab'));
+    // The right hint ends the (full-width) inverted bar.
+    assert.ok(/\x1b\[7m.*Enter: confirm · Esc: cancel\x1b\[0m/.test(out));
+    const bar = out.split('\n').find((l) => l.includes('Search: ab'));
+    assert.strictEqual(bar.replace(/\x1b\[[0-9;]*m/g, '').length, 40);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Interactive sessionMenu (broadcast exit + '/' search) with a stubbed TTY
+// ───────────────────────────────────────────────────────────────────
+async function driveSessionMenu({ sessions, current, opts = {}, keys }) {
+  const saved = {
+    isTTY: process.stdin.isTTY,
+    setRawMode: process.stdin.setRawMode,
+    resume: process.stdin.resume,
+    pause: process.stdin.pause,
+    write: process.stderr.write,
+  };
+  const output = [];
+  process.stdin.isTTY = true;
+  process.stdin.setRawMode = () => {};
+  process.stdin.resume = () => {};
+  process.stdin.pause = () => {};
+  process.stderr.write = (s) => { output.push(String(s)); return true; };
+  try {
+    const menuPromise = binOcmux.sessionMenu(sessions, current, {}, 'http://server', opts);
+    for (const [str, name, ctrl] of keys) {
+      await new Promise((r) => setTimeout(r, 5));
+      process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false });
+    }
+    const result = await Promise.race([
+      menuPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('sessionMenu did not finish')), 2000)),
+    ]);
+    return { result, output };
+  } finally {
+    if (saved.isTTY === undefined) delete process.stdin.isTTY; else process.stdin.isTTY = saved.isTTY;
+    process.stdin.setRawMode = saved.setRawMode;
+    process.stdin.resume = saved.resume;
+    process.stdin.pause = saved.pause;
+    process.stderr.write = saved.write;
+    process.stdin.removeAllListeners('keypress');
+  }
+}
+
+describe('sessionMenu broadcast exit', () => {
+  const sessions = [
+    { id: 'sA', title: 'Alpha' },
+    { id: 'sB', title: 'Beta' },
+    { id: 'sC', title: 'Gamma' },
+  ];
+
+  it('ESC cancels broadcast and restores the TUI to the stored current session', async () => {
+    const calls = [];
+    const { result } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [['', 'down'], [' ', 'space'], ['', 'escape'], ['q', 'q']],
+    });
+    assert.strictEqual(result, null);
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['bc', []],
+      ['inspect', 'sA'],
+    ]);
+  });
+
+  it('deselecting down to one session selects the remaining one', async () => {
+    const calls = [];
+    await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'], // add Beta
+        ['', 'down'], [' ', 'space'], // add Gamma
+        ['', 'up'], [' ', 'space'],   // remove Beta
+        ['', 'up'], [' ', 'space'],   // remove Alpha -> Gamma is left
+        ['q', 'q'],
+      ],
+    });
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['inspect', 'sC'],
+      ['bc', ['sA', 'sB', 'sC']],
+      ['bc', ['sA', 'sC']],
+      ['bc', []],
+      ['pick', 'sC'],
+    ]);
+  });
+
+  it('a "/" filter narrows the list live and ESC clears it', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['/', 'slash'], ['b', 'b'], ['', 'return'], ['', 'escape'], ['q', 'q']],
+    });
+    assert.ok(output.some((o) => o.includes('Search: b▏') && o.includes('Beta') && !o.includes('Alpha')),
+      'expected a live-filtered frame showing only Beta');
+    assert.ok(output.some((o) => /Search: b · \/: edit/.test(o)),
+      'expected the committed filter footer to keep the pattern');
+    assert.ok(output.some((o) => o.includes('Search: b') && o.includes('Enter: confirm · Esc: cancel')),
+      'expected the confirm/cancel hint on the right of the search line');
+    const filteredAt = output.findIndex((o) => o.includes('Search: b▏'));
+    assert.ok(filteredAt >= 0);
+    assert.ok(output.slice(filteredAt + 1).some((o) => o.includes('Alpha')),
+      'expected ESC to restore the full list');
+  });
+
+  it('Backspace on an empty live search exits it (backspace again resumes navigation)', async () => {
+    const { result, output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['/', 'slash'], ['', 'backspace'], ['', 'down'], ['q', 'q']],
+    });
+    assert.strictEqual(result, null);
+    // Closing the search returns to the unfiltered list; the following 'q' quits.
+    assert.ok(output.some((o) => o.includes('Enter: switch · Space: broadcast')),
+      'expected the search to close back to the normal session list');
+  });
+
+  it('q in broadcast mode cancels back to the session list (does not quit)', async () => {
+    const calls = [];
+    const { result, output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'],   // enter broadcast with Beta
+        ['q', 'q'],                     // cancels broadcast (back to sessions)
+        ['h', 'h'], ['q', 'q'], ['q', 'q'], // h proves we are in the session menu
+      ],
+    });
+    assert.strictEqual(result, null);
+    assert.ok(output.some((o) => o.includes('ocmux session picker — help')),
+      'expected q to return to the session menu (the help screen is reachable)');
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['bc', []],
+      ['inspect', 'sA'],
+    ]);
+  });
+
+  it('Ctrl+C fully exits from broadcast mode', async () => {
+    const calls = [];
+    const { result } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [['', 'down'], [' ', 'space'], ['', 'c', true]],
+    });
+    assert.strictEqual(result, null);
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['bc', []],
+      ['inspect', 'sA'],
+    ]);
+  });
+
+  it('Ctrl+C fully exits from the new-session input prompt', async () => {
+    const { result, output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['n', 'n'], ['', 'c', true]],
+    });
+    assert.strictEqual(result, null);
+    assert.ok(output.some((o) => o.includes('New session name')),
+      'expected the input prompt before quitting');
+  });
+});
+
+// Interactive project switcher harness (mirrors driveSessionMenu).
+async function driveSwitchMenu(rows, keys) {
+  const output = [];
+  const orig = {
+    isTTY: process.stdin.isTTY,
+    setRawMode: process.stdin.setRawMode,
+    resume: process.stdin.resume,
+    pause: process.stdin.pause,
+  };
+  const origWrite = process.stderr.write;
+  process.stdin.isTTY = true;
+  process.stdin.setRawMode = () => {};
+  process.stdin.resume = () => {};
+  process.stdin.pause = () => {};
+  process.stderr.write = (s) => { output.push(String(s)); return true; };
+  try {
+    const p = binOcmux.switchMenu(rows, false);
+    for (const [str, name, ctrl] of keys) {
+      await new Promise((r) => setTimeout(r, 5));
+      process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false });
+    }
+    const result = await Promise.race([
+      p,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('switchMenu timed out')), 1000)),
+    ]);
+    return { result, output };
+  } finally {
+    process.stdin.isTTY = orig.isTTY;
+    process.stdin.setRawMode = orig.setRawMode;
+    process.stdin.resume = orig.resume;
+    process.stdin.pause = orig.pause;
+    process.stderr.write = origWrite;
+    process.stdin.removeAllListeners('keypress');
+  }
+}
+
+describe('switchMenu (project switcher)', () => {
+  const rows = [
+    { dir: '/proj1', status: 'running', session: 's1', index: 1 },
+    { dir: '/proj2', status: 'running', session: 's2', index: 2 },
+  ];
+
+  it("'q' closes the menu without exiting (no selection => back to sessions)", async () => {
+    const { result, output } = await driveSwitchMenu(rows, [['q', 'q']]);
+    assert.strictEqual(result, null);
+    assert.ok(output.some((o) => o.includes('project switcher')));
+    assert.ok(!output.some((o) => o.includes('project switcher — help')));
+  });
+
+  it('Enter focuses a project and q returns its directory', async () => {
+    const { result } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']]);
+    assert.strictEqual(result, '/proj1');
+  });
+
+  it("'h' opens the help overlay", async () => {
+    const { result, output } = await driveSwitchMenu(rows, [['h', 'h'], ['q', 'q'], ['q', 'q']]);
+    assert.strictEqual(result, null);
+    assert.ok(output.some((o) => o.includes('project switcher — help')));
+  });
+
+  it('Ctrl+C fully exits via the SWITCH_QUIT sentinel', async () => {
+    const { result } = await driveSwitchMenu(rows, [['', 'c', true]]);
+    assert.strictEqual(result, binOcmux.SWITCH_QUIT);
+  });
+
+  it('search shows the confirm/cancel hint on the right', async () => {
+    const { output } = await driveSwitchMenu(rows, [['/', 'slash'], ['p', 'p'], ['', 'escape'], ['q', 'q']]);
+    assert.ok(output.some((o) => o.includes('Search: p') && o.includes('Enter: confirm · Esc: cancel')));
+  });
+});

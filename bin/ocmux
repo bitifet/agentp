@@ -189,6 +189,109 @@ function padLeft(s, w) {
   const str = String(s);
   return ' '.repeat(Math.max(0, w - str.length)) + str;
 }
+
+// ── '/' incremental search for interactive lists ──────────────────────────
+// Filter `items` by `pattern`: case-insensitive, space-separated tokens that
+// must ALL be substrings of `textOf(item)`. Empty pattern → list unchanged.
+function filterByPattern(items, pattern, textOf) {
+  const p = String(pattern || '').trim().toLowerCase();
+  if (!p) return items;
+  const tokens = p.split(/\s+/);
+  return items.filter((it) => {
+    const hay = String(textOf(it) || '').toLowerCase();
+    return tokens.every((t) => hay.includes(t));
+  });
+}
+
+// State of a '/' search line: `active` a filter exists, `live` the user is
+// still typing into it, `value` the pattern, `caret` the edit position.
+function newSearchState() {
+  return { active: false, live: false, value: '', caret: 0 };
+}
+
+function clearSearchState(s) {
+  s.active = false;
+  s.live = false;
+  s.value = '';
+  s.caret = 0;
+}
+
+// Drive a '/' search line from a keypress. Returns:
+//   'edit'  — pattern/caret changed (caller re-filters and redraws)
+//   'close' — search cancelled/cleared (caller re-filters and redraws)
+//   'done'  — search committed, pattern kept (caller redraws)
+//   'pass'  — not handled here (caller runs its normal key logic)
+function handleSearch(str, key, s) {
+  if (str === '/' && !key.ctrl && !key.meta && !s.live) {
+    // '/' starts a new search or resumes editing the active filter.
+    if (!s.active) { s.value = ''; s.caret = 0; }
+    else s.caret = s.value.length;
+    s.active = true;
+    s.live = true;
+    return 'edit';
+  }
+  if (!s.active) return 'pass';
+  if (!s.live) {
+    // Committed filter: ESC drops it, Backspace resumes editing it.
+    if (key.name === 'escape') { clearSearchState(s); return 'close'; }
+    if (key.name === 'backspace') {
+      if (s.value === '') { clearSearchState(s); return 'close'; }
+      s.live = true;
+      s.caret = s.value.length;
+      s.value = s.value.slice(0, -1);
+      s.caret--;
+      return 'edit';
+    }
+    return 'pass';
+  }
+  // Live typing.
+  if (key.name === 'escape') { clearSearchState(s); return 'close'; }
+  if (key.name === 'return' || key.name === 'enter') {
+    if (!s.value.trim()) { clearSearchState(s); return 'close'; }
+    s.live = false;
+    return 'done';
+  }
+  if (key.name === 'backspace') {
+    // Backspace on an already-empty field exits the search (like ESC). Removing
+    // the last character keeps the field open.
+    if (s.value === '') { clearSearchState(s); return 'close'; }
+    if (s.caret > 0) {
+      s.value = s.value.slice(0, s.caret - 1) + s.value.slice(s.caret);
+      s.caret--;
+    }
+    return 'edit';
+  }
+  if (key.name === 'delete' || key.name === 'del') {
+    if (s.caret < s.value.length) s.value = s.value.slice(0, s.caret) + s.value.slice(s.caret + 1);
+    return 'edit';
+  }
+  if (key.name === 'left') { s.caret = Math.max(0, s.caret - 1); return 'done'; }
+  if (key.name === 'right') { s.caret = Math.min(s.value.length, s.caret + 1); return 'done'; }
+  if (key.name === 'home') { s.caret = 0; return 'done'; }
+  if (key.name === 'end') { s.caret = s.value.length; return 'done'; }
+  if (key.name === 'up' || key.name === 'down') return 'pass'; // navigate the filtered list
+  if (str && !key.ctrl && !key.meta && str >= ' ') {
+    s.value = s.value.slice(0, s.caret) + str + s.value.slice(s.caret);
+    s.caret += str.length;
+    return 'edit';
+  }
+  return 'pass';
+}
+
+// The inverted bottom line: normal key hints, or the search line while a
+// '/' filter is active (live = input with caret; committed = pattern kept).
+// The caller adds the `Enter: confirm · Esc: cancel` hint on the right via
+// renderList's `footerRight`.
+const SEARCH_HINT = 'Enter: confirm · Esc: cancel';
+function searchFooter(s, base) {
+  if (!s.active) return base;
+  const shown = s.live ? s.value.slice(0, s.caret) + '▏' + s.value.slice(s.caret) : s.value;
+  return s.live ? `Search: ${shown}` : `Search: ${shown} · /: edit`;
+}
+
+// Sentinel returned by switchMenu on Ctrl+C so the caller fully exits the CLI
+// (instead of just returning to the session menu).
+const SWITCH_QUIT = Symbol('ocmux-switch-quit');
 // Last-view stamp: HH:MM within the last 24h, else DD/MM/YYYY; '--:--' if unknown.
 function fmtClock(ts) {
   if (!ts) return '--:--';
@@ -324,9 +427,11 @@ function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false) 
 //   row(index, item) -> string | { text, reverse }
 //   extraLines -> prompt/confirm lines right after the list (normal colors)
 //   footer     -> inverted, RIGHT-aligned key-hint bar (acts as a separator)
+//                 (left-aligned when footerLeft is set — used by the search line)
+//   footerRight-> optional hint pinned to the right end of a left-aligned footer
 //   infoLines  -> details below the footer (normal colors, bold labels)
 // A "(start-end/total)" range is appended to the heading when scrolling.
-function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg }) {
+function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg, footerLeft = false, footerRight = null }) {
   const cols = colsArg || process.stdout.columns || 80;
   const termRows = rowsArg || process.stdout.rows || 24;
   const extras = (extraLines || []).filter((l) => l != null && l !== '');
@@ -365,7 +470,21 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
   // (instead of floating right under the last row on a tall window).
   for (let i = rendered; i < viewHeight; i++) out += '\n';
   for (const l of extras) out += l + '\n';
-  const hint = footer.length > cols ? footer.slice(0, cols) : padLeft(footer, cols);
+  let hint;
+  if (footerRight) {
+    // Left-aligned text plus a hint pinned to the right end of the bar.
+    const left = footer.length + footerRight.length + 1 <= cols
+      ? footer
+      : footer.slice(0, Math.max(0, cols - footerRight.length - 1));
+    const gap = Math.max(0, cols - left.length - footerRight.length);
+    hint = (left + ' '.repeat(gap) + footerRight).slice(0, cols);
+  } else if (footer.length > cols) {
+    hint = footer.slice(0, cols);
+  } else if (footerLeft) {
+    hint = footer + ' '.repeat(cols - footer.length);
+  } else {
+    hint = padLeft(footer, cols);
+  }
   out += '\x1b[7m' + hint + '\x1b[0m\n';
   for (const l of infos) out += l + '\n';
   return out.replace(/\n$/, '');
@@ -394,6 +513,10 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let spinIdx = 0;
     let spinTimer = null;
     let broadcastSel = new Set(); // session ids selected in broadcast mode
+    let search = newSearchState();    // '/' filter for the session list
+    let listSearch = newSearchState(); // '/' filter for inline lists (models/agents)
+    let view = rows;              // rows filtered by `search` (what is displayed)
+    let inspected = false;        // broadcast inspection moved the TUI off `current`
 
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
@@ -408,6 +531,8 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       'a                switch the AGENT of the selected session',
       'm                switch the MODEL of the selected session',
       'p                open the project switcher',
+      '/                search/filter this list (Enter keeps the filter,',
+      '                 ESC clears it, / resumes editing it)',
       'j / k, arrows    move the cursor',
       'h                toggle this help',
       'q / Ctrl+C       quit',
@@ -443,7 +568,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const draw = () => {
-      if (mode === 'help' || mode === 'broadcast-help') {
+      if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
         let out = '\x1b[2J\x1b[H';
         if (mode === 'broadcast-help') {
           out += 'ocmux broadcast mode — help\n\n';
@@ -452,8 +577,17 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           out += '  m                switch the model for ALL selected sessions\n';
           out += '  d                delete the cursor session (with confirmation)\n';
           out += '  j / k, arrows    move the cursor (selecting shows it in the TUI)\n';
-          out += '  ESC              cancel broadcast mode (clear selection)\n';
-          out += '  q / Ctrl+C       cancel broadcast mode and quit\n';
+          out += '  /                search/filter the session list\n';
+          out += '  ESC / q          cancel broadcast mode (back to the session list)\n';
+          out += '  Ctrl+C           quit ocmux\n';
+        } else if (mode === 'list-help') {
+          out += `ocmux ${list && list.title ? list.title : 'list'} — help\n\n`;
+          out += '  j / k, arrows    move the cursor\n';
+          out += '  Enter / Space    select the highlighted item\n';
+          out += '  /                search/filter the list (Enter keeps, ESC clears)\n';
+          out += '  h                toggle this help\n';
+          out += '  ESC / q / Backspace   return to the previous menu\n';
+          out += '  Ctrl+C           quit ocmux\n';
         } else {
           out += 'ocmux session picker — help\n\n';
           for (const l of helpLines) out += '  ' + l + '\n';
@@ -463,12 +597,16 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         return;
       }
       if (mode === 'list' && list) {
+        const listExtras = (listSearch.active && list.view.length === 0) ? [`No matches for "${listSearch.value}"`] : [];
         process.stderr.write(renderList({
           title: `ocmux — ${list.title}`,
-          items: list.items,
+          items: list.view,
           cursor: listCursor,
           row: (i, item) => list.format(item) || '',
-          footer: 'Enter: select · ESC: back',
+          footer: searchFooter(listSearch, 'Enter: select · /: search · h: help · ESC: back'),
+          footerLeft: listSearch.active,
+          footerRight: listSearch.active ? SEARCH_HINT : null,
+          extraLines: listExtras,
         }));
         return;
       }
@@ -479,27 +617,29 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         Math.max(...rows.map(s => (s.title || s.id || '').length), 8) + 6,
         Math.max(8, cols - (showTime ? TIME_W + 10 : 8)),
       );
-      const inBc = mode === 'broadcast';
+      const inBc = mode === 'broadcast' || mode === 'broadcast-confirm';
       const extras = [];
-      if (!inBc && mode === 'confirm' && confirmDel) {
+      if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
         extras.push(`Delete session "${confirmDel.title || confirmDel.id || ''}"? (y/N) `);
-      } else if (!inBc && mode === 'input' && input) {
+      } else if (mode === 'input' && input) {
         extras.push(`${input.label} ${renderInputValue(input.value)}`);
       }
-      const selected = rows[cursor];
+      if (search.active && view.length === 0) extras.push(`No sessions match "${search.value}"`);
+      const selected = view[cursor];
       let infoLines = [];
-      let footer = 'Enter: switch · Space: broadcast · h: help · q: quit';
+      let footer = 'Enter: switch · Space: broadcast · /: search · h: help · q: quit';
       if (inBc) {
         const names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
         infoLines = [`Broadcast to sessions: ${names}`];
-        footer = 'Enter: switch · Space: select/deselect · ESC: cancel · q: quit';
+        footer = 'Enter: switch · Space: toggle · d: delete · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
       } else {
         const selIsCurrent = !!(selected && String(selected.id) === String(current));
         infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
       }
+      footer = searchFooter(search, footer);
       process.stderr.write(renderList({
         title: 'ocmux — sessions',
-        items: rows,
+        items: view,
         cursor,
         row: (i, s) => {
           const sel = inBc ? (broadcastSel.has(String(s.id)) ? '[x] ' : '[ ] ') : '';
@@ -513,6 +653,8 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           return String(s.id) === String(current) ? `\x1b[33m${text}\x1b[0m` : text;
         },
         footer,
+        footerLeft: search.active,
+        footerRight: search.active ? SEARCH_HINT : null,
         infoLines,
         extraLines: extras,
       }));
@@ -525,7 +667,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const applyRenameWith = (name) => {
-      const row = rows[cursor];
+      const row = view[cursor];
       if (!row || !onRename || !name) return;
       Promise.resolve(onRename(row, name)).then((updated) => {
         row.title = (updated && updated.title) || name;
@@ -537,7 +679,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const applyReminder = (text) => {
-      const row = rows[cursor];
+      const row = view[cursor];
       if (!row || !onReminder) return;
       Promise.resolve(onReminder(row, text)).then((saved) => {
         if (saved) annotations[row.id] = saved;
@@ -553,11 +695,13 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       Promise.resolve(onPick ? onPick(row) : null).then((created) => {
         if (row.new && created) {
           rows.unshift(created);
-          current = created.id;
-          cursor = 0;
+          applySearch();
+          const ci = view.indexOf(created);
+          cursor = ci >= 0 ? ci : 0;
         } else if (!row.new) {
           current = row.id;
         }
+        inspected = false;
         confirmDel = null;
         draw();
       }).catch((err) => {
@@ -573,22 +717,30 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       const wasBroadcast = mode === 'broadcast-confirm';
       Promise.resolve(onDelete(s)).then(() => {
         rows = rows.filter(r => r.id !== s.id);
-        if (cursor >= rows.length && cursor > 0) cursor = rows.length - 1;
+        applySearch();
+        if (cursor >= view.length && cursor > 0) cursor = view.length - 1;
         confirmDel = null;
         if (wasBroadcast) {
           broadcastSel.delete(String(s.id));
           if (broadcastSel.size < 2) {
+            // Broadcast ended: make the remaining selected session the real
+            // selection (switch the TUI to it and store it).
+            const remaining = [...broadcastSel][0];
             persistBroadcast([]);
             broadcastSel = new Set();
             mode = 'normal';
+            const row = rows.find(r => String(r.id) === String(remaining));
+            if (row) applyPick(row);
+            else { draw(); }
           } else {
             persistBroadcast([...broadcastSel]);
             mode = 'broadcast';
+            draw();
           }
         } else {
           mode = 'normal';
+          draw();
         }
-        draw();
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
@@ -600,24 +752,50 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     const persistBroadcast = (ids) => {
   if (onBroadcastChange) onBroadcastChange(ids);
 };
-const startBroadcast = (idx) => {
-  broadcastSel = new Set([String(current), String(rows[idx].id)]);
+    // Recompute the filtered session view after `rows` or the pattern change.
+    const applySearch = () => {
+      view = filterByPattern(rows, search.active ? search.value : '',
+        (r) => `${r.title || ''} ${r.id || ''}`);
+      if (cursor >= view.length) cursor = Math.max(0, view.length - 1);
+    };
+    // Recompute the filtered view of the currently open inline list.
+    const applyListSearch = () => {
+      if (!list) return;
+      list.view = filterByPattern(list.items, listSearch.active ? listSearch.value : '', list.format);
+      if (listCursor >= list.view.length) listCursor = Math.max(0, list.view.length - 1);
+    };
+    // After a broadcast attempt (cancel / drop below two): put the menu — and
+    // the TUI — back on the stored current session, which inspection may have
+    // relaunched away without updating `.ocmux.json`.
+    const restoreCurrent = () => {
+      const idx = view.findIndex((r) => String(r.id) === String(current));
+      if (idx >= 0) cursor = idx;
+      if (inspected && current != null && onInspectSession) onInspectSession(current);
+      inspected = false;
+    };
+    const startBroadcast = (idx) => {
+  broadcastSel = new Set([String(current), String(view[idx].id)]);
   persistBroadcast([...broadcastSel]);
   mode = 'broadcast';
-  if (onInspectSession) onInspectSession(rows[idx].id);
+  if (onInspectSession) { onInspectSession(view[idx].id); inspected = true; }
   draw();
 };
 const toggleBroadcast = (idx) => {
-  const id = String(rows[idx].id);
+  const id = String(view[idx].id);
   const adding = !broadcastSel.has(id);
   if (adding) broadcastSel.add(id);
   else broadcastSel.delete(id);
-  if (adding && onInspectSession) onInspectSession(id);
+  if (adding && onInspectSession) { onInspectSession(id); inspected = true; }
   if (broadcastSel.size < 2) {
+    // Deselecting down to one session ends broadcast mode by making that
+    // remaining session the actual selection.
+    const remaining = [...broadcastSel][0];
     persistBroadcast([]);
     broadcastSel = new Set();
     mode = 'normal';
-    draw();
+    const row = rows.find(r => String(r.id) === String(remaining));
+    if (row) applyPick(row);
+    else { restoreCurrent(); draw(); }
     return;
   }
   persistBroadcast([...broadcastSel]);
@@ -630,7 +808,8 @@ const toggleBroadcast = (idx) => {
         draw();
         return;
       }
-      list = { title, items, format, onEnter, returnMode };
+      list = { title, items, view: items, format, onEnter, returnMode };
+      listSearch = newSearchState();
       listCursor = 0;
       mode = 'list';
       draw();
@@ -642,8 +821,17 @@ const toggleBroadcast = (idx) => {
     };
 
     process.stdin.on('keypress', (str, key) => {
-      if (mode === 'help' || mode === 'broadcast-help') {
-        mode = mode === 'broadcast-help' ? 'broadcast' : 'normal';
+      // Ctrl+C always fully exits ocmux, from any menu.
+      if (key.ctrl && key.name === 'c') {
+        if (mode === 'broadcast' || mode === 'broadcast-confirm') {
+          persistBroadcast([]);
+          broadcastSel = new Set();
+          restoreCurrent();
+        }
+        return finish(null);
+      }
+      if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
+        mode = mode === 'broadcast-help' ? 'broadcast' : (mode === 'list-help' ? 'list' : 'normal');
         draw();
         return;
       }
@@ -705,19 +893,25 @@ const toggleBroadcast = (idx) => {
         return;
       }
       if (mode === 'list') {
+        const lr = handleSearch(str, key, listSearch);
+        if (lr !== 'pass') { applyListSearch(); draw(); return; }
         if (key.name === 'escape' || key.name === 'q' || key.name === 'backspace') {
           const returnMode = list.returnMode;
           list = null;
           mode = returnMode;
           draw();
+        } else if (key.name === 'h') {
+          mode = 'list-help';
+          draw();
         } else if (key.name === 'up' || str === 'k') {
-          listCursor = (listCursor - 1 + list.items.length) % list.items.length;
+          if (list.view.length) listCursor = (listCursor - 1 + list.view.length) % list.view.length;
           draw();
         } else if (key.name === 'down' || str === 'j') {
-          listCursor = (listCursor + 1) % list.items.length;
+          if (list.view.length) listCursor = (listCursor + 1) % list.view.length;
           draw();
         } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
-          const item = list.items[listCursor];
+          const item = list.view[listCursor];
+          if (item === undefined) { draw(); return; }
           const onEnter = list.onEnter;
           const returnMode = list.returnMode;
           list = null;
@@ -727,23 +921,31 @@ const toggleBroadcast = (idx) => {
         }
         return;
       }
+      const sr = handleSearch(str, key, search);
+      if (sr !== 'pass') { applySearch(); draw(); return; }
       if (mode === 'broadcast') {
         if (key.name === 'escape') {
           persistBroadcast([]);
           broadcastSel = new Set();
           mode = 'normal';
+          restoreCurrent();
           draw();
         } else if (key.name === 'q') {
+          // 'q' only quits from the plain session list; in broadcast mode it
+          // cancels back to that list (Ctrl+C quits from anywhere).
           persistBroadcast([]);
-          finish(null);
+          broadcastSel = new Set();
+          mode = 'normal';
+          restoreCurrent();
+          draw();
         } else if (key.name === 'h') {
           mode = 'broadcast-help';
           draw();
         } else if (key.name === 'space') {
-          if (cursor < rows.length) toggleBroadcast(cursor);
+          if (cursor < view.length) toggleBroadcast(cursor);
         } else if (key.name === 'd') {
-          if (cursor < rows.length) {
-            confirmDel = rows[cursor];
+          if (cursor < view.length) {
+            confirmDel = view[cursor];
             mode = 'broadcast-confirm';
             draw();
           }
@@ -754,21 +956,20 @@ const toggleBroadcast = (idx) => {
             }, 'broadcast');
           }).catch(commandErr);
         } else if (key.name === 'return' || key.name === 'enter') {
-          if (cursor < rows.length) {
+          if (cursor < view.length) {
             mode = 'normal';
             broadcastSel = new Set(); // selection stays persisted for agentp
-            applyPick(rows[cursor]);
+            applyPick(view[cursor]);
           }
-        } else if (rows.length > 0 && (key.name === 'up' || str === 'k')) {
-          cursor = (cursor - 1 + rows.length) % rows.length;
+        } else if (view.length > 0 && (key.name === 'up' || str === 'k')) {
+          cursor = (cursor - 1 + view.length) % view.length;
           draw();
-        } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
-          cursor = (cursor + 1) % rows.length;
+        } else if (view.length > 0 && (key.name === 'down' || str === 'j')) {
+          cursor = (cursor + 1) % view.length;
           draw();
         }
         return;
       }
-      if (key.ctrl && key.name === 'c') return finish(null);
       if (key.name === 'q') return finish(null);
       if (key.name === 'p') return finish('switch-project');
       if (key.name === 'h') {
@@ -782,17 +983,17 @@ const toggleBroadcast = (idx) => {
       }
       // Shift+r → Reminder; lowercase r → Rename.
       if (str === 'R') {
-        const row = rows[cursor];
+        const row = view[cursor];
         const note = (row && annotations && annotations[row.id]) || '';
         startInput('Reminder for this session (blank clears; ESC cancels):', note, 'reminder');
         return;
       }
-      if (key.name === 'r' && cursor < rows.length) {
-        startInput('Rename to (ESC cancels):', rows[cursor].title || '', 'rename');
+      if (key.name === 'r' && cursor < view.length) {
+        startInput('Rename to (ESC cancels):', view[cursor].title || '', 'rename');
         return;
       }
       if (key.name === 'a') {
-        const target = rows[cursor];
+        const target = view[cursor];
         if (target) {
           listAgents(server).then((all) => {
             const primary = all.filter(x => x.mode === 'primary' && !x.hidden);
@@ -804,7 +1005,7 @@ const toggleBroadcast = (idx) => {
         return;
       }
       if (key.name === 'm') {
-        const target = rows[cursor];
+        const target = view[cursor];
         if (target) {
           listModels(server).then((models) => {
             openList('Models', models, (x) => `${x.label}${x.variant ? `#${x.variant}` : ''}`, (item) =>
@@ -814,26 +1015,26 @@ const toggleBroadcast = (idx) => {
         return;
       }
       if (key.name === 'd') {
-        if (cursor < rows.length) {
-          confirmDel = rows[cursor];
+        if (cursor < view.length) {
+          confirmDel = view[cursor];
           mode = 'confirm';
           draw();
         }
         return;
       }
-      if (rows.length > 0 && (key.name === 'up' || str === 'k')) {
-        cursor = (cursor - 1 + rows.length) % rows.length;
+      if (view.length > 0 && (key.name === 'up' || str === 'k')) {
+        cursor = (cursor - 1 + view.length) % view.length;
         draw();
-      } else if (rows.length > 0 && (key.name === 'down' || str === 'j')) {
-        cursor = (cursor + 1) % rows.length;
+      } else if (view.length > 0 && (key.name === 'down' || str === 'j')) {
+        cursor = (cursor + 1) % view.length;
         draw();
       } else if (key.name === 'return' || key.name === 'enter') {
-        if (cursor < rows.length) applyPick(rows[cursor]);
+        if (cursor < view.length) applyPick(view[cursor]);
       } else if (key.name === 'space') {
         // Start broadcast only when adding a DIFFERENT session to the current one.
-        if (cursor < rows.length && String(rows[cursor].id) !== String(current)) {
+        if (cursor < view.length && String(view[cursor].id) !== String(current)) {
           startBroadcast(cursor);
-        } else if (cursor < rows.length) {
+        } else if (cursor < view.length) {
           draw(); // no-op on the already-selected session
         }
       }
@@ -873,16 +1074,21 @@ function switchMenu(rows, longMode) {
     const lineWidth = Math.max(cols, nameW + 2 + stsW + 2 + ssnW + 6);
 
     let cursor = 0;
-    let activeRow = 0;
+    let activeIdx = null;       // tmux window index of the focused project
     let lastDir = null;
     let done = false;
+    let help = false;
+    const search = newSearchState();
+    let view = rows;
+
+    const applySearch = () => {
+      view = filterByPattern(rows, search.active ? search.value : '',
+        (r) => `${path.basename(r.dir)} ${r.dir} ${r.session || ''}`);
+      if (cursor >= view.length) cursor = Math.max(0, view.length - 1);
+    };
 
     const refreshActive = () => {
-      const idx = activeWindowIndex();
-      if (idx == null) return;
-      for (let i = 0; i < rows.length; i++) {
-        if (rows[i].index === idx) { activeRow = i; return; }
-      }
+      activeIdx = activeWindowIndex();
     };
 
     const cleanup = () => {
@@ -892,31 +1098,50 @@ function switchMenu(rows, longMode) {
       try { process.stdin.setRawMode(false); } catch {}
     };
 
-    const finish = () => {
+    const finish = (value) => {
       if (done) return;
       done = true;
       cleanup();
       process.stdin.pause();
-      resolve(lastDir);
+      process.stdin.removeAllListeners('keypress');
+      process.removeListener('SIGINT', onSig);
+      resolve(value === undefined ? lastDir : value);
     };
 
     const draw = () => {
+      if (help) {
+        let out = '\x1b[2J\x1b[H';
+        out += 'ocmux project switcher — help\n\n';
+        out += '  j / k, arrows    move the cursor\n';
+        out += '  Enter / Space    focus the selected project (menu stays open)\n';
+        out += '  /                search/filter the list (Enter keeps, ESC clears)\n';
+        out += '  h                toggle this help\n';
+        out += '  q                return to the session menu\n';
+        out += '  Ctrl+C           quit ocmux\n';
+        out += '\nPress any key to return.\n';
+        process.stderr.write(out);
+        return;
+      }
       refreshActive();
+      const extras = (search.active && view.length === 0) ? [`No projects match "${search.value}"`] : [];
       process.stderr.write(renderList({
         title: 'ocmux — project switcher',
-        items: rows,
+        items: view,
         cursor,
         row: (i, row) => {
           const session = row.session ? row.session.slice(0, 14) : '(none)';
           const text = `${pad(path.basename(row.dir), nameW)}  ${pad(row.status, stsW)}  ${pad(session, ssnW)}  ${row.dir}`;
-          return i === activeRow ? { text, reverse: true } : text;
+          return row.index === activeIdx ? { text, reverse: true } : text;
         },
-        footer: 'Enter: focus · q: quit',
+        footer: searchFooter(search, 'Enter: focus · /: search · h: help · q: back · Ctrl+C: quit'),
+        footerLeft: search.active,
+        footerRight: search.active ? SEARCH_HINT : null,
+        extraLines: extras,
       }));
     };
 
-    const activate = (i) => {
-      const row = rows[i];
+    const activate = (row) => {
+      if (!row) return;
       try {
         if (row.server) {
           activateProject(row.dir, row.index, row.server, row.session);
@@ -930,20 +1155,26 @@ function switchMenu(rows, longMode) {
       draw();
     };
 
-    const onSig = () => finish();
+    const onSig = () => finish(SWITCH_QUIT);
     process.on('SIGINT', onSig);
 
     process.stdin.on('keypress', (str, key) => {
-      if (key.ctrl && key.name === 'c') return finish();
+      // Ctrl+C fully exits ocmux; 'q' only closes this menu (back to sessions).
+      if (key.ctrl && key.name === 'c') return finish(SWITCH_QUIT);
+      if (help) { help = false; draw(); return; }
+      const sr = handleSearch(str, key, search);
+      if (sr !== 'pass') { applySearch(); draw(); return; }
+      if (key.name === 'h') { help = true; draw(); return; }
       if (key.name === 'q') return finish();
+      if (view.length === 0) return;
       if (key.name === 'up' || str === 'k') {
-        cursor = (cursor + rows.length - 1) % rows.length;
+        cursor = (cursor + view.length - 1) % view.length;
         draw();
       } else if (key.name === 'down' || str === 'j') {
-        cursor = (cursor + 1) % rows.length;
+        cursor = (cursor + 1) % view.length;
         draw();
       } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
-        activate(cursor);
+        activate(view[cursor]);
       }
     });
 
@@ -1086,12 +1317,13 @@ async function cmdSessionSwitch(targetDir, directRef) {
     });
 
     if (result === 'switch-project') {
-      // 'p' pressed: open the project switcher, then re-run this picker for
-      // the project that was just activated (if any).
+      // 'p' pressed: open the project switcher. Picking a project re-runs this
+      // picker for it; 'q' returns here unchanged; Ctrl+C fully exits.
       ensureSession();
-      const lastDir = await switchMenu(listProjects());
-      if (!lastDir) break;
-      target = lastDir;
+      const picked = await switchMenu(listProjects());
+      if (picked === SWITCH_QUIT) break;
+      if (!picked) continue;
+      target = picked;
       continue;
     }
     break;
@@ -1519,4 +1751,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn };
+module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT };

@@ -2,6 +2,51 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.1] - 2026-10-08
+
+The **broadcast** release. Fixes deferred/explicit broadcast delivery, hardens
+broadcast-mode UX, and adds `/` incremental search to every interactive list.
+
+### Added
+
+- **`/` incremental search** in the session picker, the model/agent pickers and
+  the project switcher. Typing filters the list live (case-insensitive,
+  space-separated tokens are ANDed); the inverted bottom line becomes
+  `Search: <pattern>▏` with `Enter: confirm · Esc: cancel` pinned to the right.
+  `Enter` keeps the filter and returns to normal navigation, `ESC` clears it,
+  `/` resumes editing it, `Backspace` on an already-empty search also exits it,
+  and arrows still move through the filtered list.
+- **Consistent menu exits.** `q`/`ESC` only closes the *current* menu and returns
+  to the previous one everywhere except the session picker itself (which still
+  quits on `q`); **`Ctrl+C` fully exits `ocmux` from any menu**, including help,
+  input/confirm prompts, the broadcast mode and the project switcher.
+- **`h` help overlay in every menu** — the model/agent pickers and the project
+  switcher now have the same `h` help screen the session picker already had.
+- **Broadcast-mode keys**: `h` opens a broadcast-specific help overlay, `d`
+  deletes the cursor session (confirm) while staying in broadcast mode, and `m`
+  applies one model to **all** selected sessions (usable to bulk-change models
+  without sending a prompt).
+
+### Fixed
+
+- **Deferred broadcast was silently single-session.** `agentp --defer` resolved
+  one `targetSessionId` before spawning the child, so the ticket carried only
+  one session and the prompt only reached one target. Broadcast tickets now
+  carry `sessionIds` (no misleading single `sessionId`) and the detached child
+  receives `--resolved-session-ids`, keeping the full target list.
+- **Broadcast sends now run independently and concurrently.** Each session waits
+  for *its own* busy state; one rate-limited/stalled target no longer blocks the
+  others. Per-session reminders are applied, and cancelling broadcast stops
+  waiting without interrupting a running model.
+- **Broadcast output**: `--qa` now includes the user prompt; each reply has its
+  own `💬 <name> [<id>]` section (no bogus single heading); failed/incomplete
+  targets are reported as a detailed sublist (name, id, error, timestamp).
+  Cancelling a broadcast ticket interrupts every listed session.
+- **Broadcast exit** returns the TUI to the stored session; in broadcast mode
+  `ESC`/`q` now cancel back to the session list (only `Ctrl+C` quits), and
+  deselecting down to a single session selects that remaining session
+  (previously the menu could highlight a session the TUI was no longer on).
+
 ## [2.0.0] - 2026-10-07
 
 The **project/session** release. OpenCode v2 only; the server is user-managed;
