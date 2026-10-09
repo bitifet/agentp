@@ -59,6 +59,8 @@ Each instance records:
 - tmux socket and pane ID;
 - dedicated/shared mode;
 - last directory, server, and session;
+- the directory and session currently displayed (so routing can skip a
+  respawn that would change nothing);
 - foreground wrapper PID and current child PID (diagnostic only);
 - registration/update timestamps.
 
@@ -95,7 +97,9 @@ a different server, the same pane reconnects to that server.
 `ocmux tui [--shared] [directory]`:
 
 1. Requires `$TMUX` and `$TMUX_PANE`.
-2. Resolves `.ocmux.json`, server, directory, and session.
+2. Resolves `.ocmux.json`, server, directory, and session. A shared TUI may run
+   without a state file, in which case it uses the current directory and the
+   default server (`$OCMUX_SERVER` or `http://localhost:4096`).
 3. Health-checks the server and validates the session, creating one with a
    model when necessary.
 4. Marks and registers the current pane.
@@ -127,6 +131,10 @@ The new `ocmux tui` process re-registers the pane and hosts the new OpenCode
 child. Server-side session execution continues while the old client disconnects.
 Client-local state—draft prompt, scroll position, dialogs, and tabs—is lost.
 
+Routing is idempotent: the registry records the directory and session the pane
+currently displays, so a switch to the same project/session is skipped without
+respawning.
+
 Native TUI navigation is temporary inspection and is not observable through
 the OpenCode HTTP API. The next ocmux selection restores the canonical target.
 
@@ -142,7 +150,8 @@ or creating one with a model. It creates no tmux session, window, or pane.
 
 Registers and hosts a dedicated or shared TUI as described above. `--shared`
 is valid only for this command. `--server` overrides the project's recorded
-server for the launched wrapper. Management modes are:
+server for the launched wrapper; when `--shared` runs without a state file it
+falls back to the default server. Management modes are:
 
 - `ocmux tui --list` — prune stale entries and print every live registration;
 - `ocmux tui [dir] --status` — inspect the dedicated slot for that project;
@@ -156,9 +165,17 @@ destroy the pane. Management modes do not require running inside tmux.
 ### `ocmux`
 
 Opens the current project's session picker. Picking writes that project's
-session and refreshes its routed TUI. Session creation, rename/delete,
+session and refreshes its routed TUI. Merely opening the picker also routes the
+applicable TUI to the project's stored session (skipped when it already shows
+it), so starting `ocmux` in a project switches the display even without picking
+a row. When the recorded server is unreachable but the default server answers,
+`ocmux` offers on a TTY to repoint the project to the default and rewrites
+`server`. Session creation, rename/delete,
 annotations, agent/model choice, broadcast selection, search, and project
-inspection operate through OpenCode's API.
+inspection operate through OpenCode's API. Deleting the session currently
+selected adopts the session under the cursor as the new current (state write,
+TUI refresh, and list highlight); deleting any other session leaves the current
+selection unchanged.
 
 ### `ocmux session <id|title> [dir]`
 

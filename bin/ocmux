@@ -113,6 +113,23 @@ function checkServer(server) {
   });
 }
 
+// Ask a yes/no question on stderr. Only meaningful on a TTY; resolves false on
+// EOF/close so a non-answer never silently changes state.
+function askYesNo(question) {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    let done = false;
+    const settle = (value) => {
+      if (done) return;
+      done = true;
+      try { rl.close(); } catch {}
+      resolve(value);
+    };
+    rl.question(question, (answer) => settle(/^y(es)?$/i.test((answer || '').trim())));
+    rl.on('close', () => settle(false));
+  });
+}
+
 function refreshTui(directory, server, session) {
   const result = switchTui(directory, server, session, path.resolve(process.argv[1]));
   if (!result.ok && result.reason === 'failed') {
@@ -648,15 +665,12 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       );
       const inBc = mode === 'broadcast' || mode === 'broadcast-confirm';
       const extras = [...notices];
-      if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
-        extras.push(`Delete session "${confirmDel.title || confirmDel.id || ''}"? (y/N) `);
-      } else if (mode === 'input' && input) {
-        extras.push(`${input.label} ${renderInputValue(input.value)}`);
-      }
       if (search.active && view.length === 0) extras.push(`No sessions match "${search.value}"`);
       const selected = view[cursor];
       let infoLines = [];
       let footer = 'Enter: switch · Space: broadcast · /: search · h: help · q: quit';
+      let footerLeft = search.active;
+      let footerRight = search.active ? SEARCH_HINT : null;
       if (inBc) {
         const names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
         infoLines = [`Broadcast to sessions: ${names}`];
@@ -665,7 +679,19 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         const selIsCurrent = !!(selected && String(selected.id) === String(current));
         infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
       }
-      footer = searchFooter(search, footer);
+      // 'd'/n/r/R prompts take over the status bar (previously an easy-to-miss
+      // line at the bottom of the list) with their essential keys on the right.
+      if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
+        footer = `Delete session "${confirmDel.title || confirmDel.id || ''}"?`;
+        footerLeft = true;
+        footerRight = 'y: delete · n/Esc: cancel';
+      } else if (mode === 'input' && input) {
+        footer = `${input.prompt} ${renderInputValue(input.value)}`;
+        footerLeft = true;
+        footerRight = input.hint;
+      } else {
+        footer = searchFooter(search, footer);
+      }
       process.stderr.write(renderList({
         // The project name heads the title so you always know which project's
         // sessions are listed (matters when --all-projects moves you around).
@@ -684,15 +710,15 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           return String(s.id) === String(current) ? `${BROWN}${text}\x1b[0m` : text;
         },
         footer,
-        footerLeft: search.active,
-        footerRight: search.active ? SEARCH_HINT : null,
+        footerLeft,
+        footerRight,
         infoLines,
         extraLines: extras,
       }));
     };
 
-    const startInput = (label, value, kind) => {
-      input = { label, value, kind, caret: value.length };
+    const startInput = (prompt, hint, value, kind) => {
+      input = { prompt, hint, value, kind, caret: value.length };
       mode = 'input';
       draw();
     };
@@ -767,11 +793,27 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           } else {
             persistBroadcast([...broadcastSel]);
             mode = 'broadcast';
+            // Keep the anchor session pointing at something that still exists
+            // (the cursor row when it is one of the remaining selections).
+            if (String(s.id) === String(current)) {
+              const next = view[cursor];
+              current = (next && broadcastSel.has(String(next.id))) ? next.id : ([...broadcastSel][0] || null);
+            }
             draw();
           }
         } else {
           mode = 'normal';
-          draw();
+          if (String(s.id) === String(current)) {
+            // The highlighted session was deleted: adopt the row now under the
+            // cursor as the new current. applyPick records it in .ocmux.json
+            // and refreshes the TUI, so the list highlight and the display
+            // agree on the new selection.
+            const next = view[cursor];
+            if (next) applyPick(next);
+            else { current = null; draw(); }
+          } else {
+            draw();
+          }
         }
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
@@ -1020,18 +1062,18 @@ const toggleBroadcast = (idx) => {
         return;
       }
       if (key.name === 'n') {
-        startInput('New session name (blank for auto; ESC cancels):', '', 'create');
+        startInput('New session name (blank = auto):', 'Enter: create · Esc: cancel', '', 'create');
         return;
       }
       // Shift+r → Reminder; lowercase r → Rename.
       if (str === 'R') {
         const row = view[cursor];
         const note = (row && annotations && annotations[row.id]) || '';
-        startInput('Reminder for this session (blank clears; ESC cancels):', note, 'reminder');
+        startInput('Reminder (blank clears):', 'Enter: save · Esc: cancel', note, 'reminder');
         return;
       }
       if (key.name === 'r' && cursor < view.length) {
-        startInput('Rename to (ESC cancels):', view[cursor].title || '', 'rename');
+        startInput('Rename to:', 'Enter: rename · Esc: cancel', view[cursor].title || '', 'rename');
         return;
       }
       if (key.name === 'a') {
@@ -1367,7 +1409,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
       process.exit(1);
     }
     const state = projectState.readProjectState(sf);
-    const server = state.server;
+    let server = state.server;
     if (!server) {
       console.error(`Error: ${sf} does not record a server.`);
       console.error(`Run 'ocmux serve --server <url>' to set it up, or add "server" to the file.`);
@@ -1375,7 +1417,19 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
     }
     const dir = state.directory;
 
-    const alive = await checkServer(server);
+    // If the recorded server is down, offer to repoint the project to the
+    // default server — but only after confirming the default actually answers.
+    let alive = await checkServer(server);
+    if (!alive && process.stdin.isTTY && server !== DEFAULT_SERVER
+      && await checkServer(DEFAULT_SERVER)) {
+      const useDefault = await askYesNo(
+        `OpenCode server not reachable at ${server}. Use the default ${DEFAULT_SERVER} instead? [y/N] `);
+      if (useDefault) {
+        projectState.writeProjectState(sf, { server: DEFAULT_SERVER });
+        server = DEFAULT_SERVER;
+        alive = true;
+      }
+    }
     if (!alive) {
       console.error(`Error: OpenCode server not reachable at ${server}.`);
       console.error(`Start it with 'opencode serve' (or your usual launcher) first.`);
@@ -1438,6 +1492,12 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
     // model of the previously selected session); r renames; R sets a reminder;
     // d deletes; a switches agent; m switches model; p switches project; q quits.
     let lastRef = (state.session && mainSessions.find(s => String(s.id) === String(state.session))) || mainSessions[0] || null;
+    // Opening the picker in a project routes its applicable TUI to the stored
+    // session, so merely running `ocmux` here switches the pane. (Respawn is
+    // skipped when the TUI is already showing that project/session.)
+    if (state.session && mainSessions.some(s => String(s.id) === String(state.session))) {
+      refreshTui(dir, server, state.session);
+    }
     const result = await new Promise((resolve) => {
       sessionMenu(mainSessions, state.session, annotations, server, {
         dir,
@@ -1622,20 +1682,22 @@ async function cmdTui(targetDir, serverArg, shared, sessionArg) {
     process.exit(1);
   }
   const sf = findParentStatefile(targetDir);
-  if (!sf) {
+  const state = sf ? projectState.readProjectState(sf) : null;
+  if (!state && !shared) {
     console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
     console.error("Run 'ocmux serve' first.");
     process.exit(1);
   }
-  const state = projectState.readProjectState(sf);
-  const directory = state.directory;
-  const server = serverArg || state.server || DEFAULT_SERVER;
+  // The shared TUI is a cross-project fallback, so it can run without a project
+  // state file (defaulting to the configured/default server).
+  const directory = state ? state.directory : targetDir;
+  const server = serverArg || (state && state.server) || DEFAULT_SERVER;
   if (!await checkServer(server)) {
     console.error(`Error: OpenCode server not reachable at ${server}.`);
     process.exit(1);
   }
 
-  let session = sessionArg || state.session;
+  let session = sessionArg || (state && state.session) || null;
   if (session) {
     try {
       const found = await getSession(server, session);
@@ -1648,7 +1710,7 @@ async function cmdTui(targetDir, serverArg, shared, sessionArg) {
     const sessions = await listSessions(server, directory);
     session = newestSessionId(sessions);
     if (!session) session = (await createSessionWithModel(server, undefined, directory, sessions)).id;
-    projectState.writeProjectState(sf, { session, server });
+    if (sf) projectState.writeProjectState(sf, { session, server });
   }
 
   const registration = tuiRegistry.register({
@@ -1808,9 +1870,12 @@ function printHelp() {
   console.error('  Enter switch · n new · r rename · R remind · d delete · a agents · m model');
   console.error('  p projects · h help · q quit');
   console.error('Selecting updates .ocmux.json and refreshes a dedicated TUI, falling');
-  console.error('back to the shared TUI. Silent on success. (p opens projects; by');
+  console.error('back to the shared TUI. Opening the picker also routes that project\'s');
+  console.error('TUI to its stored session. Silent on success. (p opens projects; by');
   console.error('default it only inspects other projects and never modifies any');
   console.error('.ocmux.json — see --all-projects.)');
+  console.error('If the recorded server is down but the default server answers, ocmux');
+  console.error('offers to repoint the project to the default.');
   console.error('');
   console.error('Subcommands:');
   console.error('  serve     Initialize project state for <directory> (default: $PWD).');
@@ -1821,7 +1886,8 @@ function printHelp() {
   console.error('  tui [--shared] [--server <url>] [directory]');
   console.error('            Register the current tmux pane and run its OpenCode TUI.');
   console.error('            Without --shared it is dedicated to the current project;');
-  console.error('            --shared makes it the single fallback for every project.');
+  console.error('            --shared makes it the single fallback for every project and');
+  console.error('            runs even without .ocmux.json (using the default server).');
   console.error('            --list lists all live registrations; --status inspects one;');
   console.error('            --detach unregisters one without closing its pane or TUI.');
   console.error('            With --status/--detach, --shared targets the shared slot;');
@@ -2071,4 +2137,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, newestSessionId, configuredProjects, refreshTui, cmdTui, cmdTuiList, cmdTuiStatus, cmdTuiDetach, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW };
+module.exports = { main, checkServer, askYesNo, newestSessionId, configuredProjects, refreshTui, cmdTui, cmdTuiList, cmdTuiStatus, cmdTuiDetach, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW };

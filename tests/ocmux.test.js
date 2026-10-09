@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const readline = require('readline');
 const { EventEmitter } = require('events');
 
 const ocmux = require('../lib/ocmux');
@@ -32,6 +33,7 @@ function mockExecSync() { /* no-op */ }
 
 // ── Mock infrastructure for http.request (checkServer) ─────────────
 let httpMode = 'ok';          // 'ok' | 'down' (net error)
+let httpDownFor = null;       // (opts) => bool, per-request failure override
 let httpResponder = null;     // (opts) => body-string | null, per-request override
 
 function mockHttpRequest(opts, callback) {
@@ -52,7 +54,7 @@ function mockHttpRequest(opts, callback) {
     setTimeout(ms, fn) { /* no-op */ },
     destroy() {},
     end() {
-      if (httpMode === 'down') {
+      if (httpMode === 'down' || (httpDownFor && httpDownFor(opts))) {
         if (req._errHandler) req._errHandler(new Error('ECONNREFUSED'));
         return;
       }
@@ -97,6 +99,7 @@ function setupMocks() {
   tmuxHandler = null;
   spawnSyncCalls = [];
   httpMode = 'ok';
+  httpDownFor = null;
   httpResponder = null;
   mockFiles = {};
   mockDirs = { '/proj': true, '/nope': true, '/proj1': true, '/proj2': true, '/other': true };
@@ -120,6 +123,7 @@ function tearDownMocks() {
   tmuxHandler = null;
   spawnSyncCalls = [];
   httpMode = 'ok';
+  httpDownFor = null;
   httpResponder = null;
   mockFiles = {};
   mockDirs = {};
@@ -566,6 +570,70 @@ describe('ocmux CLI', () => {
     assert.ok(calls.some(c => c[0] === 'unregister' && c[1] === 'tui_1' && c[2] === 'tok'));
   });
 
+  it('tui --shared runs without a state file, defaulting to the default server', async () => {
+    const calls = [];
+    nodeMock.method(tuiRegistry, 'parseTmuxEnvironment', () => ({ socket: '/tmp/tmux/default', pane: '%9' }));
+    nodeMock.method(tuiRegistry, 'register', (input) => {
+      calls.push(['register', input]);
+      return { instance: { ...input, id: 'tui_1', token: 'tok' }, displaced: null };
+    });
+    nodeMock.method(tuiRegistry, 'updateInstance', (...args) => { calls.push(['update', ...args]); });
+    nodeMock.method(tuiRegistry, 'unregister', (...args) => { calls.push(['unregister', ...args]); return true; });
+    nodeMock.method(opencode, 'getSession', async () => ({
+      id: 'ses_1', location: { directory: process.cwd() },
+    }));
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = () => {};
+    nodeMock.method(child_process, 'spawn', (cmd, args, opts) => {
+      calls.push(['spawn', cmd, args, opts]);
+      process.nextTick(() => child.emit('exit', 0));
+      return child;
+    });
+    const def = process.env.OCMUX_SERVER || 'http://localhost:4096';
+    await runMain(['tui', '--shared', '--session-id', 'ses_1']);
+    assert.strictEqual(exitThrown, null, 'stderr=' + JSON.stringify(stderrOutput));
+    const reg = calls.find(c => c[0] === 'register');
+    assert.ok(reg, 'expected the shared TUI to register without a state file');
+    assert.strictEqual(reg[1].shared, true);
+    assert.strictEqual(reg[1].server, def);
+    assert.ok(!fsWrites.some(w => String(w.path).endsWith('.ocmux.json')),
+      'expected no state file to be created for the shared TUI');
+  });
+
+  it('offers to repoint a project to the default server when its own is down', async () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] =
+      JSON.stringify({ version: 2, directory: '/proj', session: 'old', server: 'http://dead:4096' });
+    httpDownFor = (opts) => opts.hostname === 'dead';
+    nodeMock.method(opencode, 'listSessions', async () => [{ id: 'ses_1', title: 'One' }]);
+    nodeMock.method(readline, 'createInterface', () => ({
+      question: (_q, cb) => cb('y'),
+      close() {},
+      on() { return this; },
+    }));
+    await runMain(['session', 'ses_1', '/proj']);
+    assert.strictEqual(exitThrown, null, 'stderr=' + JSON.stringify(stderrOutput));
+    const repointed = fsWrites.some(w => String(w.path).startsWith(path.join('/proj', '.ocmux.json'))
+      && String(w.data).includes('localhost:4096'));
+    assert.ok(repointed, 'expected .ocmux.json to be repointed to the default server');
+  });
+
+  it('keeps the unreachable-server error when the user declines the default', async () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] =
+      JSON.stringify({ version: 2, directory: '/proj', session: 'old', server: 'http://dead:4096' });
+    httpDownFor = (opts) => opts.hostname === 'dead';
+    nodeMock.method(readline, 'createInterface', () => ({
+      question: (_q, cb) => cb(''),
+      close() {},
+      on() { return this; },
+    }));
+    await runMain(['session', 'ses_1', '/proj']);
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.some(s => s.includes('not reachable')));
+    assert.ok(!fsWrites.some(w => String(w.data).includes('localhost:4096')),
+      'expected no repoint when the user declines');
+  });
+
   it('reports that the model subcommand was removed (use m in the picker)', async () => {
     await runMain(['model', 'deepseek']);
     assert.strictEqual(exitThrown, 1);
@@ -928,6 +996,110 @@ describe('sessionMenu broadcast exit', () => {
       keys: [['n', 'n'], ['N', 'N'], ['e', 'e'], ['w', 'w'], ['', 'return'], ['q', 'q']],
     });
     assert.ok(output.some(o => /New\s+\*/.test(o)), 'expected the new session to carry the current marker');
+  });
+
+  it('deleting the current session adopts and highlights the next one', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onDelete: async (row) => { calls.push(['delete', row.id]); },
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+      },
+      keys: [['d', 'd'], ['y', 'y'], ['q', 'q']],
+    });
+    // The row under the cursor (Beta) becomes the new current: it is recorded
+    // (onPick -> applySession in the real caller) and highlighted.
+    assert.deepStrictEqual(calls, [['delete', 'sA'], ['pick', 'sB']]);
+    assert.ok(output.some(o => /Beta\s+\*/.test(o)),
+      'expected the adopted session to carry the current marker');
+  });
+
+  it('deleting a non-current session leaves the current selection alone', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sB',
+      opts: {
+        onDelete: async (row) => { calls.push(['delete', row.id]); },
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+      },
+      keys: [['d', 'd'], ['y', 'y'], ['q', 'q']],
+    });
+    assert.deepStrictEqual(calls, [['delete', 'sA']]);
+    assert.ok(output.some(o => /Beta\s+\*/.test(o)),
+      'expected Beta to stay the highlighted current session');
+  });
+});
+
+describe('sessionMenu status-bar prompts', () => {
+  const sessions = [
+    { id: 'sA', title: 'Alpha' },
+    { id: 'sB', title: 'Beta' },
+  ];
+
+  // The status bar is the last bar-background line of a frame (the first such
+  // line is the title). d/n/r/R prompts must live there, not in the list area.
+  const statusBar = (frame) => {
+    const lines = frame.split('\n').filter((l) => l.startsWith(binOcmux.BAR_BG));
+    return lines[lines.length - 1] || '';
+  };
+  const outsideBar = (frame, needle) =>
+    frame.split('\n').some((l) => l.includes(needle) && !l.startsWith(binOcmux.BAR_BG));
+
+  it('n asks for the new name in the status bar with keep/cancel hints', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['n', 'n'], ['', 'escape'], ['q', 'q']],
+    });
+    const frame = output.find((o) => o.includes('New session name'));
+    assert.ok(frame, 'expected a create-name prompt frame');
+    const bar = statusBar(frame);
+    assert.ok(bar.includes('New session name'), 'prompt should be in the status bar');
+    assert.ok(bar.includes('Enter: create'), 'expected the confirm hint');
+    assert.ok(bar.includes('Esc: cancel'), 'expected the cancel hint');
+    assert.ok(!outsideBar(frame, 'New session name'), 'prompt should not sit in the list area');
+  });
+
+  it('r asks for the new name in the status bar', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['r', 'r'], ['', 'escape'], ['q', 'q']],
+    });
+    const frame = output.find((o) => o.includes('Rename to:'));
+    assert.ok(frame, 'expected a rename prompt frame');
+    const bar = statusBar(frame);
+    assert.ok(bar.includes('Rename to:'), 'prompt should be in the status bar');
+    assert.ok(bar.includes('Enter: rename'));
+    assert.ok(bar.includes('Esc: cancel'));
+    assert.ok(!outsideBar(frame, 'Rename to:'), 'prompt should not sit in the list area');
+  });
+
+  it('R asks for the reminder in the status bar', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['R', 'R'], ['', 'escape'], ['q', 'q']],
+    });
+    const frame = output.find((o) => o.includes('Reminder (blank clears)'));
+    assert.ok(frame, 'expected a reminder prompt frame');
+    const bar = statusBar(frame);
+    assert.ok(bar.includes('Reminder (blank clears)'), 'prompt should be in the status bar');
+    assert.ok(bar.includes('Enter: save'));
+    assert.ok(bar.includes('Esc: cancel'));
+    assert.ok(!outsideBar(frame, 'Reminder'), 'prompt should not sit in the list area');
+  });
+
+  it('d asks for delete confirmation in the status bar', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: {},
+      keys: [['d', 'd'], ['', 'escape'], ['q', 'q']],
+    });
+    const frame = output.find((o) => o.includes('Delete session'));
+    assert.ok(frame, 'expected a delete-confirmation frame');
+    const bar = statusBar(frame);
+    assert.ok(bar.includes('Delete session "Alpha"?'), 'prompt should be in the status bar');
+    assert.ok(bar.includes('y: delete'));
+    assert.ok(bar.includes('n/Esc: cancel'));
+    assert.ok(!outsideBar(frame, 'Delete session'), 'prompt should not sit in the list area');
   });
 });
 

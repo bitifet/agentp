@@ -148,6 +148,30 @@ describe('tui-registry', { concurrency: false }, () => {
     assert.ok(command.includes("'/new project'"));
   });
 
+  it('skips the respawn when the pane already shows the target project/session', () => {
+    registry.register({
+      socket: '/tmp/s', pane: '%7', shared: true,
+      directory: '/new project', session: 'ses_new',
+    });
+    calls.length = 0;
+    const result = ocmux.switchTui('/new project', 'http://server:5096', 'ses_new', '/opt/agentp/bin/ocmux');
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.unchanged, true);
+    assert.ok(!calls.some(c => c.args.includes('respawn-pane')));
+  });
+
+  it('remembers the respawned target so a repeat switch is a no-op', () => {
+    registry.register({ socket: '/tmp/s', pane: '%7', shared: true, directory: '/old' });
+    const first = ocmux.switchTui('/new project', 'http://server:5096', 'ses_new', '/opt/agentp/bin/ocmux');
+    assert.strictEqual(first.ok, true);
+    assert.ok(!first.unchanged);
+    calls.length = 0;
+    const second = ocmux.switchTui('/new project', 'http://server:5096', 'ses_new', '/opt/agentp/bin/ocmux');
+    assert.strictEqual(second.ok, true);
+    assert.strictEqual(second.unchanged, true);
+    assert.ok(!calls.some(c => c.args.includes('respawn-pane')));
+  });
+
   it('prunes a registration after its pane disappears', () => {
     const instance = registry.register({ socket: '/tmp/s', pane: '%9', shared: true, directory: '/a' }).instance;
     panes.delete(`${instance.socket}:${instance.pane}`);

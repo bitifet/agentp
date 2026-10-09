@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`ocmux tui --shared` required a project.** The cross-project fallback now
+  starts without a `.ocmux.json`, using the current directory and the default
+  server (`$OCMUX_SERVER` or `http://localhost:4096`). No state file is created.
+- **Opening `ocmux` in a project did not switch the TUI.** Entering the session
+  picker now routes the applicable dedicated/shared TUI to the project's stored
+  session, so you no longer have to re-pick the already-selected row. The
+  registry records the displayed directory/session and the respawn is skipped
+  when they already match, so an unchanged TUI is not restarted.
+- **Deleting the current session left nothing highlighted.** After confirming a
+  `d` deletion, ocmux now adopts the session under the cursor as the new
+  current: it is written to `.ocmux.json`, refreshed in the TUI, and marked with
+  the current-session highlight. Deleting a different session leaves the
+  current selection untouched.
+
+### Added
+
+- **Server fallback prompt.** When `.ocmux.json` points at an unreachable
+  server but the default server answers, `ocmux` offers (on a TTY) to repoint
+  the project to the default; confirming rewrites `server` in `.ocmux.json`.
+
+### Changed
+
+- **Session-picker prompts moved to the status bar.** The `d` delete
+  confirmation and the `n`/`r`/`R` name/reminder prompts now appear on the
+  inverted status bar with their essential keys on the right
+  (`Enter: create/rename/save · Esc: cancel`, `y: delete · n/Esc: cancel`)
+  instead of a hard-to-notice line at the bottom of the list area.
+
 ## [2.1.0] - 2026-10-09
 
 The **user-placed TUI** release. OpenCode panes can now live anywhere in tmux,

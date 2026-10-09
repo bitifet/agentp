@@ -356,7 +356,12 @@ the project found upward from `<directory>` (default: `$PWD`):
   every selected session.
 - `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
   `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
-  switcher (inspect-only by default) · `h` help · `q` quit
+  switcher (inspect-only by default) · `h` help · `q` quit. The `n`/`r`/`R`
+  prompts and the `d` confirmation take over the **status bar**, with their
+  essential keys on the right (`Enter: create/rename/save · Esc: cancel`,
+  `y: delete · n/Esc: cancel`). Deleting the current session adopts the session
+  under the cursor as the new current (recorded, refreshed in the TUI, and
+  highlighted)
 - `m` opens the model list **sorted by provider** with the cursor already on the
   session's **current model** — also in broadcast mode, where it starts from the
   cursor session's model, so a bulk change begins where you are
@@ -366,7 +371,14 @@ the project found upward from `<directory>` (default: `$PWD`):
 - switching updates `.ocmux.json` and refreshes the project's dedicated TUI, or
   the shared TUI when no live dedicated one exists; silent on success. The file
   updated is always the one of the project being listed — your own project
-  unless ocmux was started with `--all-projects`
+  unless ocmux was started with `--all-projects`. Opening the picker in a
+  project also routes that project's TUI to its stored session (a TUI already
+  showing it is left untouched), so running `ocmux` from anywhere switches the
+  display even without picking a row
+- when `.ocmux.json`'s server is unreachable but the default server
+  (`$OCMUX_SERVER` or `http://localhost:4096`) answers, `ocmux` offers (on a TTY)
+  to repoint the project to the default and rewrites `server` in `.ocmux.json`
+  if you confirm
 - new sessions inherit the model of the previously selected session (v2
   sessions created via the API have no model and won't run a prompt until set)
 
@@ -387,8 +399,10 @@ Subcommands:
 - **`tui [--shared] [--server <url>] [dir]`** — register the current tmux pane and run OpenCode
   in it. Without `--shared`, the pane follows only that project. With
   `--shared`, it becomes the one fallback TUI for all projects and can reconnect
-  across server URLs as selections change. Re-registering a slot stops its old
-  wrapper without destroying the old pane. Closing the TUI unregisters it.
+  across server URLs as selections change; `--shared` also starts without a
+  `.ocmux.json`, defaulting to the default server. Re-registering a slot stops
+  its old wrapper without destroying the old pane. Closing the TUI unregisters
+  it.
   `tui --list` lists live registrations; `tui [--shared] --status` inspects a
   dedicated/shared slot; `tui [--shared] --detach` unregisters that slot without
   closing the pane or its current TUI.
