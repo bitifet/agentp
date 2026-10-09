@@ -181,6 +181,8 @@ broadcast mode ends and the row under the cursor becomes the new current.
 Interactive prompts (create/rename/reminder/delete/delete-all) take over the
 status bar and flip its background from brown to light yellow — the same color
 as the session-list pointer — so an active question is immediately visible.
+The broadcast info line (`Broadcast to sessions: …`) never wraps: an oversized
+selection is truncated from the beginning with a leading `...`.
 
 ### `ocmux session <id|title> [dir]`
 

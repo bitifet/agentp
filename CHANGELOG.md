@@ -42,6 +42,10 @@ All notable changes to this project will be documented in this file.
   (create/rename/reminder/delete/delete-all), the bar changes from brown to the
   same light yellow as the session-list pointer (`\x1b[30;103m`), so the change
   of state is obvious at a glance; the normal bars keep the brown background.
+- **Broadcast list caps itself at one line.** The `Broadcast to sessions: …`
+  info line truncates from the beginning (leading `...`) once the joined names
+  would exceed a readable budget or the terminal width, so a long selection
+  never wraps the footer and the most visible sessions stay readable.
 
 ## [2.1.0] - 2026-10-09
 

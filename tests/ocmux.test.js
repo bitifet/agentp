@@ -1147,6 +1147,51 @@ describe('sessionMenu broadcast exit', () => {
       ['inspect', 'sA'],
     ]);
   });
+
+  it('truncates a long broadcast list from the beginning with a leading ...', async () => {
+    const many = [
+      { id: 'sA', title: 'Alpha' },
+      { id: 'sB', title: 'Beta' },
+      { id: 'sC', title: 'Gamma' },
+      { id: 'sD', title: 'Delta' },
+      { id: 'sE', title: 'Epsilon' },
+      { id: 'sF', title: 'Zeta' },
+      { id: 'sG', title: 'Eta' },
+      { id: 'sH', title: 'Theta' },
+    ];
+    const savedCols = process.stdout.columns;
+    process.stdout.columns = 50;
+    try {
+      const { output } = await driveSessionMenu({
+        sessions: many, current: 'sA',
+        opts: { onInspectSession: () => {}, onBroadcastChange: () => {} },
+        keys: [
+          ['', 'down'], [' ', 'space'], // sB
+          ['', 'down'], [' ', 'space'], // sC
+          ['', 'down'], [' ', 'space'], // sD
+          ['', 'down'], [' ', 'space'], // sE
+          ['', 'down'], [' ', 'space'], // sF
+          ['', 'down'], [' ', 'space'], // sG
+          ['', 'down'], [' ', 'space'], // sH
+          ['q', 'q'],                   // cancel broadcast
+          ['q', 'q'],                   // quit
+        ],
+      });
+      const frames = output.filter((o) => o.includes('Broadcast to sessions:'));
+      assert.ok(frames.length > 0, 'expected broadcast frames');
+      const frame = frames[frames.length - 1];
+      const line = frame.split('\n').find((l) => l.startsWith('Broadcast to sessions:'));
+      assert.ok(line, 'expected the broadcast info line');
+      assert.ok(line.length <= 50,
+        `info line must not wrap on a 50-column terminal (got ${line.length})`);
+      assert.ok(line.includes('sessions: ...'), 'expected the leading ellipsis after truncation');
+      assert.ok(!line.includes('Alpha, Beta'), 'expected the head of the list to be trimmed');
+      assert.ok(line.includes('Theta'), 'expected the tail of the list to be kept');
+    } finally {
+      if (savedCols === undefined) delete process.stdout.columns;
+      else process.stdout.columns = savedCols;
+    }
+  });
 });
 
 describe('sessionMenu status-bar prompts', () => {

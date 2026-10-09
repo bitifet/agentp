@@ -678,8 +678,20 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       let footerLeft = search.active;
       let footerRight = search.active ? SEARCH_HINT : null;
       if (inBc) {
-        const names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
-        infoLines = [`Broadcast to sessions: ${names}`];
+        // List every selected session, capped so the info line never wraps. On
+        // overflow the head is trimmed and marked with '...' — the picker lists
+        // most-recently-viewed first, so the trimmed head is the most recently
+        // viewed part of the selection.
+        let names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
+        const bcHead = 'Broadcast to sessions: ';
+        const budget = Math.max(8, Math.min(48, cols - bcHead.length));
+        if (names.length > budget) {
+          let keep = names.slice(-(budget - 4)); // 3 for '...', 1 for the space
+          const at = keep.indexOf(', ');
+          if (at > 0) keep = keep.slice(at + 2);
+          names = '... ' + keep;
+        }
+        infoLines = [bcHead + names];
         footer = 'Enter: switch · Space: toggle · d: delete · D: delete all · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
       } else {
         const selIsCurrent = !!(selected && String(selected.id) === String(current));

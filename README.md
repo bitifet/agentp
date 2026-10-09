@@ -354,7 +354,9 @@ the project found upward from `<directory>` (default: `$PWD`):
   that remaining session. New selections open in the TUI for inspection.
   Broadcast mode also has `h` help, `d` delete, `D` (Shift+d) to delete every
   selected session at once (confirmation in the status bar), and `m` to change
-  the model for every selected session.
+  the model for every selected session. The `Broadcast to sessions: …` line
+  caps itself to one row — when the selection gets too long it is truncated
+  from the beginning with a leading `...`, so the footer never wraps.
 - `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
   `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
   switcher (inspect-only by default) · `h` help · `q` quit. The `n`/`r`/`R`
