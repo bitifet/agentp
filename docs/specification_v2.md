@@ -178,6 +178,9 @@ TUI refresh, and list highlight); deleting any other session leaves the current
 selection unchanged. In broadcast mode `d` deletes just the cursor session
 while `D` (Shift+d) deletes every selected session at once — after confirming,
 broadcast mode ends and the row under the cursor becomes the new current.
+Interactive prompts (create/rename/reminder/delete/delete-all) take over the
+status bar and flip its background from brown to light yellow — the same color
+as the session-list pointer — so an active question is immediately visible.
 
 ### `ocmux session <id|title> [dir]`
 

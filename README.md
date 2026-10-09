@@ -360,7 +360,9 @@ the project found upward from `<directory>` (default: `$PWD`):
   switcher (inspect-only by default) · `h` help · `q` quit. The `n`/`r`/`R`
   prompts and the `d` confirmation take over the **status bar**, with their
   essential keys on the right (`Enter: create/rename/save · Esc: cancel`,
-  `y: delete · n/Esc: cancel`). Deleting the current session adopts the session
+  `y: delete · n/Esc: cancel`). While a question is active the bar flips from
+  brown to the same **light yellow as the list pointer**, so the change of
+  state is obvious at a glance. Deleting the current session adopts the session
   under the cursor as the new current (recorded, refreshed in the TUI, and
   highlighted)
 - `m` opens the model list **sorted by provider** with the cursor already on the

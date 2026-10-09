@@ -38,6 +38,10 @@ All notable changes to this project will be documented in this file.
   inverted status bar with their essential keys on the right
   (`Enter: create/rename/save · Esc: cancel`, `y: delete · n/Esc: cancel`)
   instead of a hard-to-notice line at the bottom of the list area.
+- **Prompts flip the status bar to light yellow.** While a question is active
+  (create/rename/reminder/delete/delete-all), the bar changes from brown to the
+  same light yellow as the session-list pointer (`\x1b[30;103m`), so the change
+  of state is obvious at a glance; the normal bars keep the brown background.
 
 ## [2.1.0] - 2026-10-09
 

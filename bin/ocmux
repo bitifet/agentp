@@ -212,6 +212,7 @@ function padLeft(s, w) {
 const BROWN = '\x1b[33m';            // text: brown/dark-yellow
 const BAR_BG = '\x1b[30;43m';        // title/status bar: black on brown
 const LIGHT_YELLOW = '\x1b[1;33m';   // text: light-yellow (bold brown)
+const QUESTION_BG = '\x1b[30;103m';  // question/input bar: black on light-yellow
 
 // ── '/' incremental search for interactive lists ──────────────────────────
 // Filter `items` by `pattern`: case-insensitive, space-separated tokens that
@@ -470,9 +471,11 @@ function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false) 
 //   footer     -> status bar (brown background), key hints right-aligned
 //                 (left-aligned when footerLeft is set — used by the search line)
 //   footerRight-> optional hint pinned to the right end of a left-aligned footer
+//   footerBg   -> background for the footer bar (default: BAR_BG; question bars
+//                 pass QUESTION_BG so an active prompt stands out)
 //   infoLines  -> details below the status bar (colours supplied by the caller)
 // A "(start-end/total)" range is appended to the heading when scrolling.
-function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg, footerLeft = false, footerRight = null }) {
+function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg, footerLeft = false, footerRight = null, footerBg = BAR_BG }) {
   const cols = colsArg || process.stdout.columns || 80;
   const termRows = rowsArg || process.stdout.rows || 24;
   const extras = (extraLines || []).filter((l) => l != null && l !== '');
@@ -529,7 +532,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
   } else {
     hint = padLeft(footer, cols);
   }
-  out += BAR_BG + hint + '\x1b[0m\n';
+  out += footerBg + hint + '\x1b[0m\n';
   for (const l of infos) out += l + '\n';
   return out.replace(/\n$/, '');
 }
@@ -684,7 +687,11 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       }
       // 'd'/n/r/R prompts take over the status bar (previously an easy-to-miss
       // line at the bottom of the list) with their essential keys on the right.
+      // A prompt also flips the bar to light yellow, matching the list pointer,
+      // so the change of state is obvious at a glance.
+      let questionBar = false;
       if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
+        questionBar = true;
         if (confirmAll) {
           const n = broadcastSel.size;
           footer = `Delete all ${n} selected session${n === 1 ? '' : 's'}?`;
@@ -694,6 +701,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         footerLeft = true;
         footerRight = 'y: delete · n/Esc: cancel';
       } else if (mode === 'input' && input) {
+        questionBar = true;
         footer = `${input.prompt} ${renderInputValue(input.value)}`;
         footerLeft = true;
         footerRight = input.hint;
@@ -720,6 +728,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         footer,
         footerLeft,
         footerRight,
+        footerBg: questionBar ? QUESTION_BG : BAR_BG,
         infoLines,
         extraLines: extras,
       }));
@@ -2179,4 +2188,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, askYesNo, newestSessionId, configuredProjects, refreshTui, cmdTui, cmdTuiList, cmdTuiStatus, cmdTuiDetach, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW };
+module.exports = { main, checkServer, askYesNo, newestSessionId, configuredProjects, refreshTui, cmdTui, cmdTuiList, cmdTuiStatus, cmdTuiDetach, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW, QUESTION_BG };

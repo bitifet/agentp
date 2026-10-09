@@ -209,6 +209,20 @@ describe('renderList', () => {
     assert.ok(!out.includes('\x1b[7m'));
   });
 
+  it('renders a question-bar footer on its own light-yellow background', () => {
+    const out = binOcmux.renderList({
+      title: 'T', items: ['a'], cursor: 0, row: (i, it) => it,
+      footer: 'Delete session "x"?', footerBg: binOcmux.QUESTION_BG,
+      cols: 40, rows: 8,
+    });
+    assert.ok(out.includes(binOcmux.BAR_BG), 'title bar keeps the default background');
+    const footerLine = out.split('\n').find((l) => l.startsWith(binOcmux.QUESTION_BG));
+    assert.ok(footerLine && footerLine.includes('Delete session "x"?'),
+      'footer bar uses the light-yellow question background');
+    assert.ok(!out.includes(binOcmux.BAR_BG + 'Delete session'),
+      'footer no longer uses the default background');
+  });
+
   it('supports reverse-video rows and extra lines', () => {
     const out = binOcmux.renderList({
       title: 'T', items: ['x'], cursor: 0,
@@ -1051,11 +1065,14 @@ describe('sessionMenu broadcast exit', () => {
     });
     const frame = output.find((o) => o.includes('Delete all 3 selected sessions?'));
     assert.ok(frame, 'expected a delete-all confirmation frame');
-    const bar = frame.split('\n').filter((l) => l.startsWith(binOcmux.BAR_BG)).pop() || '';
+    const isBar = (l) => l.startsWith(binOcmux.BAR_BG) || l.startsWith(binOcmux.QUESTION_BG);
+    const bar = frame.split('\n').filter(isBar).pop() || '';
     assert.ok(bar.includes('Delete all 3 selected sessions?'), 'prompt should be in the status bar');
     assert.ok(bar.includes('y: delete'), 'expected the confirm hint');
     assert.ok(bar.includes('n/Esc: cancel'), 'expected the cancel hint');
-    assert.ok(!frame.split('\n').some(l => l.includes('Delete all 3') && !l.startsWith(binOcmux.BAR_BG)),
+    assert.ok(bar.startsWith(binOcmux.QUESTION_BG),
+      'expected the question bar in light yellow (matching the list pointer)');
+    assert.ok(!frame.split('\n').some(l => l.includes('Delete all 3') && !isBar(l)),
       'prompt should not sit in the list area');
     // Cancelling must not delete anything.
     assert.ok(!calls.some((c) => c[0] === 'delete'), 'expected no deletes after cancelling');
@@ -1139,13 +1156,20 @@ describe('sessionMenu status-bar prompts', () => {
   ];
 
   // The status bar is the last bar-background line of a frame (the first such
-  // line is the title). d/n/r/R prompts must live there, not in the list area.
+  // line is the title). d/n/r/R prompts must live there, not in the list area,
+  // and the bar flips to light yellow (QUESTION_BG) while a prompt is active.
+  const isBar = (l) => l.startsWith(binOcmux.BAR_BG) || l.startsWith(binOcmux.QUESTION_BG);
   const statusBar = (frame) => {
-    const lines = frame.split('\n').filter((l) => l.startsWith(binOcmux.BAR_BG));
+    const lines = frame.split('\n').filter(isBar);
     return lines[lines.length - 1] || '';
   };
   const outsideBar = (frame, needle) =>
-    frame.split('\n').some((l) => l.includes(needle) && !l.startsWith(binOcmux.BAR_BG));
+    frame.split('\n').some((l) => l.includes(needle) && !isBar(l));
+  const assertQuestionBar = (bar) => {
+    assert.ok(bar.startsWith(binOcmux.QUESTION_BG),
+      'expected the question bar in light yellow (matching the list pointer)');
+    return bar;
+  };
 
   it('n asks for the new name in the status bar with keep/cancel hints', async () => {
     const { output } = await driveSessionMenu({
@@ -1154,7 +1178,7 @@ describe('sessionMenu status-bar prompts', () => {
     });
     const frame = output.find((o) => o.includes('New session name'));
     assert.ok(frame, 'expected a create-name prompt frame');
-    const bar = statusBar(frame);
+    const bar = assertQuestionBar(statusBar(frame));
     assert.ok(bar.includes('New session name'), 'prompt should be in the status bar');
     assert.ok(bar.includes('Enter: create'), 'expected the confirm hint');
     assert.ok(bar.includes('Esc: cancel'), 'expected the cancel hint');
@@ -1168,7 +1192,7 @@ describe('sessionMenu status-bar prompts', () => {
     });
     const frame = output.find((o) => o.includes('Rename to:'));
     assert.ok(frame, 'expected a rename prompt frame');
-    const bar = statusBar(frame);
+    const bar = assertQuestionBar(statusBar(frame));
     assert.ok(bar.includes('Rename to:'), 'prompt should be in the status bar');
     assert.ok(bar.includes('Enter: rename'));
     assert.ok(bar.includes('Esc: cancel'));
@@ -1182,7 +1206,7 @@ describe('sessionMenu status-bar prompts', () => {
     });
     const frame = output.find((o) => o.includes('Reminder (blank clears)'));
     assert.ok(frame, 'expected a reminder prompt frame');
-    const bar = statusBar(frame);
+    const bar = assertQuestionBar(statusBar(frame));
     assert.ok(bar.includes('Reminder (blank clears)'), 'prompt should be in the status bar');
     assert.ok(bar.includes('Enter: save'));
     assert.ok(bar.includes('Esc: cancel'));
@@ -1196,7 +1220,7 @@ describe('sessionMenu status-bar prompts', () => {
     });
     const frame = output.find((o) => o.includes('Delete session'));
     assert.ok(frame, 'expected a delete-confirmation frame');
-    const bar = statusBar(frame);
+    const bar = assertQuestionBar(statusBar(frame));
     assert.ok(bar.includes('Delete session "Alpha"?'), 'prompt should be in the status bar');
     assert.ok(bar.includes('y: delete'));
     assert.ok(bar.includes('n/Esc: cancel'));
