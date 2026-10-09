@@ -551,6 +551,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let cursor = 0;
     let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input'
     let confirmDel = null;
+    let confirmAll = false;     // 'D' deletes every broadcast-selected session
     let input = null;           // { label, value, kind, caret }
     let list = null;            // { title, items, format, onEnter }
     let listCursor = 0;
@@ -574,6 +575,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       'R (Shift+r)      set a REMINDER for the selected session (sent in front of',
       '                  every agentp prompt; blank clears)',
       'd                delete the selected session (then y/N to confirm)',
+      'D (Shift+d)      in BROADCAST: delete ALL selected sessions (then y/N)',
       'a                switch the AGENT of the selected session',
       'm                switch the MODEL of the selected session',
       'p                open the project switcher',
@@ -622,6 +624,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           out += '  Enter            keep the broadcast selection; switch TUI to cursor\n';
           out += '  m                switch the model for ALL selected sessions\n';
           out += '  d                delete the cursor session (with confirmation)\n';
+          out += '  D (Shift+d)      delete ALL selected sessions (with confirmation)\n';
           out += '  j / k, arrows    move the cursor (selecting shows it in the TUI)\n';
           out += '  /                search/filter the session list\n';
           out += '  ESC / q          cancel broadcast mode (back to the session list)\n';
@@ -674,7 +677,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       if (inBc) {
         const names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
         infoLines = [`Broadcast to sessions: ${names}`];
-        footer = 'Enter: switch · Space: toggle · d: delete · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
+        footer = 'Enter: switch · Space: toggle · d: delete · D: delete all · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
       } else {
         const selIsCurrent = !!(selected && String(selected.id) === String(current));
         infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
@@ -682,7 +685,12 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       // 'd'/n/r/R prompts take over the status bar (previously an easy-to-miss
       // line at the bottom of the list) with their essential keys on the right.
       if ((mode === 'confirm' || mode === 'broadcast-confirm') && confirmDel) {
-        footer = `Delete session "${confirmDel.title || confirmDel.id || ''}"?`;
+        if (confirmAll) {
+          const n = broadcastSel.size;
+          footer = `Delete all ${n} selected session${n === 1 ? '' : 's'}?`;
+        } else {
+          footer = `Delete session "${confirmDel.title || confirmDel.id || ''}"?`;
+        }
         footerLeft = true;
         footerRight = 'y: delete · n/Esc: cancel';
       } else if (mode === 'input' && input) {
@@ -761,10 +769,12 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         }
         inspected = false;
         confirmDel = null;
+        confirmAll = false;
         draw();
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
+        confirmAll = false;
         draw();
       });
     };
@@ -773,11 +783,31 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       const s = confirmDel;
       if (!s || !onDelete) return;
       const wasBroadcast = mode === 'broadcast-confirm';
-      Promise.resolve(onDelete(s)).then(() => {
-        rows = rows.filter(r => r.id !== s.id);
+      const deletingAll = confirmAll;
+      // 'D' removes every session in the broadcast selection; 'd' removes just
+      // the cursor row.
+      const targets = deletingAll
+        ? rows.filter(r => broadcastSel.has(String(r.id)))
+        : [s];
+      confirmDel = null;
+      confirmAll = false;
+      Promise.resolve(Promise.all(targets.map(t => onDelete(t)))).then(() => {
+        const removed = new Set(targets.map(t => String(t.id)));
+        rows = rows.filter(r => !removed.has(String(r.id)));
         applySearch();
         if (cursor >= view.length && cursor > 0) cursor = view.length - 1;
-        confirmDel = null;
+        if (deletingAll) {
+          // Deleting the whole broadcast selection ends broadcast mode; adopt
+          // the row now under the cursor as the new current (state + TUI +
+          // highlight) so the list and the TUI agree on the new selection.
+          persistBroadcast([]);
+          broadcastSel = new Set();
+          mode = 'normal';
+          const next = view[cursor];
+          if (next) applyPick(next);
+          else { current = null; draw(); }
+          return;
+        }
         if (wasBroadcast) {
           broadcastSel.delete(String(s.id));
           if (broadcastSel.size < 2) {
@@ -818,6 +848,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       }).catch((err) => {
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
+        confirmAll = false;
         mode = wasBroadcast ? 'broadcast' : 'normal';
         draw();
       });
@@ -925,6 +956,7 @@ const toggleBroadcast = (idx) => {
         if (key.name === 'y') return applyDelete();
         if (key.name === 'n' || key.name === 'escape' || key.name === 'q' || key.name === 'return') {
           confirmDel = null;
+          confirmAll = false;
           mode = mode === 'broadcast-confirm' ? 'broadcast' : 'normal';
           draw();
         }
@@ -1029,6 +1061,15 @@ const toggleBroadcast = (idx) => {
           draw();
         } else if (key.name === 'space') {
           if (cursor < view.length) toggleBroadcast(cursor);
+        } else if (str === 'D') {
+          // Shift+d: delete ALL broadcast-selected sessions at once (with
+          // confirmation), handy to drop a whole selection you no longer want.
+          if (broadcastSel.size > 0) {
+            confirmAll = true;
+            confirmDel = { all: true };
+            mode = 'broadcast-confirm';
+            draw();
+          }
         } else if (key.name === 'd') {
           if (cursor < view.length) {
             confirmDel = view[cursor];
@@ -1869,6 +1910,7 @@ function printHelp() {
   console.error('sessions are listed. In the picker:');
   console.error('  Enter switch · n new · r rename · R remind · d delete · a agents · m model');
   console.error('  p projects · h help · q quit');
+  console.error('  In BROADCAST: Space toggles a session · d deletes cursor · D deletes all');
   console.error('Selecting updates .ocmux.json and refreshes a dedicated TUI, falling');
   console.error('back to the shared TUI. Opening the picker also routes that project\'s');
   console.error('TUI to its stored session. Silent on success. (p opens projects; by');

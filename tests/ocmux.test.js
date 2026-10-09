@@ -1029,6 +1029,107 @@ describe('sessionMenu broadcast exit', () => {
     assert.ok(output.some(o => /Beta\s+\*/.test(o)),
       'expected Beta to stay the highlighted current session');
   });
+
+  it('D asks to delete ALL selected sessions in the status bar', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onDelete: async (row) => { calls.push(['delete', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'],   // broadcast with Beta
+        ['', 'down'], [' ', 'space'],   // add Gamma
+        ['D', 'd'],                     // Shift+d → delete all
+        ['', 'escape'],                 // cancel (back to broadcast)
+        ['q', 'q'],                     // cancel broadcast
+        ['', 'escape'],                 // ignore stray escape
+        ['q', 'q'],                     // quit
+      ],
+    });
+    const frame = output.find((o) => o.includes('Delete all 3 selected sessions?'));
+    assert.ok(frame, 'expected a delete-all confirmation frame');
+    const bar = frame.split('\n').filter((l) => l.startsWith(binOcmux.BAR_BG)).pop() || '';
+    assert.ok(bar.includes('Delete all 3 selected sessions?'), 'prompt should be in the status bar');
+    assert.ok(bar.includes('y: delete'), 'expected the confirm hint');
+    assert.ok(bar.includes('n/Esc: cancel'), 'expected the cancel hint');
+    assert.ok(!frame.split('\n').some(l => l.includes('Delete all 3') && !l.startsWith(binOcmux.BAR_BG)),
+      'prompt should not sit in the list area');
+    // Cancelling must not delete anything.
+    assert.ok(!calls.some((c) => c[0] === 'delete'), 'expected no deletes after cancelling');
+  });
+
+  it('D + y deletes every broadcast-selected session and adopts the cursor row', async () => {
+    const calls = [];
+    const four = [
+      { id: 'sA', title: 'Alpha' },
+      { id: 'sB', title: 'Beta' },
+      { id: 'sC', title: 'Gamma' },
+      { id: 'sD', title: 'Delta' },
+    ];
+    const { output } = await driveSessionMenu({
+      sessions: four, current: 'sA',
+      opts: {
+        onDelete: async (row) => { calls.push(['delete', row.id]); },
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'],   // broadcast with Beta
+        ['', 'down'], [' ', 'space'],   // add Gamma (Delta stays unselected)
+        ['D', 'd'],                     // Shift+d → delete all
+        ['y', 'y'],                     // confirm
+        ['q', 'q'],                     // quit
+      ],
+    });
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['inspect', 'sC'],
+      ['bc', ['sA', 'sB', 'sC']],
+      ['delete', 'sA'],
+      ['delete', 'sB'],
+      ['delete', 'sC'],
+      ['bc', []],
+      ['pick', 'sD'],
+    ]);
+    // The surviving Delta becomes the new current (highlighted), matching the
+    // single-delete behavior.
+    assert.ok(output.some(o => /Delta\s+\*/.test(o)),
+      'expected the surviving session to carry the current marker');
+  });
+
+  it('D + n cancels and keeps the broadcast selection intact', async () => {
+    const calls = [];
+    const { result } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onDelete: async (row) => { calls.push(['delete', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'],   // broadcast with Beta
+        ['', 'down'], [' ', 'space'],   // add Gamma
+        ['D', 'd'],                     // Shift+d → delete all
+        ['n', 'n'],                     // decline
+        ['q', 'q'],                     // cancel broadcast
+        ['q', 'q'],                     // quit
+      ],
+    });
+    assert.strictEqual(result, null);
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['inspect', 'sC'],
+      ['bc', ['sA', 'sB', 'sC']],
+      ['bc', []],
+      ['inspect', 'sA'],
+    ]);
+  });
 });
 
 describe('sessionMenu status-bar prompts', () => {

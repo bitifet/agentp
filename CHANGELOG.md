@@ -25,6 +25,11 @@ All notable changes to this project will be documented in this file.
 - **Server fallback prompt.** When `.ocmux.json` points at an unreachable
   server but the default server answers, `ocmux` offers (on a TTY) to repoint
   the project to the default; confirming rewrites `server` in `.ocmux.json`.
+- **`D` deletes the whole broadcast selection.** In broadcast mode,
+  `D` (Shift+d) asks to delete every selected session at once — handy to drop
+  a selection you no longer want to prompt — instead of removing only the
+  cursor session with `d`. Confirming ends broadcast mode and adopts the row
+  under the cursor as the new current; cancelling keeps the selection intact.
 
 ### Changed
 

@@ -352,8 +352,9 @@ the project found upward from `<directory>` (default: `$PWD`):
   and switches normally; `ESC`/`q` cancels back to the session list and returns
   the TUI to the stored session; deselecting down to a single session selects
   that remaining session. New selections open in the TUI for inspection.
-  Broadcast mode also has `h` help, `d` delete, and `m` to change the model for
-  every selected session.
+  Broadcast mode also has `h` help, `d` delete, `D` (Shift+d) to delete every
+  selected session at once (confirmation in the status bar), and `m` to change
+  the model for every selected session.
 - `n` create (name input) · `r` rename (edit in place) · `R` set a reminder ·
   `d` delete (confirm) · `a` switch agent · `m` switch model · `p` project
   switcher (inspect-only by default) · `h` help · `q` quit. The `n`/`r`/`R`
