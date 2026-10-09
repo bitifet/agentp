@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-10-09
+
+The **broadcast UX polish** release. Broadcast mode gained `D` (Shift+d) to
+delete the whole selection in one confirmation, and every picker prompt
+(create/rename/reminder/delete/delete-all) now lives on the status bar, which
+flips to **light yellow** while a question is active. The `Broadcast to
+sessions:` info line caps at 480 characters (or the terminal width) with a
+leading `...` instead of wrapping. Outside the picker, `ocmux tui --shared`
+now works without a `.ocmux.json`, an unreachable recorded server falls back
+to a live default after a confirmation prompt, and opening the picker routes
+the TUI to the project's stored session.
+
 ### Fixed
 
 - **`ocmux tui --shared` required a project.** The cross-project fallback now
@@ -43,9 +55,10 @@ All notable changes to this project will be documented in this file.
   same light yellow as the session-list pointer (`\x1b[30;103m`), so the change
   of state is obvious at a glance; the normal bars keep the brown background.
 - **Broadcast list caps itself at one line.** The `Broadcast to sessions: …`
-  info line truncates from the beginning (leading `...`) once the joined names
-  would exceed a readable budget or the terminal width, so a long selection
-  never wraps the footer and the most visible sessions stay readable.
+  info line holds up to 480 characters of names (or the terminal width,
+  whichever is smaller) and truncates from the beginning (leading `...`) past
+  that, so a long selection never wraps the footer and the tail stays
+  readable.
 
 ## [2.1.0] - 2026-10-09
 

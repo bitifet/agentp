@@ -684,7 +684,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         // viewed part of the selection.
         let names = rows.filter(r => broadcastSel.has(String(r.id))).map(r => r.title || r.id).join(', ');
         const bcHead = 'Broadcast to sessions: ';
-        const budget = Math.max(8, Math.min(48, cols - bcHead.length));
+        const budget = Math.max(8, Math.min(480, cols - bcHead.length));
         if (names.length > budget) {
           let keep = names.slice(-(budget - 4)); // 3 for '...', 1 for the space
           const at = keep.indexOf(', ');

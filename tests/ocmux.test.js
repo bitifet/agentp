@@ -1192,6 +1192,50 @@ describe('sessionMenu broadcast exit', () => {
       else process.stdout.columns = savedCols;
     }
   });
+
+  it('shows the whole broadcast list on wide terminals (480-char budget)', async () => {
+    const many = [
+      { id: 'sA', title: 'Alpha' },
+      { id: 'sB', title: 'Beta' },
+      { id: 'sC', title: 'Gamma' },
+      { id: 'sD', title: 'Delta' },
+      { id: 'sE', title: 'Epsilon' },
+      { id: 'sF', title: 'Zeta' },
+      { id: 'sG', title: 'Eta' },
+      { id: 'sH', title: 'Theta' },
+    ];
+    const savedCols = process.stdout.columns;
+    process.stdout.columns = 300;
+    try {
+      const { output } = await driveSessionMenu({
+        sessions: many, current: 'sA',
+        opts: { onInspectSession: () => {}, onBroadcastChange: () => {} },
+        keys: [
+          ['', 'down'], [' ', 'space'], // sB
+          ['', 'down'], [' ', 'space'], // sC
+          ['', 'down'], [' ', 'space'], // sD
+          ['', 'down'], [' ', 'space'], // sE
+          ['', 'down'], [' ', 'space'], // sF
+          ['', 'down'], [' ', 'space'], // sG
+          ['', 'down'], [' ', 'space'], // sH
+          ['q', 'q'],                   // cancel broadcast
+          ['q', 'q'],                   // quit
+        ],
+      });
+      const frames = output.filter((o) => o.includes('Broadcast to sessions:'));
+      const frame = frames[frames.length - 1];
+      const line = frame.split('\n').find((l) => l.startsWith('Broadcast to sessions:'));
+      assert.ok(line, 'expected the broadcast info line');
+      assert.ok(!line.includes('...'),
+        'eight names fit the 480-char budget on a 300-column terminal');
+      for (const name of ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta']) {
+        assert.ok(line.includes(name), `expected '${name}' to stay visible`);
+      }
+    } finally {
+      if (savedCols === undefined) delete process.stdout.columns;
+      else process.stdout.columns = savedCols;
+    }
+  });
 });
 
 describe('sessionMenu status-bar prompts', () => {
