@@ -255,6 +255,24 @@ describe('listSessions', { concurrency: false }, () => {
   });
 });
 
+describe('listProjects', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('lists projects known to the OpenCode data store', async () => {
+    ctrl.reset({ body: JSON.stringify([{ id: 'p1', canonical: '/home/proj' }]) });
+    const result = await opencode.listProjects('http://localhost:4096');
+    assert.strictEqual(result[0].canonical, '/home/proj');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/project');
+  });
+
+  it('throws on non-200', async () => {
+    ctrl.reset({ status: 500 });
+    await assert.rejects(() => opencode.listProjects('http://localhost:4096'), /Failed to list projects/);
+  });
+});
+
 describe('createSession (v2)', { concurrency: false }, () => {
   let ctrl;
   before(() => { ctrl = setupMock({}); });

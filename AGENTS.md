@@ -4,11 +4,12 @@
 
 ```
 bin/agentp          — stdin → opencode session (~1100 lines)
-bin/ocmux           — tmux project/TUI window manager + interactive pickers (~1380 lines)
+bin/ocmux           — project/session router + registered TUI pickers (~2000 lines)
 bin/tgagentp        — Telegram bot ↔ opencode TUI (~3050 lines)
 lib/opencode.js     — OpenCode v2 HTTP/SSE API client (shared by agentp + ocmux + tgagentp)
-lib/ocmux.js        — tmux management helpers (shared by ocmux + tgagentp)
+lib/ocmux.js        — registered-TUI routing helpers
 lib/project-state.js— `.ocmux.json` v2 schema (directory/session/server/annotations)
+lib/tui-registry.js — ephemeral dedicated/shared tmux-pane TUI registrations
 lib/tui-cmd.js      — tmux send-keys for TUI command passthrough (used by tgagentp)
 lib/file-share.js   — telegram-shared directory + file upload/download helpers
 lib/telegram-*.js   — Telegram API/format helpers (used by tgagentp)
@@ -29,7 +30,7 @@ tests/              — node:test, all external calls mocked, safe to run live
 ## Testing
 
 ```bash
-npm test              # node --test tests/*.test.js — 307 tests (68 + 8 + 105 + 62 + 13 + 12 + 22 + 17)
+npm test              # node --test tests/*.test.js — 295 tests
 node --test tests/opencode.test.js    # mock http.request
 node --test tests/ocmux.test.js       # mock child_process + fs.*
 node --test tests/file-share.test.js  # mock fs for telegram-shared dir ops
@@ -48,7 +49,7 @@ All tests run fully in-process. Mock boundaries are in `before()`/`after()` (ope
 ## Architecture quirks
 
 - `lib/opencode.js` wraps `http.request` — all OpenCode API functions go through `makeRequest()` (handles 401, optional timeout, optional `cancelRef` for req.destroy).
-- `lib/ocmux.js` wraps `child_process.spawnSync` via `_tmux()` helper — all tmux interactions must go through this, never raw spawn.
+- `lib/tui-registry.js` owns tmux pane operations and the private runtime registry; project state must never contain pane/socket/PID data.
 - tgagentp is monolithic (~3050 lines). New features: extract into `lib/` when possible.
 - Shared state lives in module-level variables (`chatStates`, `serverOwners`, `agentpQueues`).
 - Server is **user-managed** (`opencode serve`); `ocmux`/`agentp` only health-check it (`checkServer`/connection errors). No per-project servers.
@@ -80,4 +81,4 @@ tgagentp detects `[Telegram]{...}` structured messages on their own line in agen
 
 - Agentp gateway: tgagentp starts `POST /send` server on `127.0.0.1` (random port, written to `/tmp/tgagentp-port`). `agentp --tg` POSTs answers there for forwarding to Telegram.
 - `/record` ring buffer (100 msgs / 100KB) — recorded context prepended by `agentp --qa`.
-- Tmux session name: `"Opencode"`. Windows named by full project directory path; each window is **TUI-only (pane 0)** — there is no server pane (the server is user-managed).
+- TUIs are optional and user-placed. `ocmux tui` registers a project-dedicated tmux pane; `ocmux tui --shared` registers the single cross-project fallback. Routing is dedicated → shared → headless. There is no managed tmux session or per-project window.

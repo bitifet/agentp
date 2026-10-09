@@ -6,7 +6,8 @@ agentp is a collection of three **zero-dependency** Node.js CLI tools that
 extend [OpenCode](https://opencode.ai) v2:
 
 - **`agentp`** — pipes prompt text into a running OpenCode session and streams the answer back to stdout.
-- **`ocmux`** — manages per-project TUI windows in tmux (session picker, project switcher, create/rename/delete/annotate sessions) on top of a single **user-managed** OpenCode server.
+- **`ocmux`** — routes project sessions and optional user-placed dedicated/shared
+  TUI panes in tmux on top of user-managed OpenCode servers.
 - **`tgagentp`** — bridges a Telegram bot chat with OpenCode (multi-chat, multi-server, file sharing). *Experimental.*
 
 The project aims to stay **zero npm dependencies** — everything uses only the
@@ -42,12 +43,13 @@ npm install -g .
 agentp/
 ├── bin/
 │   ├── agentp            — stdin-to-session pipe
-│   ├── ocmux             — project/TUI window manager + interactive pickers
+│   ├── ocmux             — project/session router + interactive pickers
 │   └── tgagentp          — Telegram bot bridge
 ├── lib/
 │   ├── opencode.js       — OpenCode v2 HTTP/SSE client (shared by all three)
-│   ├── ocmux.js          — tmux helpers (shared by ocmux + tgagentp)
+│   ├── ocmux.js          — registered-TUI routing helpers
 │   ├── project-state.js  — `.ocmux.json` v2 schema + per-session reminders
+│   ├── tui-registry.js   — private runtime registry + tmux pane operations
 │   ├── tui-cmd.js        — tmux send-keys passthrough (tgagentp)
 │   ├── file-share.js     — telegram-shared directory + upload/download
 │   └── telegram-*.js     — Telegram API + formatting helpers
@@ -72,8 +74,8 @@ agentp/
 ### Conventions
 
 - **HTTP:** use `lib/opencode.js` helpers — never raw `http.request`.
-- **tmux:** use `lib/ocmux.js` helpers (`_tmux` / exported wrappers) — never raw
-  `spawnSync`.
+- **tmux TUI registrations:** use `lib/tui-registry.js`; keep socket, pane,
+  token, and PID data out of `.ocmux.json`.
 - **State:** `.ocmux.json` I/O goes through `lib/project-state.js`
   (`readProjectState`, `writeProjectState`, `readAnnotations`, `writeAnnotation`,
   atomic writes). Never hand-roll reads/writes.

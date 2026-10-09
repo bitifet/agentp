@@ -7,10 +7,12 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { EventEmitter } = require('events');
 
 const ocmux = require('../lib/ocmux');
 const binOcmux = require('../bin/ocmux');
 const opencode = require('../lib/opencode');
+const tuiRegistry = require('../lib/tui-registry');
 
 // ── Mock infrastructure for spawnSync (tmux) ───────────────────────
 let tmuxHandler = null;       // (args, opts) => { status, stdout, stderr }
@@ -148,52 +150,6 @@ afterEach(() => { tearDownMocks(); });
 // ───────────────────────────────────────────────────────────────────
 // Pure functions
 // ───────────────────────────────────────────────────────────────────
-describe('hashDir', () => {
-  it('returns first 12 hex chars of MD5', () => {
-    const h = ocmux.hashDir('/home/proj');
-    assert.strictEqual(h.length, 12);
-    assert.match(h, /^[0-9a-f]{12}$/);
-  });
-
-  it('is deterministic for same input', () => {
-    assert.strictEqual(ocmux.hashDir('/home/proj'), ocmux.hashDir('/home/proj'));
-  });
-
-  it('differs for different inputs', () => {
-    assert.notStrictEqual(ocmux.hashDir('/a'), ocmux.hashDir('/b'));
-  });
-});
-
-describe('logfileFor', () => {
-  it('builds path with hash', () => {
-    const p = ocmux.logfileFor('/my/proj');
-    assert.strictEqual(p, `/tmp/opencode-serve-${ocmux.hashDir('/my/proj')}.log`);
-  });
-});
-
-describe('statefileFor', () => {
-  it('joins dir with .ocmux.json', () => {
-    assert.strictEqual(ocmux.statefileFor('/dir'), path.join('/dir', '.ocmux.json'));
-  });
-});
-
-describe('readState', () => {
-  it('parses a valid state file', () => {
-    mockFiles['/tmp/state.json'] = JSON.stringify({ version: 2, directory: '/p', session: 's1' });
-    const s = ocmux.readState('/tmp/state.json');
-    assert.strictEqual(s.session, 's1');
-  });
-
-  it('returns null when file is missing', () => {
-    assert.strictEqual(ocmux.readState('/tmp/nope.json'), null);
-  });
-
-  it('returns null on malformed JSON', () => {
-    mockFiles['/tmp/bad.json'] = '{nope';
-    assert.strictEqual(ocmux.readState('/tmp/bad.json'), null);
-  });
-});
-
 // ───────────────────────────────────────────────────────────────────
 // windowFor / renderList (scrollable, resize-aware lists)
 // ───────────────────────────────────────────────────────────────────
@@ -333,17 +289,17 @@ describe('sessionInfoLines', () => {
 });
 
 // ───────────────────────────────────────────────────────────────────
-// tuiAttachCommand (v2-only)
+// TUI launch arguments (v2-only)
 // ───────────────────────────────────────────────────────────────────
-describe('tuiAttachCommand', () => {
+describe('tuiArgs', () => {
   it('uses --session when a session is given', () => {
-    const c = ocmux.tuiAttachCommand('http://127.0.0.1:4096', 'ses_1');
-    assert.strictEqual(c, "opencode --server 'http://127.0.0.1:4096' --session 'ses_1'");
+    const args = ocmux.tuiArgs('http://127.0.0.1:4096', 'ses_1', '/proj');
+    assert.deepStrictEqual(args, ['--server', 'http://127.0.0.1:4096', '--session', 'ses_1', '/proj']);
   });
 
   it('uses --continue when no session is given', () => {
-    const c = ocmux.tuiAttachCommand('http://127.0.0.1:4096', null);
-    assert.strictEqual(c, "opencode --server 'http://127.0.0.1:4096' --continue");
+    const args = ocmux.tuiArgs('http://127.0.0.1:4096', null, '/proj');
+    assert.deepStrictEqual(args, ['--server', 'http://127.0.0.1:4096', '--continue', '/proj']);
   });
 });
 
@@ -366,215 +322,6 @@ describe('newestSessionId', () => {
   it('returns null for empty input', () => {
     assert.strictEqual(binOcmux.newestSessionId([]), null);
     assert.strictEqual(binOcmux.newestSessionId(null), null);
-  });
-});
-
-// ───────────────────────────────────────────────────────────────────
-// tmux window helpers
-// ───────────────────────────────────────────────────────────────────
-describe('tuiPaneId', () => {
-  it('returns the single pane (v2 layout: TUI is pane 0)', () => {
-    tmuxHandler = () => tmuxOk('%0\t0\n');
-    assert.strictEqual(ocmux.tuiPaneId(1), '%0');
-  });
-
-  it('falls back to the last pane for legacy server layouts', () => {
-    tmuxHandler = () => tmuxOk('%0\t0\n%1\t1\n');
-    assert.strictEqual(ocmux.tuiPaneId(1), '%1');
-  });
-
-  it('returns null when tmux fails', () => {
-    tmuxHandler = () => tmuxFail(1);
-    assert.strictEqual(ocmux.tuiPaneId(1), null);
-  });
-
-  it('returns null when the window has no panes', () => {
-    tmuxHandler = () => tmuxOk('');
-    assert.strictEqual(ocmux.tuiPaneId(1), null);
-  });
-});
-
-describe('windowByDir', () => {
-  it('matches by exact window name', () => {
-    tmuxHandler = () => tmuxOk('1\t/proj\n');
-    assert.strictEqual(ocmux.windowByDir('/proj'), 1);
-  });
-
-  it('returns null when missing', () => {
-    tmuxHandler = () => tmuxOk('1\t/other\n');
-    assert.strictEqual(ocmux.windowByDir('/proj'), null);
-  });
-});
-
-describe('windowNameByIndex', () => {
-  it('returns the name for an index', () => {
-    tmuxHandler = () => tmuxOk('2\t/bar\n');
-    assert.strictEqual(ocmux.windowNameByIndex(2), '/bar');
-  });
-
-  it('returns null for an unknown index', () => {
-    tmuxHandler = () => tmuxOk('2\t/bar\n');
-    assert.strictEqual(ocmux.windowNameByIndex(9), null);
-  });
-});
-
-describe('activeWindowIndex', () => {
-  it('returns the active window index', () => {
-    tmuxHandler = () => tmuxOk('1 0\n2 1\n');
-    assert.strictEqual(ocmux.activeWindowIndex(), 2);
-  });
-
-  it('returns null when tmux fails', () => {
-    tmuxHandler = () => tmuxFail(1);
-    assert.strictEqual(ocmux.activeWindowIndex(), null);
-  });
-});
-
-describe('paneCount', () => {
-  it('counts panes', () => {
-    tmuxHandler = () => tmuxOk('%0\n%1\n');
-    assert.strictEqual(ocmux.paneCount(1), 2);
-  });
-});
-
-describe('ensureSession', () => {
-  it('creates the session when missing', () => {
-    tmuxHandler = (args) => (args[0] === 'has-session' ? tmuxFail(1) : tmuxOk(''));
-    ocmux.ensureSession();
-    const newCall = spawnSyncCalls.find(c => c.args[0] === 'new-session');
-    assert.ok(newCall);
-  });
-
-  it('is a no-op when the session exists', () => {
-    tmuxHandler = (args) => (args[0] === 'has-session' ? tmuxOk('') : tmuxOk(''));
-    ocmux.ensureSession();
-    assert.ok(!spawnSyncCalls.some(c => c.args[0] === 'new-session'));
-  });
-});
-
-describe('pinWindowName', () => {
-  it('sends set-window-option automatic-rename off', () => {
-    ocmux.pinWindowName(2);
-    const call = spawnSyncCalls.find(c => c.args[0] === 'set-window-option');
-    assert.ok(call);
-    assert.deepStrictEqual(call.args, ['set-window-option', '-t', 'Opencode:2', 'automatic-rename', 'off']);
-  });
-});
-
-describe('isWindowZoomed', () => {
-  it('detects a zoomed window', () => {
-    tmuxHandler = () => tmuxOk('1|0\n2|1\n');
-    assert.strictEqual(ocmux.isWindowZoomed(2), true);
-    assert.strictEqual(ocmux.isWindowZoomed(1), false);
-  });
-});
-
-// ───────────────────────────────────────────────────────────────────
-// listProjects
-// ───────────────────────────────────────────────────────────────────
-describe('listProjects', () => {
-  it('lists windows that hold a .ocmux.json with session/server/status', () => {
-    const s1 = JSON.stringify({ version: 2, directory: '/proj1', session: 's1', server: 'http://x:4096' });
-    mockFiles[path.join('/proj1', '.ocmux.json')] = s1;
-    const s2 = JSON.stringify({ version: 2, directory: '/proj2', session: null, server: 'http://x:4097' });
-    mockFiles[path.join('/proj2', '.ocmux.json')] = s2;
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxOk('');
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj1\n2\t/proj2\n3\t/bash\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n%1\t1\n');
-      return tmuxOk('');
-    };
-    const rows = ocmux.listProjects();
-    assert.strictEqual(rows.length, 2);
-    assert.strictEqual(rows[0].dir, '/proj1');
-    assert.strictEqual(rows[0].session, 's1');
-    assert.strictEqual(rows[0].server, 'http://x:4096');
-    assert.strictEqual(rows[0].status, 'alive');
-    assert.strictEqual(rows[1].status, 'alive');
-  });
-
-  it('returns [] when the tmux session does not exist', () => {
-    tmuxHandler = (args) => (args[0] === 'has-session' ? tmuxFail(1) : tmuxOk(''));
-    assert.deepStrictEqual(ocmux.listProjects(), []);
-  });
-});
-
-// ───────────────────────────────────────────────────────────────────
-// activateProject / relaunchTui / closeProjectWindow / createProjectWindow
-// ───────────────────────────────────────────────────────────────────
-describe('activateProject', () => {
-  it('opens a TUI when the window has none', () => {
-    // No panes at all → tuiPaneId null → send the TUI command to pane .0
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-panes') return tmuxOk('');
-      if (args[0] === 'list-windows') return tmuxOk('1|0\n2|0\n');
-      return tmuxOk('');
-    };
-    const ok = ocmux.activateProject('/proj', 1, 'http://x:4096', 's1');
-    assert.strictEqual(ok, true);
-    const keys = spawnSyncCalls.find(c => c.args[0] === 'send-keys' && c.args.join(' ').includes('Opencode:1.0'));
-    assert.ok(keys);
-    assert.ok(keys.args.join(' ').includes('--session \'s1\''));
-  });
-
-  it('does not respawn when the TUI is alive', () => {
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-panes') return tmuxOk('%1\t1\n');
-      if (args[0] === 'list-windows') return tmuxOk('1|1\n');
-      return tmuxOk('');
-    };
-    ocmux.activateProject('/proj', 1, 'http://x:4096', 's1');
-    assert.ok(!spawnSyncCalls.some(c => c.args[0] === 'respawn-pane'));
-  });
-});
-
-describe('relaunchTui', () => {
-  it('respaws the TUI pane onto the given session', () => {
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-panes') return tmuxOk('%1\t1\n');
-      if (args[0] === 'list-windows') return tmuxOk('1|0\n');
-      return tmuxOk('');
-    };
-    ocmux.relaunchTui(1, '/proj', 'http://x:4096', 'ses_9');
-    const respawn = spawnSyncCalls.find(c => c.args[0] === 'respawn-pane');
-    assert.ok(respawn);
-    assert.ok(respawn.args.join(' ').includes('--session \'ses_9\''));
-  });
-});
-
-describe('closeProjectWindow', () => {
-  it('kills the tmux window', () => {
-    ocmux.closeProjectWindow(3);
-    assert.ok(spawnSyncCalls.some(c => c.args[0] === 'kill-window' && c.args[2] === 'Opencode:3'));
-  });
-
-  it('throws when kill fails', () => {
-    tmuxHandler = () => tmuxFail(1);
-    assert.throws(() => ocmux.closeProjectWindow(3), /failed to kill window/);
-  });
-});
-
-describe('createProjectWindow', () => {
-  it('creates a window, opens the TUI and writes a v2 state file', () => {
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxFail(1);
-      if (args[0] === 'new-window') return tmuxOk('2\n');
-      if (args[0] === 'list-windows') return tmuxOk('2|0\n');
-      if (args[0] === 'list-panes') return tmuxOk('%5\t0\n');
-      return tmuxOk('');
-    };
-    const r = ocmux.createProjectWindow('/proj', 'http://x:4096', 'ses_1');
-    assert.strictEqual(r.index, 2);
-    const stateWrite = fsWrites.find(w => w.path === path.join('/proj', '.ocmux.json'));
-    assert.ok(stateWrite);
-    const state = JSON.parse(stateWrite.data);
-    assert.strictEqual(state.version, 2);
-    assert.strictEqual(state.directory, '/proj');
-    assert.strictEqual(state.session, 'ses_1');
-    assert.strictEqual(state.server, 'http://x:4096');
-    const keys = spawnSyncCalls.find(c => c.args[0] === 'send-keys');
-    assert.ok(keys);
-    assert.ok(keys.args.join(' ').includes("opencode --server 'http://x:4096' --session 'ses_1'"));
   });
 });
 
@@ -673,14 +420,7 @@ describe('ocmux CLI', () => {
     assert.ok(stderrOutput.some(s => s.includes('not reachable')));
   });
 
-  it('serve creates a project window and records the session', async () => {
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxFail(1);
-      if (args[0] === 'new-window') return tmuxOk('4\n');
-      if (args[0] === 'list-windows') return tmuxOk('4|0\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
+  it('serve initializes project state and records the session', async () => {
     nodeMock.method(opencode, 'listSessions', async (server, dir) => []);
     nodeMock.method(opencode, 'createSession', async (server, title, loc) => ({ id: 'new_ses' }));
     nodeMock.method(opencode, 'createSessionWithModel', async (server, title, loc) => ({ id: 'new_ses' }));
@@ -696,13 +436,6 @@ describe('ocmux CLI', () => {
 
   it('serve scopes session listing by the project directory', async () => {
     let listedDir = null;
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxFail(1);
-      if (args[0] === 'new-window') return tmuxOk('4\n');
-      if (args[0] === 'list-windows') return tmuxOk('4|0\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
     nodeMock.method(opencode, 'listSessions', async (server, dir) => { listedDir = dir; return [{ id: 'existing' }]; });
     await runMain(['serve', '/proj', '--server', 'http://x:4096']);
     assert.strictEqual(listedDir, '/proj');
@@ -718,31 +451,21 @@ describe('ocmux CLI', () => {
   it('list prints headers and project rows', async () => {
     const s1 = JSON.stringify({ version: 2, directory: '/proj1', session: 'ses_1', server: 'http://x:4096' });
     mockFiles[path.join('/proj1', '.ocmux.json')] = s1;
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxOk('');
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj1\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
+    nodeMock.method(opencode, 'listProjects', async () => [{ canonical: '/proj1' }]);
     await runMain(['list']);
     assert.ok(stdoutOutput.join('').includes('/proj1'));
     assert.ok(stdoutOutput.join('').includes('ses_1'));
   });
 
-  it('list reports no projects when the tmux session is empty', async () => {
-    tmuxHandler = (args) => (args[0] === 'has-session' ? tmuxFail(1) : tmuxOk(''));
+  it('list reports no configured projects when OpenCode knows none', async () => {
+    nodeMock.method(opencode, 'listProjects', async () => []);
     await runMain(['list']);
-    assert.ok(stdoutOutput.join('').includes('No opencode projects running.'));
+    assert.ok(stdoutOutput.join('').includes('No configured ocmux projects found.'));
   });
 
-  it('session <ref> updates the state file and relaunches the TUI', async () => {
+  it('session <ref> updates state even when no TUI is registered', async () => {
     mockFiles[path.join('/proj', '.ocmux.json')] =
       JSON.stringify({ version: 2, directory: '/proj', session: 'old', server: 'http://x:4096' });
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
     nodeMock.method(opencode, 'listSessions', async (server, dir) => [
       { id: 'ses_target', title: 'Target' },
     ]);
@@ -751,17 +474,12 @@ describe('ocmux CLI', () => {
     const stateWrite = lastStateWrite('/proj');
     assert.ok(stateWrite);
     assert.strictEqual(JSON.parse(stateWrite.data).session, 'ses_target');
-    const respawn = spawnSyncCalls.find(c => c.args[0] === 'respawn-pane');
-    assert.ok(respawn && respawn.args.join(' ').includes('ses_target'));
+    assert.ok(!spawnSyncCalls.some(c => c.args[0] === 'respawn-pane'));
   });
 
   it('default interactive command errors when the server is down', async () => {
     mockFiles[path.join('/proj', '.ocmux.json')] =
       JSON.stringify({ version: 2, directory: '/proj', session: 's1', server: 'http://x:4096' });
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
-      return tmuxOk('');
-    };
     httpMode = 'down';
     await runMain(['/proj']);
     assert.strictEqual(exitThrown, 1);
@@ -780,42 +498,72 @@ describe('ocmux CLI', () => {
     assert.ok(stderrOutput.join('').includes("'switch' subcommand was removed"));
   });
 
-  it('kill closes the window but keeps the state file (status: stopped)', async () => {
-    mockFiles[path.join('/proj', '.ocmux.json')] =
-      JSON.stringify({ version: 2, directory: '/proj', session: 's1', server: 'http://x:4096' });
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
-      return tmuxOk('');
-    };
-    await runMain(['kill', '/proj']);
-    assert.strictEqual(exitThrown, null);
-    assert.ok(spawnSyncCalls.some(c => c.args[0] === 'kill-window'));
-    assert.ok(!fsUnlinks.includes(path.join('/proj', '.ocmux.json')));
-    const write = lastStateWrite('/proj');
-    assert.ok(write && JSON.parse(write.data).status === 'stopped');
-  });
-
-  it('kill errors without a state file', async () => {
-    await runMain(['kill', '/nope']);
+  it('does not retain --global as a TUI option', async () => {
+    await runMain(['tui', '--global']);
     assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.join('').includes("unknown option '--global'"));
   });
 
-  it('resurrect recreates the project window from state', async () => {
-    mockFiles[path.join('/proj', '.ocmux.json')] =
-      JSON.stringify({ version: 2, directory: '/proj', session: 's1', server: 'http://x:4096' });
-    // No existing window for /proj → windowByDir returns null (list-windows shows only /other)
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxFail(1);
-      if (args[0] === 'list-windows') return tmuxOk('3\t/other\n');
-      if (args[0] === 'new-window') return tmuxOk('5\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
-    await runMain(['resurrect', '/proj']);
+  it('accepts --shared only with tui', async () => {
+    await runMain(['--shared']);
+    assert.strictEqual(exitThrown, 1);
+    assert.ok(stderrOutput.join('').includes("'--shared' is only valid"));
+  });
+
+  it('tui --list prints live runtime registrations', async () => {
+    nodeMock.method(tuiRegistry, 'list', () => [{
+      shared: true,
+      pane: '%8',
+      directory: '/proj',
+      server: 'http://x:4096',
+      session: 'ses_1',
+    }]);
+    await runMain(['tui', '--list']);
     assert.strictEqual(exitThrown, null);
-    assert.ok(spawnSyncCalls.some(c => c.args[0] === 'new-window'));
-    const write = lastStateWrite('/proj');
-    assert.ok(write && JSON.parse(write.data).session === 's1');
+    assert.ok(stdoutOutput.join('').includes('shared  %8  /proj'));
+  });
+
+  it('tui --detach --shared unregisters without killing the pane', async () => {
+    const instance = { id: 'tui_1', token: 'tok', pane: '%8', shared: true };
+    const calls = [];
+    nodeMock.method(tuiRegistry, 'shared', () => instance);
+    nodeMock.method(tuiRegistry, 'unregister', (...args) => { calls.push(args); return true; });
+    await runMain(['tui', '--detach', '--shared']);
+    assert.strictEqual(exitThrown, null);
+    assert.deepStrictEqual(calls, [['tui_1', 'tok']]);
+    assert.ok(!spawnSyncCalls.some(c => c.args.includes('kill-pane')));
+  });
+
+  it('tui --shared wraps OpenCode and unregisters when it exits', async () => {
+    mockFiles[path.join('/proj', '.ocmux.json')] =
+      JSON.stringify({ version: 2, directory: '/proj', session: 'ses_1', server: 'http://x:4096' });
+    const calls = [];
+    nodeMock.method(tuiRegistry, 'parseTmuxEnvironment', () => ({ socket: '/tmp/tmux/default', pane: '%9' }));
+    nodeMock.method(tuiRegistry, 'register', (input) => {
+      calls.push(['register', input]);
+      return { instance: { ...input, id: 'tui_1', token: 'tok' }, displaced: { id: 'old', pid: 2 } };
+    });
+    nodeMock.method(tuiRegistry, 'updateInstance', (...args) => { calls.push(['update', ...args]); });
+    nodeMock.method(tuiRegistry, 'unregister', (...args) => { calls.push(['unregister', ...args]); return true; });
+    nodeMock.method(opencode, 'getSession', async () => ({
+      id: 'ses_1', location: { directory: '/proj' },
+    }));
+    const child = new EventEmitter();
+    child.pid = 1234;
+    child.kill = () => {};
+    nodeMock.method(child_process, 'spawn', (cmd, args, opts) => {
+      calls.push(['spawn', cmd, args, opts]);
+      process.nextTick(() => child.emit('exit', 0));
+      return child;
+    });
+    // This is the exact argument shape generated by registry.respawn(). The
+    // `--` must apply to /proj, not to the earlier `tui` positional token.
+    await runMain(['tui', '--shared', '--server', 'http://x:4096', '--session-id', 'ses_1', '--', '/proj']);
+    assert.strictEqual(exitThrown, null, 'stderr=' + JSON.stringify(stderrOutput));
+    assert.ok(calls.some(c => c[0] === 'register' && c[1].shared === true));
+    const spawn = calls.find(c => c[0] === 'spawn');
+    assert.deepStrictEqual(spawn[2], ['--server', 'http://x:4096', '--session', 'ses_1', '/proj']);
+    assert.ok(calls.some(c => c[0] === 'unregister' && c[1] === 'tui_1' && c[2] === 'tok'));
   });
 
   it('reports that the model subcommand was removed (use m in the picker)', async () => {
@@ -838,12 +586,7 @@ describe('ocmux CLI', () => {
   it('migrate rewrites legacy state files to v2', async () => {
     mockFiles[path.join('/proj', '.ocmux.json')] =
       JSON.stringify({ url: 'http://x:4096', window_index: 1 });
-    tmuxHandler = (args) => {
-      if (args[0] === 'has-session') return tmuxOk('');
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
+    nodeMock.method(opencode, 'listProjects', async () => [{ canonical: '/proj' }]);
     await runMain(['migrate']);
     const write = lastStateWrite('/proj');
     assert.ok(write);
@@ -856,11 +599,6 @@ describe('ocmux CLI', () => {
   it('serve --force repoints an existing project to a new server', async () => {
     mockFiles[path.join('/proj', '.ocmux.json')] =
       JSON.stringify({ version: 2, directory: '/proj', session: 's1', server: 'http://old:4096' });
-    tmuxHandler = (args) => {
-      if (args[0] === 'list-windows') return tmuxOk('1\t/proj\n');
-      if (args[0] === 'list-panes') return tmuxOk('%0\t0\n');
-      return tmuxOk('');
-    };
     nodeMock.method(opencode, 'listSessions', async () => [{ id: 's1' }, { id: 's2' }]);
     await runMain(['serve', '/proj', '--server', 'http://new:4096', '--force']);
     assert.strictEqual(exitThrown, null);
@@ -1247,16 +985,13 @@ describe('switchMenu (project switcher)', () => {
     assert.ok(!output.some((o) => o.includes('project switcher — help')));
   });
 
-  it('Enter focuses a project for inspection but never leaves the current project', async () => {
-    // Pretend another project's window is the one currently on screen.
-    tmuxHandler = (args) => (args[0] === 'list-windows' && args.includes('#{window_index} #{window_active}')
-      ? tmuxOk('1 0\n2 1\n')
-      : tmuxOk(''));
-    const { result, output } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']]);
+  it('Enter routes a project for inspection but never leaves the current project', async () => {
+    const opened = [];
+    const { result, output } = await driveSwitchMenu(rows, [['', 'return'], ['q', 'q']], {
+      onOpen: (project, id) => opened.push([project.dir, id]),
+    });
     assert.strictEqual(result, null, 'the switcher must not move the picker by default');
-    assert.ok(spawnSyncCalls.some((c) => c.cmd === 'tmux' && c.args[0] === 'select-window'
-      && c.args.includes('Opencode:1')),
-    'expected the inspected project’s window to be focused');
+    assert.deepStrictEqual(opened, [['/proj1', 's1']]);
     assert.ok(output.some((o) => o.includes('Enter: view')), 'expected the inspect-mode status bar');
     assert.strictEqual(fsWrites.length, 0, '.ocmux.json must stay untouched');
   });
@@ -1301,35 +1036,39 @@ describe('switchMenu (project switcher)', () => {
 
   it('Space unfolds a project’s sessions and Enter views one without writing state', async () => {
     serveProjectSessions();
-    const { result, output } = await driveSwitchMenu(projRows, viewSessionKeys);
+    const opened = [];
+    const { result, output } = await driveSwitchMenu(projRows, viewSessionKeys, {
+      onOpen: (project, id) => opened.push([project.dir, id]),
+    });
     assert.strictEqual(result, null, 'inspection must not move the picker');
     const frame = output.find((o) => o.includes('Other'));
     assert.ok(frame, 'expected unfolded session rows');
     const plain = frame.replace(/\x1b\[[0-9;]*m/g, '');
     assert.ok(plain.includes('▾ proj1'), 'expected the project shown as unfolded');
     assert.ok(plain.includes('Stored  *  s1'), 'expected the stored session marked');
-    const relaunch = spawnSyncCalls.find((c) => c.cmd === 'tmux' && c.args[0] === 'send-keys'
-      && c.args.some((a) => typeof a === 'string' && a.includes("--session 'sX'")));
-    assert.ok(relaunch, 'expected the TUI relaunched on the chosen session');
+    assert.deepStrictEqual(opened, [['/proj1', 'sX']]);
     assert.strictEqual(fsWrites.length, 0, '.ocmux.json must stay untouched (view selector)');
   });
 
   it('--all-projects lets a session row move the picker to that project', async () => {
     serveProjectSessions();
-    const { result } = await driveSwitchMenu(projRows, viewSessionKeys, { allProjects: true });
+    const opened = [];
+    const { result } = await driveSwitchMenu(projRows, viewSessionKeys, {
+      allProjects: true,
+      onOpen: (project, id) => opened.push([project.dir, id]),
+    });
     assert.strictEqual(result, '/proj1');
-    const relaunch = spawnSyncCalls.find((c) => c.cmd === 'tmux' && c.args[0] === 'send-keys'
-      && c.args.some((a) => typeof a === 'string' && a.includes("--session 'sX'")));
-    assert.ok(relaunch, 'expected the TUI relaunched on the chosen session');
+    assert.deepStrictEqual(opened, [['/proj1', 'sX']]);
     assert.strictEqual(fsWrites.length, 0, 'the switcher itself never writes state');
   });
 
-  it('Space on a project without a server reports it; Enter still activates it', async () => {
-    const { result, output } = await driveSwitchMenu(noServerRows, [[' ', 'space'], ['', 'return'], ['q', 'q']]);
+  it('Space on a project without a server reports it; Enter does not route it', async () => {
+    const opened = [];
+    const { result, output } = await driveSwitchMenu(noServerRows, [[' ', 'space'], ['', 'return'], ['q', 'q']], {
+      onOpen: (project, id) => opened.push([project.dir, id]),
+    });
     assert.strictEqual(result, null, 'inspection must not move the picker');
-    assert.ok(spawnSyncCalls.some((c) => c.cmd === 'tmux' && c.args[0] === 'select-window'
-      && c.args.includes('Opencode:1')),
-    'expected Enter to focus the project anyway');
+    assert.deepStrictEqual(opened, []);
     const plain = output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
     assert.ok(plain.includes('! proj1: no server recorded'), 'expected a fold error, not a hang');
     const unfolded = output.find((o) => o.includes('no server recorded'));

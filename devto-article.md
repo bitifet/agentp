@@ -1,5 +1,11 @@
 # Agentp: Turn OpenCode Into a Headless AI Engine for Your Editor, Terminal, and Telegram
 
+> **Historical article:** this draft describes the pre-2.0 architecture and is
+> retained as publication history. Current releases use one or more user-managed
+> OpenCode servers and optional user-placed TUIs registered with `ocmux tui`.
+> See [`README.md`](./README.md) and
+> [`docs/specification_v2.md`](./docs/specification_v2.md) for current behavior.
+
 I've always felt out of step with the prevailing trends.
 
 Before the AI explosion, the mantra was "ship fast" — the Minimum Viable Product. If you weren't first, you were nobody. Quality, testing, documentation? Nice-to-haves. I could never stomach shipping "human slop" just to be first.

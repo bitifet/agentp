@@ -18,11 +18,55 @@ const TGAGENTP_PORT = parseInt(process.env.TGAGENTP_PORT || '0', 10);
 const PORT_FILE = '/tmp/tgagentp-port';
 const TGAGENTP_DEBOUNCE_MS = parseInt(process.env.TGAGENTP_DEBOUNCE_MS || '5000', 10);
 const CONNECTIONS_FILE = '/tmp/tgagentp-connections.json';
-const { listServers, activateServer, resurrectServer, statefileFor, readState, tuiPaneId, serverStatus, listDeadServers } = require('../lib/ocmux.js');
+const { switchTui } = require('../lib/ocmux.js');
+const projectState = require('../lib/project-state.js');
+const tuiRegistry = require('../lib/tui-registry.js');
 const { executeTuiCommand } = require('../lib/tui-cmd.js');
 const { getUpdates, downloadTelegramFile, sendTelegramDocument } = require('../lib/telegram-api.js');
 const { sendLongMessage } = require('../lib/telegram-format.js');
 const { spawnSync } = require('child_process');
+
+function readProject(dir) {
+  return projectState.readProjectState(projectState.statefileFor(dir));
+}
+
+// Telegram's historical "servers" are project routes. With user-placed TUIs,
+// the runtime registry is the only global list available without scanning the
+// filesystem. Saved chat connections supplement it where a project is headless.
+function listServers() {
+  const rows = [];
+  const seen = new Set();
+  for (const instance of tuiRegistry.list()) {
+    if (!instance.directory || !instance.server) continue;
+    const key = `${instance.directory}\0${instance.server}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    rows.push({
+      url: instance.server,
+      dir: instance.directory,
+      status: instance.shared ? 'shared' : 'project',
+      instance,
+    });
+  }
+  try {
+    const saved = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8'));
+    for (const connection of saved.connections || []) {
+      const state = connection.dir ? readProject(connection.dir) : null;
+      if (!state || !state.server) continue;
+      const key = `${state.directory}\0${state.server}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push({ url: state.server, dir: state.directory, status: 'headless', instance: null });
+    }
+  } catch {}
+  return rows;
+}
+
+function activateServer(dir, _unused, server) {
+  const state = readProject(dir);
+  if (!state || !state.session) return null;
+  return switchTui(dir, server || state.server, state.session);
+}
 
 const TGAGENTP_ROOT = process.env.TGAGENTP_ROOT;
 let tgagentpRootValid = false;
@@ -461,7 +505,7 @@ async function cmdHelp(token, chatId, args, chatState) {
       const hint = TGAGENTP_ROOT ? '' :
         '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
       await sendLongMessage(token, chatState,
-        '`/serve <path>` ─ start a server in an existing directory\n\n' +
+        '`/serve <path>` ─ initialize an existing project directory\n\n' +
         'The path is relative to `TGAGENTP_ROOT`.\n' +
         'Example: `/serve projects/my-app`\n\n' +
         'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
@@ -472,7 +516,7 @@ async function cmdHelp(token, chatId, args, chatState) {
       const hint = TGAGENTP_ROOT ? '' :
         '\nℹ️  Currently disabled. Set the `TGAGENTP_ROOT` environment variable to a writable directory to enable `/serve` and `/new`.';
       await sendLongMessage(token, chatState,
-        '`/new <path>` ─ create a directory, initialize git, and start a server\n\n' +
+        '`/new <path>` ─ create a directory, initialize git, and configure it\n\n' +
         'The path is relative to `TGAGENTP_ROOT`.\n' +
         'Example: `/new projects/my-app`\n\n' +
         'Requires the `TGAGENTP_ROOT` environment variable to be set to a writable directory.' +
@@ -517,8 +561,8 @@ async function cmdHelp(token, chatId, args, chatState) {
     '`/markdown` ─ send the original markdown of the last response as a `.md` file\n' +
     '`/shutdown` ─ stop tgagentp (only with `--dev` flag)\n' +
     (tgagentpRootValid
-      ? '`/serve <path>` ─ start a server in an existing directory\n' +
-        '`/new <path>` ─ create a directory, init git, and start a server\n\n'
+      ? '`/serve <path>` ─ initialize an existing project directory\n' +
+        '`/new <path>` ─ create a directory, init git, and configure it\n\n'
       : 'ℹ️  Set `TGAGENTP_ROOT` to a writable directory to enable `/serve` and `/new`.\n\n') +
     'Everything else is forwarded to the active server as `[Telegram] <text>`.');
 }
@@ -537,21 +581,15 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
     }
   }
 
-  // Default: list servers (alive + dead)
+  // Default: list configured project routes known to the runtime registry or
+  // saved Telegram connections.
   const servers = listServers();
-  // Also find dead servers from saved connections
-  let savedData;
-  try { savedData = JSON.parse(fs.readFileSync(CONNECTIONS_FILE, 'utf8')); } catch {}
-  const knownDirs = savedData && Array.isArray(savedData.connections)
-    ? savedData.connections.map(c => c.dir).filter(Boolean) : [];
-  const dead = listDeadServers(knownDirs);
-  const all = [...servers, ...dead.map(d => ({ url: d.url, dir: d.dir, index: d.windowIndex, status: 'dead' }))];
-  if (all.length === 0) {
-    await sendLongMessage(token, chatState, 'No servers found.');
+  if (servers.length === 0) {
+    await sendLongMessage(token, chatState, 'No configured project routes found.');
     return;
   }
   const activeUrl = chatState.serverBase ? normalizeUrl(chatState.serverBase) : null;
-  const lines = all.map(s => {
+  const lines = servers.map(s => {
     const normalizedUrl = normalizeUrl(s.url);
     const isActive = activeUrl && normalizedUrl === activeUrl;
     const isOwned = Object.keys(serverOwners).some(url => normalizeUrl(url) === normalizedUrl);
@@ -560,8 +598,8 @@ async function cmdServers(token, chatId, args, chatState, setServerForChat, setA
       bullet = '▶ ';
     } else if (isOwned) {
       bullet = ' · ';
-    } else if (s.status === 'dead') {
-      bullet = '💀 ';
+    } else if (s.status === 'headless') {
+      bullet = '○ ';
     } else {
       bullet = '🔌 ';
     }
@@ -1359,8 +1397,8 @@ async function cmdResurrect(token, chatId, args, chatState) {
       return;
     }
     // Read the old URL from the state file
-    const state = readState(statefileFor(dir));
-    url = state ? state.url : null;
+    const state = readProject(dir);
+    url = state ? state.server : null;
   } else {
     url = chatState.serverBase;
     if (!url) {
@@ -1382,48 +1420,19 @@ async function cmdResurrect(token, chatId, args, chatState) {
     if (!dir) {
       await sendLongMessage(token, chatState,
         'Could not find the directory for this server.\n' +
-        'Use `ocmux resurrect` from the terminal or specify a directory: `/resurrect <path>`.');
+        'Specify a configured directory: `/resurrect <path>`.');
       return;
     }
   }
 
-  await sendLongMessage(token, chatState,
-    `♻️ Resurrecting server \`${dir}\`...\n` +
-    `The old server at \`${url}\` will be replaced with a new one.`);
-
-  try {
-    const { url: newUrl } = resurrectServer(dir, false);
-
-    // Update chat state to new URL
-    chatState.serverBase = newUrl;
-
-    // Transfer relevant state from old URL to new URL
-    const oldSt = getState(url);
-    const newSt = getState(newUrl);
-    newSt.activeSessionId = oldSt.activeSessionId;
-    newSt.activeSessionName = oldSt.activeSessionName;
-    newSt.activeAgentName = oldSt.activeAgentName;
-    newSt.thinkingEnabled = oldSt.thinkingEnabled;
-
-    // Update serverOwners to point to the new URL
-    const normOld = normalizeUrl(url);
-    for (const [sfUrl, owner] of Object.entries(serverOwners)) {
-      if (normalizeUrl(sfUrl) === normOld) {
-        serverOwners[newUrl] = owner;
-        delete serverOwners[sfUrl];
-        break;
-      }
-    }
-
-    await sendLongMessage(token, chatState,
-      `✅ Server resurrected.\n` +
-      `New URL: \`${newUrl}\`\n\n` +
-      `Use \`/status\` to check the session.`);
-  } catch (err) {
-    await sendLongMessage(token, chatState,
-      `❌ Resurrection failed: ${err.message}\n` +
-      `Try \`ocmux resurrect\` from the terminal.`);
+  const alive = url ? await isServerAlive(url) : false;
+  if (alive) {
+    await sendLongMessage(token, chatState, `✅ Server is already reachable at \`${url}\`.`);
+    return;
   }
+  await sendLongMessage(token, chatState,
+    `❌ Server at \`${url || 'unknown URL'}\` is not reachable.\n` +
+    'OpenCode servers are user-managed; start `opencode serve` externally, then use `/server <name>` again.');
 }
 
 async function cmdDisconnect(token, chatId, args, chatState) {
@@ -1481,22 +1490,15 @@ async function cmdServe(token, chatId, args, chatState, setServerForChat, setAct
       `❌ Directory does not exist: \`${relPath}\``);
     return;
   }
-  const sf = statefileFor(targetDir);
+  const sf = projectState.statefileFor(targetDir);
   if (fs.existsSync(sf)) {
-    const status = serverStatus(targetDir);
-    if (status && status.status === 'dead') {
-      await sendLongMessage(token, chatState,
-        `💀 A dead server exists at \`${relPath}\` (${status.url}).\n` +
-        `Use \`/resurrect ${relPath}\` to restart it.`);
-    } else {
-      await sendLongMessage(token, chatState,
-        `⚠️ Server already exists for \`${relPath}\`.\n` +
-        'Use `/server <name>` to connect to it.');
-    }
+    await sendLongMessage(token, chatState,
+      `⚠️ Project state already exists for \`${relPath}\`.\n` +
+      'Use `/server <name>` to connect to it.');
     return;
   }
   await sendLongMessage(token, chatState,
-    `🚀 Starting server for \`${relPath}\`...`);
+    `🚀 Initializing project \`${relPath}\`...`);
   const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
   if (result.status !== 0) {
     const err = result.stderr || result.stdout || 'unknown error';
@@ -1504,15 +1506,16 @@ async function cmdServe(token, chatId, args, chatState, setServerForChat, setAct
       `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
     return;
   }
-  const url = (result.stdout || '').trim();
+  const state = readProject(targetDir);
+  const url = state && state.server;
   if (!url) {
     await sendLongMessage(token, chatState,
-      '❌ Server started but did not return a URL.');
+      '❌ Project initialized but its server URL was not recorded.');
     return;
   }
-  await setServerForChat(chatState, url);
+  await setServerForChat(chatState, url, targetDir);
   await sendLongMessage(token, chatState,
-    `✅ Server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+    `✅ Project initialized.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
   log.info(`[chat ${chatId}] Served ${targetDir} → ${url}`);
 }
 
@@ -1528,7 +1531,7 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
   if (!relPath) {
     await sendLongMessage(token, chatState,
       'Usage: `/new <path>`\n\n' +
-      'Create a new directory under `TGAGENTP_ROOT`, initialize git, and start a server.\n' +
+      'Create a new directory under `TGAGENTP_ROOT`, initialize git, and configure it.\n' +
       'The path is relative to the root directory.');
     return;
   }
@@ -1542,7 +1545,7 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
   if (fs.existsSync(targetDir)) {
     await sendLongMessage(token, chatState,
       `❌ Directory already exists: \`${relPath}\`.\n` +
-      'Use `/serve` to start a server in an existing directory.');
+      'Use `/serve` to initialize an existing directory.');
     return;
   }
   try {
@@ -1560,7 +1563,7 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
     return;
   }
   await sendLongMessage(token, chatState,
-    `🚀 Starting server for \`${relPath}\`...`);
+    `🚀 Creating project \`${relPath}\`...`);
   const result = spawnSync('ocmux', ['serve', targetDir], { encoding: 'utf8', timeout: 15000 });
   if (result.status !== 0) {
     const err = result.stderr || result.stdout || 'unknown error';
@@ -1568,15 +1571,16 @@ async function cmdNew(token, chatId, args, chatState, setServerForChat, setActiv
       `❌ Failed to start server:\n\`\`\`\n${err}\n\`\`\``);
     return;
   }
-  const url = (result.stdout || '').trim();
+  const state = readProject(targetDir);
+  const url = state && state.server;
   if (!url) {
     await sendLongMessage(token, chatState,
-      '❌ Server started but did not return a URL.');
+      '❌ Project initialized but its server URL was not recorded.');
     return;
   }
-  await setServerForChat(chatState, url);
+  await setServerForChat(chatState, url, targetDir);
   await sendLongMessage(token, chatState,
-    `✅ Directory created and server started.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
+    `✅ Directory created and project initialized.\nURL: \`${url}\`\nDir: \`${targetDir}\``);
   log.info(`[chat ${chatId}] Created ${targetDir} → ${url}`);
 }
 
@@ -1752,8 +1756,7 @@ async function cmdServer(token, chatId, args, chatState, setServerForChat, setAc
       `⚠️ Server \`${target.url}\` has been taken over by another chat.\n\n` +
       `Use \`/servers\` to see available servers and reconnect.`).catch(() => {});
   }
-  const pending = await setServerForChat(chatState, target.url);
-  activateServer(target.dir, target.index, target.url);
+  const pending = await setServerForChat(chatState, target.url, target.dir);
   let msg = `Switched to server: ${target.url} → ${target.dir}`;
   if (pending && pending.trim()) {
     await sendLongMessage(token, chatState, msg);
@@ -2081,7 +2084,7 @@ async function main() {
   log.info('Waiting for Telegram messages... (Ctrl+C to stop)');
 
   // Chat-aware server/session mutation callbacks (defined here for token access)
-  const setServerForChat = async (chatState, url) => {
+  const setServerForChat = async (chatState, url, projectDir) => {
     const cs = chatState;
 
     // Disconnect any other chat still connected to this server (one server → one chat)
@@ -2111,10 +2114,12 @@ async function main() {
     // Send Telegram bridge awareness note to the new session
     sendGreeting(cs).catch(() => {});
 
-    // Auto-activate tmux window for this server
+    // Refresh the registered TUI route for this project.
     const servers = listServers();
     const normalized = normalizeUrl(url);
-    const match = servers.find(s => normalizeUrl(s.url) === normalized);
+    const match = projectDir
+      ? { dir: projectDir, url }
+      : servers.find(s => normalizeUrl(s.url) === normalized);
     if (match) {
       activateServer(match.dir, match.index, match.url);
       saveConnection(cs.chatId, cs.threadId, match.dir);
@@ -2153,6 +2158,15 @@ async function main() {
     const prevId = getState(server).activeSessionId;
     getState(server).activeSessionId = id;
     if (name) getState(server).activeSessionName = name;
+    const dir = serverDir(server);
+    if (dir) {
+      const state = readProject(dir);
+      if (state) projectState.writeProjectState(state.file, { session: id });
+      const result = switchTui(dir, server, id);
+      if (!result.ok && result.reason === 'failed') {
+        log.error(`Warning: session selected, but its ${result.kind} TUI could not be refreshed: ${result.error}`);
+      }
+    }
     log.info(`[chat ${chatState.chatId}] Switched to session: ${name || id}`);
     if (id !== prevId) {
       sendGreeting(chatState);
@@ -2417,7 +2431,7 @@ async function main() {
         const msg = isConnError
           ? `⚠️ Server \`${url}\` is unreachable. The message has been requeued and will be sent when the server is available again.\n\n` +
             `**Options:**\n` +
-            `• Restart it: \`/resurrect\`\n` +
+            '• Start the user-managed OpenCode server externally\n' +
             `• Switch to another server: \`/server <name>\`\n` +
             `• Flush the queue: \`/flush\``
           : `Error: ${err.message}`;
@@ -2573,11 +2587,6 @@ async function main() {
       return;
     }
 
-    // Auto-switch tmux window to this chat's server
-    const srvList = listServers();
-    const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(url));
-    if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
-
     st.busy = true;
     const myTaskId = ++st.taskId;
     log.debug(`  → /note: starting background processing (task ${myTaskId})`);
@@ -2601,14 +2610,13 @@ async function main() {
     for (const { chatId, threadId, dir } of savedData.connections) {
       if (!dir) continue;
       const cs = getChatState(chatId, threadId);
-      const sf = statefileFor(dir);
-      const state = readState(sf);
-      if (state && state.url) {
-        cs.serverBase = state.url;
+      const state = readProject(dir);
+      if (state && state.server) {
+        cs.serverBase = state.server;
         // Prefer non-thread (private chat) as owner over topic threads
-        const existing = serverOwners[state.url];
+        const existing = serverOwners[state.server];
         if (!existing || (!threadId && existing.threadId)) {
-          serverOwners[state.url] = { chatId, threadId };
+          serverOwners[state.server] = { chatId, threadId };
         }
       }
     }
@@ -2631,32 +2639,31 @@ async function main() {
       if (!dir) continue;
       const cs = getChatState(chatId, threadId);
       if (!cs.serverBase) continue;
-      const sf = statefileFor(dir);
-      const state = readState(sf);
-      if (state && state.url) {
-        if (notifiedUrls.has(state.url)) {
+      const state = readProject(dir);
+      if (state && state.server) {
+        if (notifiedUrls.has(state.server)) {
           log.info(`[chat ${chatId}] Skipping startup notification for ${dir} (already notified for this URL)`);
           continue;
         }
-        notifiedUrls.add(state.url);
-        const alive = await isServerAlive(state.url);
+        notifiedUrls.add(state.server);
+        const alive = await isServerAlive(state.server);
         if (alive) {
           const lines = [
             '✅ Bot started.',
             '**Server:**',
             '  • **Path:** `' + dir + '`',
-            '  • **URL:** `' + state.url + '`',
+            '  • **URL:** `' + state.server + '`',
             '  • **Status:** ✅ restored',
           ];
           try { await sendLongMessage(token, cs, lines.join('\n')); } catch (_) {}
           log.info(`Restored connection: chat ${chatId} → ${dir}`);
         } else {
-          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.url} is unreachable`);
+          log.info(`Saved connection for chat ${chatId} → ${dir}, but server ${state.server} is unreachable`);
           try {
             await sendLongMessage(token, cs,
               '🔄 Bot started. Previously connected to `' + dir + '`.\n' +
-              '⚠️ The server at `' + state.url + '` is not reachable.\n' +
-              'Use `/resurrect` to restart it, or `/server <name>` to connect elsewhere.');
+              '⚠️ The server at `' + state.server + '` is not reachable.\n' +
+              'Start the user-managed OpenCode server externally, or use `/server <name>` to connect elsewhere.');
           } catch (_) {}
         }
       }
@@ -2804,7 +2811,7 @@ async function main() {
               `⚠️ Server \`${cs.serverBase}\` is not reachable.\n\n` +
               `Your file upload has been queued (#${qlen}). It will be sent when the server becomes available.\n\n` +
               `**Options:**\n` +
-              `• Restart it: \`/resurrect\`\n` +
+              '• Start the user-managed OpenCode server externally\n' +
               `• Switch to another server: \`/server <name>\`\n` +
               `• Flush the queue: \`/flush\``);
             continue;
@@ -2816,11 +2823,6 @@ async function main() {
             await sendLongMessage(token, cs, `⏳ Server is busy. File upload queued (#${st.messageQueue.length}).`);
             continue;
           }
-
-          // Auto-switch tmux window
-          const srvList = listServers();
-          const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
-          if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
 
           st.busy = true;
           const myTaskId = ++st.taskId;
@@ -2914,21 +2916,15 @@ async function main() {
           await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel first.');
           continue;
         }
-        const srvList = listServers();
-        const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
-        if (!srvMatch) {
-          await sendLongMessage(token, cs, '❌ Server not found in tmux.');
-          continue;
-        }
-        activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
-        const paneId = tuiPaneId(srvMatch.index);
-        if (!paneId) {
-          await sendLongMessage(token, cs, '❌ TUI pane not found.');
+        const projectDir = serverDir(cs.serverBase);
+        const target = projectDir ? tuiRegistry.resolve(projectDir) : null;
+        if (!target) {
+          await sendLongMessage(token, cs, '❌ No registered TUI is available for this project.');
           continue;
         }
         st.busy = true;
         try {
-          const answer = await executeTuiCommand(paneId, cs.serverBase, tuiCmd);
+          const answer = await executeTuiCommand(target.instance, cs.serverBase, tuiCmd);
           if (answer && answer.trim()) {
             const cleaned = await processTelegramCommands(answer.trim(), cs.serverBase, token, cs);
             if (cleaned) {
@@ -3005,7 +3001,7 @@ async function main() {
         const qlen = st.messageQueue.length;
         const servers = listServers();
         const suggestions = [];
-        suggestions.push(`• Restart it: \`/resurrect\``);
+        suggestions.push('• Start the user-managed OpenCode server externally');
         if (servers.length > 0) {
           suggestions.push(`• Switch to another server: \`/server <name>\``);
         }
@@ -3021,11 +3017,6 @@ async function main() {
         await sendLongMessage(token, cs, '⏳ Server is busy. Use `/cancel` to cancel or `/queue <message>` to queue your message.');
         continue;
       }
-
-      // Auto-switch tmux window to this chat's server
-      const srvList = listServers();
-      const srvMatch = srvList.find(s => normalizeUrl(s.url) === normalizeUrl(cs.serverBase));
-      if (srvMatch) activateServer(srvMatch.dir, srvMatch.index, srvMatch.url);
 
       st.busy = true;
       const myTaskId = ++st.taskId;

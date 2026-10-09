@@ -9,7 +9,8 @@ See **[specification_v2.md](./specification_v2.md)** for the current design:
 - a single, **user-managed** OpenCode v2 server (no per-project servers);
 - the **project = directory / target = session** model with a v2 `.ocmux.json`
   (`directory`, `session`, `server`, `annotations`);
-- `ocmux` project/TUI-window management and its interactive pickers;
+- `ocmux` project/session routing, registered dedicated/shared TUIs, and its
+  interactive pickers;
 - `agentp` resolution, deferred tickets (incl. `cancelled`) and `--qa` output;
 - `lib/opencode.js` as the v2-only HTTP/SSE client.
 

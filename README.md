@@ -8,7 +8,9 @@
 This package provides three CLI tools:
 
 - **`agentp`** — pipes prompt text into a running OpenCode server and streams the assistant final answer back to stdout
-- **`ocmux`** — manages project TUI windows in tmux on top of a single user-managed OpenCode server (session picker, project switcher, create/rename/delete/annotate sessions)
+- **`ocmux`** — routes project sessions and optionally drives user-placed,
+  registered OpenCode TUI panes in tmux (session picker, project switcher,
+  create/rename/delete/annotate sessions)
 - **`tgagentp`** — bridges a Telegram bot chat with all running OpenCode servers (receives messages from Telegram, routes them to the active server, sends answers back). Supports slash commands for multi-server management, session switching, agent/model listing, including file sharing from the chat.
 
 It is designed for prompt-driven workflows where you want to do things like:
@@ -42,7 +44,7 @@ npm link
 
 - Node.js 18+
 - **OpenCode v2** (`opencode serve`) — the server is user-managed; these tools only check it is reachable and complain otherwise.
-- [tmux](https://github.com/tmux/tmux) when using `ocmux` (project TUI windows).
+- [tmux](https://github.com/tmux/tmux) when using registered `ocmux` TUIs.
 
 ## Servers
 
@@ -323,10 +325,11 @@ Useful to grab recent answers without sending a new prompt.
 
 ## ocmux
 
-Manage **project TUI windows** in tmux on top of a single user-managed OpenCode
-server. A project is a directory holding a `.ocmux.json` state file recording
-the target session; an `Opencode` tmux session holds one window per project
-(TUI only, pane 0).
+Manage project/session routing on top of a user-managed OpenCode server. A
+project is a directory holding a `.ocmux.json` state file recording its target
+session. TUIs are optional: `ocmux tui` can register any tmux pane as a
+project-dedicated display, while `ocmux tui --shared` registers one fallback
+display that follows session switches from every project.
 
 ```bash
 ocmux [-l] [--all-projects] [<subcommand>] [<directory>]
@@ -360,8 +363,8 @@ the project found upward from `<directory>` (default: `$PWD`):
 - **`q` only quits the session picker.** In every other menu (model/agent
   pickers, project switcher, help/input prompts) `q`/`ESC` just closes that menu
   and returns to the previous one. **`Ctrl+C` fully exits** `ocmux` from any menu.
-- switching updates `.ocmux.json` and relaunches the TUI on the chosen session
-  (`opencode --server <url> --session <id>`); silent on success. The file
+- switching updates `.ocmux.json` and refreshes the project's dedicated TUI, or
+  the shared TUI when no live dedicated one exists; silent on success. The file
   updated is always the one of the project being listed — your own project
   unless ocmux was started with `--all-projects`
 - new sessions inherit the model of the previously selected session (v2
@@ -377,16 +380,21 @@ reported individually with session name, id, error, and timestamp.
 
 Subcommands:
 
-- **`serve [--server <url>] [--git|--GIT] [dir]`** — create a project TUI window
+- **`serve [--server <url>] [--git|--GIT] [dir]`** — initialize project state
   (checks the server is reachable first). Aliased as `new` for backwards
   compatibility. `--git`/`--GIT` resolve `dir` to the nearest parent with a
   `.git` entry / directory.
+- **`tui [--shared] [--server <url>] [dir]`** — register the current tmux pane and run OpenCode
+  in it. Without `--shared`, the pane follows only that project. With
+  `--shared`, it becomes the one fallback TUI for all projects and can reconnect
+  across server URLs as selections change. Re-registering a slot stops its old
+  wrapper without destroying the old pane. Closing the TUI unregisters it.
+  `tui --list` lists live registrations; `tui [--shared] --status` inspects a
+  dedicated/shared slot; `tui [--shared] --detach` unregisters that slot without
+  closing the pane or its current TUI.
 - **`session <id|title> [dir]`** — non-interactive session switch.
-- **`list [-l]`** — list project windows (with `-l`, their server URL).
-- **`model [ref]`** — switch the model of the selected session.
-- **`kill [dir]`** — close the project's TUI window. **Keeps `.ocmux.json`**
-  (session memory; marks it `stopped`).
-- **`resurrect [dir]`** — recreate the project window from its state file.
+- **`list [-l]`** — list configured projects and whether their route is
+  `project`, `shared`, or `headless` (with `-l`, their server URL).
 - **`migrate`** — rewrite legacy (v1-style) `.ocmux.json` files to the v2 schema.
 
 The old `switch` subcommand is gone: press **`p`** inside the session picker to
@@ -395,9 +403,9 @@ marks a project as folded/unfolded, `Space` folds/unfolds a project's sessions
 (fetched once per project, most recent first), and `/` searches projects *and*
 their unfolded sessions (a matching session keeps its project header visible).
 
-By default the switcher is an **inspector**: `Enter` on a project row focuses it
-(and shows its current session), `Enter`/`Space` on a session row shows that
-session in the project's TUI, and you **always come back to your own project's
+By default the switcher is an **inspector**: `Enter` on a project row routes its
+current session to the applicable registered TUI, `Enter`/`Space` on a session
+row shows that session, and you **always come back to your own project's
 list** when you leave it (`q`). No `.ocmux.json` is ever written from there, so
 `agentp` — which reads the state file of the directory it runs in — keeps
 prompting your own project's session.
@@ -410,15 +418,57 @@ either way you can tell where you are. `ocmux` never starts or stops the
 OpenCode server — run `opencode serve` yourself (see [Versioning](#versioning)
 for the pairing policy).
 
-Options: `-l` · `--all-projects` · `--version` · `-h` · `--` (treat the next
-argument as a directory).
+Options: `-l` · `--all-projects` · `--shared` (only with `tui`) · `--version` ·
+`-h` · `--` (treat the next argument as a directory). There is no `--global`
+alias.
 
 Notes:
 
-- If `<directory>` is not a valid path, `ocmux` matches it against the basenames
-  of existing project windows (exact unique match).
 - If the server is password-protected (`OPENCODE_SERVER_PASSWORD`), both
   `agentp` and `ocmux` send the required HTTP Basic Auth credentials.
+
+### TUI runtime registry
+
+TUI placement is ephemeral and is never written to `.ocmux.json`. Registrations
+live in `$XDG_RUNTIME_DIR/agentp/ocmux-tuis.json` (falling back to a private
+`/tmp/agentp-<uid>/` directory); `OCMUX_RUNTIME_DIR` overrides that location.
+The directory is mode `0700`, registry files are mode `0600`, and updates use a
+lock plus atomic rename.
+
+A registration stores the tmux socket, pane ID, diagnostic wrapper PID, and a
+random pane verification token. Matching ID/token options are also written to
+the pane before it can be respawned. This prevents stale entries from targeting
+an unrelated pane and lets a pane move between windows or tmux sessions on the
+same socket without re-registering. Dead registrations are pruned when queried.
+
+Closing OpenCode makes its foreground `ocmux tui` wrapper unregister itself if
+it still owns the token. Replacing a dedicated/shared registration interrupts
+the previous wrapper but preserves its pane. `--detach` only unregisters and
+clears the pane markers; it does not close the pane or the OpenCode process.
+
+Registry commands:
+
+```bash
+ocmux tui                         # dedicated TUI for the current project
+ocmux tui /path/to/project        # dedicated TUI for another project
+ocmux tui --shared                # the single cross-project fallback TUI
+ocmux tui --list                  # all live dedicated/shared registrations
+ocmux tui --status                # current project's dedicated slot
+ocmux tui --status --shared       # shared slot
+ocmux tui --detach                # unregister current project's slot
+ocmux tui --detach --shared       # unregister shared slot
+```
+
+Routing precedence is:
+
+1. a live TUI dedicated to the selected project;
+2. the single live shared TUI;
+3. headless operation (the session still switches successfully).
+
+Switching respawns the registered pane with `ocmux tui`, which reconnects
+OpenCode to the selected server, directory, and session. Server-side work keeps
+running, but client-local TUI state such as a draft prompt or scroll position is
+lost during the refresh.
 
 ### State file
 
@@ -432,8 +482,8 @@ gitignored — never commit it.
 2. Resolves the target from the nearest `.ocmux.json`: server URL, project
    directory, and the stored session id (falls back to the most recently viewed
    session in that directory, or creates one pinned to the directory).
-3. Focuses the project's TUI window, prepends the session annotation (if any),
-   and sends the prompt via the v2 session API (`POST /api/session/:id/prompt`,
+3. Prepends the session annotation (if any) and sends the prompt via the v2
+    session API (`POST /api/session/:id/prompt`,
    delivering to that session regardless of what the TUI shows).
 4. Attaches to the SSE stream first so no events are missed, and streams text
    until the session is quiescent after its terminal signal.
@@ -475,7 +525,7 @@ Non-text Telegram updates (photos, stickers, etc.) are silently ignored.
 | `/servers` | List all ocmux-served projects (▶ active, 🔌 disconnected, 💀 dead) |
 | `/server <name>` | Switch active server; matches by full path, basename, or substring |
 | `/server --force <name>` | Take over a server from another chat |
-| `/resurrect [path]` | Restart a crashed server from its `.ocmux.json`; accepts optional directory path |
+| `/resurrect [path]` | Check the configured user-managed server and explain how to restart it externally |
 | `/sessions` | List sessions (numbered, newest first) |
 | `/session <name-or-number>` | Switch to a session by name or position |
 | `/session new [name]` | Create a new session |

@@ -7,24 +7,9 @@ const http = require('http');
 const { URL } = require('url');
 const child_process = require('child_process');
 const os = require('os');
-const {
-  SESSION,
-  statefileFor,
-  tuiPaneId,
-  windowByDir,
-  windowNameByIndex,
-  activeWindowIndex,
-  listProjects,
-  activateProject,
-  relaunchTui,
-  closeProjectWindow,
-  createProjectWindow,
-  ensureSession,
-  pinWindowName,
-  sleep,
-  tuiAttachCommand,
-} = require('../lib/ocmux');
-const { listSessions, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions, getSession } = require('../lib/opencode');
+const { tuiArgs, switchTui } = require('../lib/ocmux');
+const tuiRegistry = require('../lib/tui-registry');
+const { listSessions, listProjects: listOpenCodeProjects, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions, getSession } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -40,18 +25,6 @@ const DEFAULT_SERVER = process.env.OCMUX_SERVER || 'http://localhost:4096';
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// All direct tmux calls go through this (mirrors lib/ocmux's `_tmux`). The
-// property access — not a destructured binding — keeps it routed through
-// whatever `child_process.spawnSync` is at call time (i.e. mockable in tests).
-function tmux(args) {
-  const result = child_process.spawnSync('tmux', args, { encoding: 'utf8', maxBuffer: 1024 * 1024 });
-  if (result.error && result.error.code === 'ENOENT') {
-    console.error('Error: tmux is not installed or not in PATH');
-    process.exit(1);
-  }
-  return result;
-}
 
 function findParentStatefile(startDir) {
   let dir = path.resolve(startDir);
@@ -96,16 +69,10 @@ function resolveGitDir(startDir, requireDir, flagLabel) {
   if (!result.dir) {
     const label = requireDir ? '.git directory' : '.git entry';
     console.error(`Error: no ${label} found in ${startDir} or any of its parents.`);
-    console.error(`Run '${SCRIPT} serve' without ${flagLabel} to create a project window in the current directory.`);
+    console.error(`Run '${SCRIPT} serve' without ${flagLabel} to initialize the current directory.`);
     process.exit(1);
   }
   return result.dir;
-}
-
-function findWindowsByBasename(name) {
-  const r = tmux(['list-windows', '-t', SESSION, '-F', '#{window_name}']);
-  if (r.status !== 0) return [];
-  return r.stdout.trim().split('\n').filter(Boolean).filter(w => path.basename(w) === name);
 }
 
 function resolveDir(arg) {
@@ -115,17 +82,6 @@ function resolveDir(arg) {
   } catch {
     // not a valid path or inaccessible
   }
-
-  if (!arg.includes('/')) {
-    const matches = findWindowsByBasename(arg);
-    if (matches.length === 1) return matches[0];
-    if (matches.length > 1) {
-      console.error(`Error: more than one match for '${arg}':`);
-      for (const m of matches) console.error(`  ${m}`);
-      process.exit(1);
-    }
-  }
-
   console.error(`Error: invalid directory '${arg}'`);
   console.error(`Run '${SCRIPT} -h' for help.`);
   process.exit(1);
@@ -155,6 +111,45 @@ function checkServer(server) {
     req.on('error', () => resolve(false));
     req.end();
   });
+}
+
+function refreshTui(directory, server, session) {
+  const result = switchTui(directory, server, session, path.resolve(process.argv[1]));
+  if (!result.ok && result.reason === 'failed') {
+    console.error(`Warning: session selected, but the ${result.kind} TUI could not be refreshed: ${result.error}`);
+  }
+  return result;
+}
+
+async function configuredProjects(server) {
+  const [projects, sessions] = await Promise.all([
+    listOpenCodeProjects(server),
+    listSessions(server),
+  ]);
+  const rows = [];
+  const seen = new Set();
+  const directories = [
+    ...(projects || []).map(project => project.canonical || project.directory),
+    ...(sessions || []).map(session => session.location && session.location.directory),
+  ];
+  for (const dir of directories) {
+    if (!dir) continue;
+    let canonical;
+    try { canonical = fs.realpathSync(dir); } catch { canonical = path.resolve(dir); }
+    if (seen.has(canonical)) continue;
+    const sf = path.join(canonical, '.ocmux.json');
+    const state = projectState.readProjectState(sf);
+    if (!state) continue;
+    seen.add(canonical);
+    const target = tuiRegistry.resolve(canonical);
+    rows.push({
+      dir: canonical,
+      status: target ? target.kind : 'headless',
+      session: state.session,
+      server: state.server || server,
+    });
+  }
+  return rows.sort((a, b) => a.dir.localeCompare(b.dir));
 }
 
 function newestSessionId(sessions) {
@@ -1095,11 +1090,11 @@ const toggleBroadcast = (idx) => {
   });
 }
 
-// Interactive project picker — never writes state (it only focuses windows and
-// moves what a TUI displays).
+// Interactive project picker — never writes state (it only moves what a
+// registered dedicated/shared TUI displays).
 //
 // Default (safe): an INSPECTOR. Selecting a project/session row still focuses
-// that window and shows the session there, but the promise always resolves to
+// the routed TUI and shows the session there, but the promise always resolves to
 // null, so the caller re-opens its own project's list. Nothing about the
 // caller's project changes.
 //
@@ -1107,7 +1102,7 @@ const toggleBroadcast = (idx) => {
 // row also records the target directory, so the caller moves its picker there
 // and can then write that project's `.ocmux.json` — the file `agentp` reads in
 // that directory.
-function switchMenu(rows, { allProjects = false } = {}) {
+function switchMenu(rows, { allProjects = false, onOpen } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) {
       console.error('Error: "switch" is interactive and requires a TTY.');
@@ -1127,7 +1122,6 @@ function switchMenu(rows, { allProjects = false } = {}) {
     const lineWidth = Math.max(cols, nameW + 2 + stsW + 2 + ssnW + 6);
 
     let cursor = 0;
-    let activeIdx = null;       // tmux window index of the focused project
     let lastDir = null;       // target dir to move to (only with allProjects)
     let done = false;
     let help = false;
@@ -1175,10 +1169,6 @@ function switchMenu(rows, { allProjects = false } = {}) {
       else if (cursor >= view.length) cursor = Math.max(0, view.length - 1);
     };
     applySearch();
-
-    const refreshActive = () => {
-      activeIdx = activeWindowIndex();
-    };
 
     const cleanup = () => {
       process.stderr.write('\x1b[?25h');
@@ -1229,7 +1219,6 @@ function switchMenu(rows, { allProjects = false } = {}) {
         process.stderr.write(out);
         return;
       }
-      refreshActive();
       const extras = [];
       if (search.active && view.length === 0) extras.push(`No projects match "${search.value}"`);
       for (const n of view) {
@@ -1256,7 +1245,7 @@ function switchMenu(rows, { allProjects = false } = {}) {
           const fold = foldOf(p).open ? '▾' : '▸';
           const session = p.session ? p.session.slice(0, 14) : '(none)';
           const text = `${fold} ${pad(path.basename(p.dir), nameW)}  ${pad(p.status, stsW)}  ${pad(session, ssnW)}  ${p.dir}`;
-          return p.index === activeIdx ? { text, reverse: true } : text;
+          return text;
         },
         footer: searchFooter(search, `${enterHint} · Space: fold · /: search · h: help · q: back · Ctrl+C: quit`),
         footerLeft: search.active,
@@ -1265,17 +1254,13 @@ function switchMenu(rows, { allProjects = false } = {}) {
       }));
     };
 
-    // Enter on a project row: focus it and show its current session. Only the
-    // TUI window moves — with allProjects off this stays a pure inspection and
+    // Enter on a project row: show its current session in its routed TUI. With
+    // allProjects off this stays a pure inspection and
     // `lastDir` is left null so the caller returns to its own project.
     const activate = (p) => {
       if (!p) return;
       try {
-        if (p.server) {
-          activateProject(p.dir, p.index, p.server, p.session);
-        } else {
-          tmux(['select-window', '-t', `${SESSION}:${p.index}`]);
-        }
+        if (p.server && p.session && onOpen) onOpen(p, p.session);
         if (allProjects) lastDir = p.dir;
       } catch (err) {
         process.stderr.write(`\nError: ${err.message}\n`);
@@ -1290,11 +1275,7 @@ function switchMenu(rows, { allProjects = false } = {}) {
     const openSession = (node) => {
       const p = node.project;
       try {
-        if (p.server) {
-          relaunchTui(p.index, p.dir, p.server, node.session.id);
-        } else {
-          tmux(['select-window', '-t', `${SESSION}:${p.index}`]);
-        }
+        if (p.server && onOpen) onOpen(p, node.session.id);
         if (allProjects) lastDir = p.dir;
       } catch (err) {
         process.stderr.write(`\nError: ${err.message}\n`);
@@ -1382,7 +1363,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
     const sf = findParentStatefile(target);
     if (!sf) {
       console.error(`Error: no .ocmux.json found in ${target} or any of its parents.`);
-      console.error(`Run 'ocmux serve' to create a project window.`);
+    console.error(`Run 'ocmux serve' to initialize the project.`);
       process.exit(1);
     }
     const state = projectState.readProjectState(sf);
@@ -1400,17 +1381,6 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
       console.error(`Start it with 'opencode serve' (or your usual launcher) first.`);
       process.exit(1);
     }
-
-    const winIdx = windowByDir(dir);
-    if (winIdx == null) {
-      console.error(`Error: no tmux window for ${dir}.`);
-      console.error(`Run 'ocmux serve' to create it.`);
-      process.exit(1);
-    }
-
-    // Focus this project's window up-front so the picker (and any session
-    // switch) never leaves another project's window selected.
-    activateProject(dir, winIdx, server, state.session);
 
     const sessions = await listSessions(server, dir).catch((err) => {
       console.error(`Error connecting to ${server}: ${err.message}`);
@@ -1444,7 +1414,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
 
     const applySession = (id) => {
       projectState.writeProjectState(sf, { session: id });
-      relaunchTui(winIdx, dir, server, id);
+      refreshTui(dir, server, id);
     };
 
     if (directRef) {
@@ -1460,8 +1430,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
     }
 
     if (!process.stdin.isTTY) {
-      // Silent path (non-TTY): just make sure the window is focused.
-      activateProject(dir, winIdx, server, state.session);
+      // Silent path (non-TTY): project state already identifies the target.
       return;
     }
 
@@ -1476,7 +1445,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
         modelContext,
         notices,
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
-        onInspectSession: (id) => relaunchTui(winIdx, dir, server, id),
+        onInspectSession: (id) => refreshTui(dir, server, id),
         onPick: async (row) => {
           if (row.new) {
             const created = await createSessionWithModel(server, row.name || undefined, dir, [lastRef, ...sorted]).catch((err) => {
@@ -1521,8 +1490,14 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
       // inspects (picked stays null => re-run this picker for the same
       // project); with it, picking a project re-runs the picker there.
       // Ctrl+C fully exits.
-      ensureSession();
-      const picked = await switchMenu(listProjects(), { allProjects });
+      const rows = await configuredProjects(server).catch((err) => {
+        console.error(`Error listing projects: ${err.message}`);
+        return [];
+      });
+      const picked = await switchMenu(rows, {
+        allProjects,
+        onOpen: (project, id) => refreshTui(project.dir, project.server, id),
+      });
       if (picked === SWITCH_QUIT) break;
       if (!picked) continue;
       target = picked;
@@ -1533,7 +1508,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
 }
 
 // ---------------------------------------------------------------------------
-// Subcommand: serve — create a project TUI window (server is user-managed)
+// Subcommand: serve — initialize project/session state (server is user-managed)
 // ---------------------------------------------------------------------------
 
 async function cmdServeNew(targetDir, serverArg, force) {
@@ -1542,7 +1517,7 @@ async function cmdServeNew(targetDir, serverArg, force) {
   const sf = path.join(targetDir, '.ocmux.json');
   if (fs.existsSync(sf)) {
     if (!force) {
-      console.error(`Error: a project window already exists in ${targetDir}.`);
+      console.error(`Error: project state already exists in ${targetDir}.`);
       console.error(`Use 'ocmux' to switch sessions there, or 'ocmux serve --server <url> --force' to repoint it.`);
       process.exit(1);
     }
@@ -1552,11 +1527,10 @@ async function cmdServeNew(targetDir, serverArg, force) {
   const parent = findParentStatefile(path.dirname(targetDir));
   if (parent) {
     const parentDir = path.dirname(parent);
-    console.error(`Warning: there is already an opencode project in ${parentDir}.`);
-    console.error(`Run 'ocmux' and press 'p' to move between project windows.`);
+    console.error(`Warning: there is already an ocmux project in ${parentDir}.`);
 
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-    rl.question('Are you sure you want to create a new project window here? [y/N] ', (answer) => {
+    rl.question('Are you sure you want to initialize a nested project here? [y/N] ', (answer) => {
       rl.close();
       if (!/^[yY]([eE][sS])?$/.test(answer.trim())) {
         console.error('Cancelled.');
@@ -1572,8 +1546,8 @@ async function cmdServeNew(targetDir, serverArg, force) {
   return doServeNew(targetDir, serverArg);
 }
 
-// Repoint an existing project to a (possibly new) server: update .ocmux.json's
-// `server`, keep the session if it still exists, and (re)launch the TUI on it.
+// Repoint an existing project to a (possibly new) server. A registered TUI is
+// refreshed through the normal dedicated → shared routing rule.
 async function doForceServe(targetDir, sf, server) {
   const alive = await checkServer(server);
   if (!alive) {
@@ -1594,14 +1568,8 @@ async function doForceServe(targetDir, sf, server) {
     session = created.id;
   }
   projectState.writeProjectState(sf, { server, session });
-  const winIdx = windowByDir(targetDir);
-  if (winIdx != null) {
-    relaunchTui(winIdx, targetDir, server, session);
-    console.error(`Repointed ${targetDir} to ${server} (session ${session}).`);
-  } else {
-    createProjectWindow(targetDir, server, session);
-    console.error(`Recreated project window for ${targetDir} → ${server} (session ${session}).`);
-  }
+  refreshTui(targetDir, server, session);
+  console.error(`Repointed ${targetDir} to ${server} (session ${session}).`);
 }
 
 async function doServeNew(targetDir, serverArg) {
@@ -1633,23 +1601,157 @@ async function doServeNew(targetDir, serverArg) {
     }
   }
 
-  console.error(`Creating project window for ${targetDir} (session ${session})...`);
-  try {
-    createProjectWindow(targetDir, server, session);
-  } catch (err) {
-    console.error(`Error: ${err.message}`);
+  projectState.writeProjectState(path.join(targetDir, '.ocmux.json'), {
+    directory: targetDir,
+    server,
+    session,
+    status: 'active',
+  });
+  refreshTui(targetDir, server, session);
+  console.error(`Initialized ${targetDir} → ${server} (session ${session}).`);
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: tui — register this tmux pane and host an OpenCode TUI
+// ---------------------------------------------------------------------------
+
+async function cmdTui(targetDir, serverArg, shared, sessionArg) {
+  const tmuxTarget = tuiRegistry.parseTmuxEnvironment();
+  if (!tmuxTarget) {
+    console.error("Error: 'ocmux tui' must run inside a tmux pane.");
     process.exit(1);
   }
+  const sf = findParentStatefile(targetDir);
+  if (!sf) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    console.error("Run 'ocmux serve' first.");
+    process.exit(1);
+  }
+  const state = projectState.readProjectState(sf);
+  const directory = state.directory;
+  const server = serverArg || state.server || DEFAULT_SERVER;
+  if (!await checkServer(server)) {
+    console.error(`Error: OpenCode server not reachable at ${server}.`);
+    process.exit(1);
+  }
+
+  let session = sessionArg || state.session;
+  if (session) {
+    try {
+      const found = await getSession(server, session);
+      if (found.location && found.location.directory) targetDir = found.location.directory;
+    } catch {
+      session = null;
+    }
+  }
+  if (!session) {
+    const sessions = await listSessions(server, directory);
+    session = newestSessionId(sessions);
+    if (!session) session = (await createSessionWithModel(server, undefined, directory, sessions)).id;
+    projectState.writeProjectState(sf, { session, server });
+  }
+
+  const registration = tuiRegistry.register({
+    ...tmuxTarget,
+    shared,
+    directory: shared ? targetDir : directory,
+    server,
+    session,
+    pid: process.pid,
+  });
+
+  const instance = registration.instance;
+  const launchDir = targetDir || directory;
+  const child = child_process.spawn('opencode', tuiArgs(server, session, launchDir), {
+    cwd: launchDir,
+    stdio: 'inherit',
+  });
+  tuiRegistry.updateInstance(instance.id, instance.token, { childPid: child.pid || null });
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const forward = (signal) => {
+      try { child.kill(signal); } catch {}
+    };
+    const onHup = () => forward('SIGHUP');
+    const onTerm = () => forward('SIGTERM');
+    const onInt = () => forward('SIGINT');
+    process.on('SIGHUP', onHup);
+    process.on('SIGTERM', onTerm);
+    process.on('SIGINT', onInt);
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      process.removeListener('SIGHUP', onHup);
+      process.removeListener('SIGTERM', onTerm);
+      process.removeListener('SIGINT', onInt);
+      tuiRegistry.unregister(instance.id, instance.token);
+      if (err) reject(err);
+      else resolve();
+    };
+    child.once('error', finish);
+    child.once('exit', () => finish());
+  });
+}
+
+function tuiProjectDirectory(targetDir) {
+  const sf = findParentStatefile(targetDir);
+  if (!sf) return null;
+  const state = projectState.readProjectState(sf);
+  return state && state.directory;
+}
+
+function formatTuiRegistration(instance) {
+  return `${instance.shared ? 'shared' : 'project'}  ${instance.pane}  ${instance.directory || '(none)'}  ${instance.server || '(none)'}  ${instance.session || '(none)'}`;
+}
+
+function cmdTuiList() {
+  const instances = tuiRegistry.list();
+  if (instances.length === 0) {
+    console.log('No registered TUIs.');
+    return;
+  }
+  console.log('Kind     Pane  Directory  Server  Session');
+  for (const instance of instances) console.log(formatTuiRegistration(instance));
+}
+
+function cmdTuiStatus(targetDir, shared) {
+  const directory = shared ? null : tuiProjectDirectory(targetDir);
+  if (!shared && !directory) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    process.exit(1);
+  }
+  const instance = shared ? tuiRegistry.shared() : tuiRegistry.dedicated(directory);
+  if (!instance) {
+    console.log(shared ? 'Shared TUI: not registered' : `Project TUI: not registered (${directory})`);
+    return;
+  }
+  console.log(formatTuiRegistration(instance));
+}
+
+function cmdTuiDetach(targetDir, shared) {
+  const directory = shared ? null : tuiProjectDirectory(targetDir);
+  if (!shared && !directory) {
+    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
+    process.exit(1);
+  }
+  const instance = shared ? tuiRegistry.shared() : tuiRegistry.dedicated(directory);
+  if (!instance) {
+    console.log(shared ? 'Shared TUI was not registered.' : `Project TUI was not registered (${directory}).`);
+    return;
+  }
+  tuiRegistry.unregister(instance.id, instance.token);
+  console.log(`Detached ${shared ? 'shared' : 'project'} TUI from ${instance.pane}.`);
 }
 
 // ---------------------------------------------------------------------------
 // Subcommand: list
 // ---------------------------------------------------------------------------
 
-function cmdList(longMode) {
-  const rows = listProjects();
+async function cmdList(longMode, server) {
+  const rows = await configuredProjects(server);
   if (rows.length === 0) {
-    console.log('No opencode projects running.');
+    console.log('No configured ocmux projects found.');
     return;
   }
 
@@ -1666,75 +1768,14 @@ function cmdList(longMode) {
 }
 
 // ---------------------------------------------------------------------------
-// Subcommand: kill — close the project window but keep .ocmux.json
-// ---------------------------------------------------------------------------
-
-function cmdKill(targetDir) {
-  const sf = findParentStatefile(targetDir);
-  if (!sf) {
-    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
-    process.exit(1);
-  }
-  const serverDir = path.dirname(sf);
-  const winIdx = windowByDir(serverDir);
-  if (winIdx != null) {
-    console.error(`Closing project window for ${serverDir}...`);
-    try {
-      closeProjectWindow(winIdx);
-    } catch (err) {
-      console.error(`Error: ${err.message}`);
-      process.exit(1);
-    }
-  } else {
-    console.error(`Tmux window not found for ${serverDir} (state kept).`);
-  }
-  // Session memory intentionally kept.
-  projectState.writeProjectState(sf, { status: 'stopped' });
-  console.error('Done (state file kept).');
-}
-
-// ---------------------------------------------------------------------------
-// Subcommand: resurrect — recreate a project window from its state
-// ---------------------------------------------------------------------------
-
-async function cmdResurrect(targetDir) {
-  const sf = findParentStatefile(targetDir);
-  if (!sf) {
-    console.error(`Error: no .ocmux.json found in ${targetDir} or any of its parents.`);
-    process.exit(1);
-  }
-  const state = projectState.readProjectState(sf);
-  const server = state.server;
-  if (!server) {
-    console.error(`Error: ${sf} does not record a server.`);
-    process.exit(1);
-  }
-  const dir = state.directory;
-
-  const winIdx = windowByDir(dir);
-  if (winIdx != null) {
-    console.error(`Project window for ${dir} already exists.`);
-    return;
-  }
-
-  const alive = await checkServer(server);
-  if (!alive) {
-    console.error(`Error: OpenCode server not reachable at ${server}.`);
-    process.exit(1);
-  }
-  console.error(`Recreating project window for ${dir}...`);
-  createProjectWindow(dir, server, state.session);
-}
-
-// ---------------------------------------------------------------------------
 // Subcommand: migrate — rewrite legacy .ocmux.json files to v2
 // ---------------------------------------------------------------------------
 
-function cmdMigrate() {
-  const rows = listProjects();
+async function cmdMigrate(server) {
+  const rows = await configuredProjects(server);
   let migrated = 0;
   for (const row of rows) {
-    const sf = statefileFor(row.dir);
+    const sf = projectState.statefileFor(row.dir);
     const state = projectState.readProjectState(sf);
     if (!state) continue;
     if (state.version >= 2) continue;
@@ -1757,8 +1798,8 @@ function cmdMigrate() {
 function printHelp() {
   console.error(`Usage: ${SCRIPT} [-l] [--all-projects] [<subcommand>] [<directory>]`);
   console.error('');
-  console.error('Manage project OpenCode TUI windows in tmux. The OpenCode server');
-  console.error('itself is user-managed: start it once with `opencode serve`.');
+  console.error('Manage project/session routing and optional registered OpenCode TUIs.');
+  console.error('The OpenCode server is user-managed: start it with `opencode serve`.');
   console.error('');
   console.error('Without arguments, searches upward from <directory> (default: $PWD)');
   console.error('for .ocmux.json and opens an interactive SESSION picker for that');
@@ -1766,22 +1807,28 @@ function printHelp() {
   console.error('sessions are listed. In the picker:');
   console.error('  Enter switch · n new · r rename · R remind · d delete · a agents · m model');
   console.error('  p projects · h help · q quit');
-  console.error('Selecting updates .ocmux.json and relaunches the project TUI on the');
-  console.error('chosen session. Silent on success. (p opens the project switcher; by');
+  console.error('Selecting updates .ocmux.json and refreshes a dedicated TUI, falling');
+  console.error('back to the shared TUI. Silent on success. (p opens projects; by');
   console.error('default it only inspects other projects and never modifies any');
   console.error('.ocmux.json — see --all-projects.)');
   console.error('');
   console.error('Subcommands:');
-  console.error('  serve     Create a TUI window for <directory> (default: $PWD).');
+  console.error('  serve     Initialize project state for <directory> (default: $PWD).');
   console.error('            --server <url>  Server to record (default: $OCMUX_SERVER or http://localhost:4096).');
   console.error('            --force         Repoint an existing project to --server (overwrites .ocmux.json).');
   console.error('            --git / --GIT   Use the nearest parent with a .git entry / directory.');
   console.error('            Aliased as "new" for backwards compatibility.');
+  console.error('  tui [--shared] [--server <url>] [directory]');
+  console.error('            Register the current tmux pane and run its OpenCode TUI.');
+  console.error('            Without --shared it is dedicated to the current project;');
+  console.error('            --shared makes it the single fallback for every project.');
+  console.error('            --list lists all live registrations; --status inspects one;');
+  console.error('            --detach unregisters one without closing its pane or TUI.');
+  console.error('            With --status/--detach, --shared targets the shared slot;');
+  console.error('            otherwise the slot dedicated to directory is targeted.');
   console.error('  session <id|title>');
   console.error('            Non-interactive session switch for the current project.');
-  console.error('  list [-l] List project windows (with -l, their server URL).');
-  console.error('  kill      Close the current project window. KEEPS .ocmux.json (session memory).');
-  console.error('  resurrect Recreate the project window from its .ocmux.json.');
+  console.error('  list [-l] List configured projects and TUI routing status.');
   console.error('  migrate   Rewrite legacy .ocmux.json files to the v2 schema.');
   console.error('');
   console.error('Reminders: the R key in the session picker attaches a note to a');
@@ -1813,8 +1860,12 @@ function main() {
   let serverArg = null;
   let force = false;
   let allProjects = false;
+  let sharedTui = false;
+  let tuiSession = null;
+  let tuiList = false;
+  let tuiStatus = false;
+  let tuiDetach = false;
   const positional = [];
-  let dirIsForced = false;
 
   const parsedArgs = process.argv.slice(2);
   for (let i = 0; i < parsedArgs.length; i++) {
@@ -1835,6 +1886,22 @@ function main() {
       process.exit(1);
     } else if (arg === '--force') {
       force = true;
+    } else if (arg === '--shared') {
+      sharedTui = true;
+    } else if (arg === '--session-id') {
+      const val = parsedArgs[i + 1];
+      if (!val || val.startsWith('-')) {
+        console.error("Error: '--session-id' requires a session ID.");
+        process.exit(1);
+      }
+      tuiSession = val;
+      i++;
+    } else if (arg === '--list') {
+      tuiList = true;
+    } else if (arg === '--status') {
+      tuiStatus = true;
+    } else if (arg === '--detach') {
+      tuiDetach = true;
     } else if (arg === '--all-projects') {
       allProjects = true;
     } else if (arg === '--git') {
@@ -1855,13 +1922,19 @@ function main() {
     } else if (arg === '-h' || arg === '--help') {
       printHelp();
     } else if (arg === '--') {
-      dirIsForced = true;
+      const directory = parsedArgs[i + 1];
+      if (!directory) {
+        console.error("Error: '--' requires a directory argument.");
+        process.exit(1);
+      }
+      positional.push({ value: directory, forcedDirectory: true });
+      i++;
     } else if (arg.startsWith('-')) {
       console.error(`Error: unknown option '${arg}'`);
       console.error(`Run '${SCRIPT} -h' for help.`);
       process.exit(1);
     } else {
-      positional.push(arg);
+      positional.push({ value: arg, forcedDirectory: false });
     }
   }
 
@@ -1871,16 +1944,16 @@ function main() {
   let targetDir = null;
   let directRef = null;
 
-  for (const arg of positional) {
-    if (dirIsForced) {
-      dirIsForced = false;
+  for (const positionalArg of positional) {
+    const arg = positionalArg.value;
+    if (positionalArg.forcedDirectory) {
       if (targetDir) {
         console.error(`Error: unexpected argument '${arg}'`);
         process.exit(1);
       }
       targetDir = resolveDir(arg);
-    } else if (arg === 'serve' || arg === 'new' || arg === 'kill' || arg === 'list'
-      || arg === 'resurrect' || arg === 'session'
+    } else if (arg === 'serve' || arg === 'new' || arg === 'list' || arg === 'tui'
+      || arg === 'session'
       || arg === 'migrate') {
       if (subcommand) {
         console.error(`Error: multiple subcommands specified: '${subcommand}' and '${arg}'`);
@@ -1900,6 +1973,23 @@ function main() {
 
   if (!targetDir) targetDir = process.cwd();
 
+  if (sharedTui && subcommand !== 'tui') {
+    console.error("Error: '--shared' is only valid with 'ocmux tui'.");
+    process.exit(1);
+  }
+  if (tuiSession && subcommand !== 'tui') {
+    console.error("Error: '--session-id' is only valid with 'ocmux tui'.");
+    process.exit(1);
+  }
+  if ((tuiList || tuiStatus || tuiDetach) && subcommand !== 'tui') {
+    console.error("Error: '--list', '--status', and '--detach' are only valid with 'ocmux tui'.");
+    process.exit(1);
+  }
+  if ([tuiList, tuiStatus, tuiDetach].filter(Boolean).length > 1) {
+    console.error("Error: combine at most one of '--list', '--status', and '--detach'.");
+    process.exit(1);
+  }
+
   // Dispatch. Each branch may throw synchronously (EXIT) for validation errors
   // or return a promise for async commands; main() returns the settled promise
   // so tests can await it.
@@ -1914,28 +2004,45 @@ function main() {
       console.error("Error: 'list' does not accept a directory path.");
       process.exit(1);
     }
-    ensureSession();
-    cmdList(longMode);
+    p = cmdList(longMode, serverArg || DEFAULT_SERVER);
+  } else if (subcommand === 'tui') {
+    if (gitMode || force || allProjects || longMode) {
+      console.error("Error: 'tui' does not accept --git, --GIT, --force, --all-projects, or -l.");
+      process.exit(1);
+    }
+    if (tuiList) {
+      if (sharedTui || serverArg || tuiSession || targetDir !== process.cwd()) {
+        console.error("Error: 'ocmux tui --list' does not accept --shared, --server, --session-id, or a directory.");
+        process.exit(1);
+      }
+      cmdTuiList();
+    } else if (tuiStatus) {
+      if (serverArg || tuiSession) {
+        console.error("Error: 'ocmux tui --status' does not accept --server or --session-id.");
+        process.exit(1);
+      }
+      cmdTuiStatus(targetDir, sharedTui);
+    } else if (tuiDetach) {
+      if (serverArg || tuiSession) {
+        console.error("Error: 'ocmux tui --detach' does not accept --server or --session-id.");
+        process.exit(1);
+      }
+      cmdTuiDetach(targetDir, sharedTui);
+    } else {
+      p = cmdTui(targetDir, serverArg, sharedTui, tuiSession);
+    }
   } else if (subcommand === 'session') {
     if (gitMode) {
       console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
       process.exit(1);
     }
     p = cmdSessionSwitch(targetDir, directRef, allProjects);
-  } else if (subcommand === 'kill') {
-    if (gitMode) {
-      console.error("Error: '--git' and '--GIT' are only valid with 'serve'.");
-      process.exit(1);
-    }
-    cmdKill(targetDir);
-  } else if (subcommand === 'resurrect') {
-    p = cmdResurrect(targetDir);
   } else if (subcommand === 'migrate') {
     if (targetDir !== process.cwd()) {
       console.error("Error: 'migrate' does not accept a directory path.");
       process.exit(1);
     }
-    cmdMigrate();
+    p = cmdMigrate(serverArg || DEFAULT_SERVER);
   } else if (subcommand === 'serve' || subcommand === 'new') {
     if (gitMode) {
       const flagLabel = gitMode === 'root' ? '--GIT' : '--git';
@@ -1964,4 +2071,4 @@ if (require.main === module) {
   main();
 }
 
-module.exports = { main, checkServer, newestSessionId, cmdKill, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW };
+module.exports = { main, checkServer, newestSessionId, configuredProjects, refreshTui, cmdTui, cmdTuiList, cmdTuiStatus, cmdTuiDetach, cmdList, cmdMigrate, windowFor, renderList, fmtClock, fmtDuration, fmtTokens, fmtCost, layoutCells, sessionInfoLines, centerIn, filterByPattern, newSearchState, handleSearch, searchFooter, sessionMenu, switchMenu, SWITCH_QUIT, SEARCH_HINT, sortModels, indexOfModel, BROWN, BAR_BG, LIGHT_YELLOW };

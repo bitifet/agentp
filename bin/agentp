@@ -21,7 +21,6 @@ const {
   getActiveSessions,
 } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
-const ocmuxLib = require('../lib/ocmux');
 
 const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
 
@@ -1151,7 +1150,6 @@ async function main() {
     let sessionId = null;
     let answer;
     if (broadcastIds) {
-      try { if (projectDir) ocmuxLib.focusWindowByDir(projectDir); } catch {}
       const bres = await runBroadcastSend(serverBase, broadcastIds, actualPromptText, {
         getActiveSessions,
         getSession,
@@ -1173,17 +1171,16 @@ async function main() {
         preferredSession,
       });
 
-      // v2: focus the target project's TUI window so the user sees the prompt
-      // stream, and prepend the session's annotation (if any) to the prompt.
+      // Prepend the session's annotation (if any) to the prompt. TUI routing is
+      // owned by explicit ocmux session switches, not by prompt submission.
       let prompt = actualPromptText;
       try {
         if (ctx && ctx.statefile) {
           const ann = projectState.readAnnotations(ctx.statefile)[sessionId];
           if (ann) prompt = ann + '\n\n' + actualPromptText;
         }
-        if (projectDir) ocmuxLib.focusWindowByDir(projectDir);
       } catch {
-        // tmux focus is best-effort; never fail the prompt because of it
+        // Annotation lookup is best-effort.
       }
 
       try {

@@ -2,10 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.1.0] - 2026-10-09
+
+The **user-placed TUI** release. OpenCode panes can now live anywhere in tmux,
+with project-dedicated and shared fallback registrations replacing the managed
+`Opencode` session and one-window-per-project layout.
+
+### Fixed
+
+- **Registered TUI panes disappearing on session switch.** The generated
+  respawn command uses `-- <directory>`, but the CLI parser incorrectly applied
+  that marker to the earlier `tui` positional argument. The replacement wrapper
+  exited immediately and tmux removed its pane. Forced directory arguments are
+  now associated with the token immediately following `--`.
 
 ### Added
 
+- **User-placed registered TUIs.** `ocmux tui` registers its current tmux pane
+  as the dedicated TUI for the current project and runs OpenCode as a foreground
+  child; `ocmux tui --shared` registers the single fallback TUI used by every
+  project. Replacing a registration stops the previous wrapper without deleting
+  its pane, and manually closing OpenCode unregisters the pane. Registrations
+  live in a private runtime registry rather than `.ocmux.json` and use tmux
+  socket + pane ID + a random pane token, so panes may be moved between tmux
+  windows/sessions safely. `ocmux tui --list`, `--status`, and `--detach`
+  inspect or remove runtime registrations without requiring pane destruction.
+- **Dedicated → shared → headless routing.** Every ocmux session selection first
+  refreshes a live project-dedicated TUI, otherwise the one shared TUI, and
+  otherwise succeeds without a display. The shared pane reconnects across both
+  project directories and OpenCode server URLs. `--shared` is the only shared
+  registration spelling; there is no `--global` alias.
 - **Model picker starts where you are.** `m` now opens the model list with the
   cursor on the session's **current model** (normal and broadcast mode), and the
   models are **sorted by provider then id** — so a broadcast change starts from
@@ -36,6 +62,15 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **No managed `Opencode` tmux session or per-project windows.** `ocmux serve`
+  now initializes `.ocmux.json` and its selected session only. Project listing
+  and the foldable project picker discover configured directories through
+  OpenCode projects plus session locations, while `list` reports each project's
+  `project`, `shared`, or `headless` display route. The old `kill` and
+  `resurrect` window commands were removed.
+- **Prompt submission no longer moves terminal focus.** `agentp` targets the
+  project session directly through the API; display routing happens only when
+  the user switches through `ocmux`.
 - **One brown/light-yellow theme for the list chrome.** The title bar and the
   bottom status bar (key hints + search line) are now drawn **black on
   brown/dark-yellow** instead of reverse video; the cursor pointer `▶` is
