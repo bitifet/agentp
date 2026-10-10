@@ -348,10 +348,15 @@ the project found upward from `<directory>` (default: `$PWD`):
   it, and `Backspace` on an already-empty search also exits it. The same `/`
   search works in the model/agent pickers and the project switcher.
 - `Enter` switches (menu stays open). `Space` over a different session enters
-  **broadcast mode**: Space selects/deselects sessions; `Enter` keeps the list
-  and switches normally; `ESC`/`q` cancels back to the session list and returns
-  the TUI to the stored session; deselecting down to a single session selects
-  that remaining session. New selections open in the TUI for inspection.
+  **broadcast mode**: Space selects/deselects sessions; `Enter` switches to the
+  cursor session and ends broadcast; `ESC`/`q` cancels back to the session list
+  and returns the TUI to the stored session; deselecting down to a single
+  session selects that remaining session. Ending broadcast (`Enter`/`ESC`/`q`,
+  or any later session switch) clears the stored selection. Reopening `ocmux`
+  while a valid selection is stored starts directly in broadcast mode; a stale
+  or invalid stored list (fewer than two sessions, or ids that no longer exist)
+  is cleared first, so the picker always shows the real state. New selections
+  open in the TUI for inspection.
   Broadcast mode also has `h` help, `d` delete, `D` (Shift+d) to delete every
   selected session at once (confirmation in the status bar), and `m` to change
   the model for every selected session. The `Broadcast to sessions: …` line
@@ -368,6 +373,29 @@ the project found upward from `<directory>` (default: `$PWD`):
   state is obvious at a glance. Deleting the current session adopts the session
   under the cursor as the new current (recorded, refreshed in the TUI, and
   highlighted)
+- **pending-answer awareness**: while the picker is open, ocmux re-checks the
+  project every 2 seconds and marks sessions that are waiting on the agent.
+  Two independent marker columns: ❓ = pending agent **question** (a form),
+  🔒 = pending **permission** request (each always reserves its slot so rows
+  stay aligned). A 🔔 leads the **status bar** when any listed session is
+  waiting, and the cursor session's marker columns are pinned to the **top-right
+  corner of the info panel**. The same markers appear in the project switcher,
+  per session and — when folded — aggregated over the project.
+- `A` answers the pending **question(s)** of the selected session (only when it
+  shows a ❓ marker). Answer mode
+  lists the form's fields and options: `Space`/`Enter` selects (`(•)`), extra
+  rows toggle on multi-select fields, and "Type your own answer" / free-text
+  rows open the status-bar input. Fields gated by `when` conditions appear and
+  disappear live as you answer their gate. The final **Submit answers** row
+  sends the whole form in one request; the server's message shows in the status
+  bar on rejection (400), an already-answered form (409) reports and returns to
+  the list, and multi-form sessions advance form to form. `h` toggles the
+  answer-mode help, `q`/`ESC` cancels without answering.
+- `P` answers the pending **permission request(s)** of the selected session
+  (only when it shows a 🔒 marker). Each request is shown with its action,
+  resources and optional message; `o`/`1` allow **once**, `a` allow **always**
+  (remembered), `r` **reject** — each posts the decision and advances to the
+  next pending request (`h` help, `q`/`ESC` leaves them pending).
 - `m` opens the model list **sorted by provider** with the cursor already on the
   session's **current model** — also in broadcast mode, where it starts from the
   cursor session's model, so a bulk change begins where you are
@@ -394,7 +422,12 @@ prepends a session's reminder to every prompt sent to it.
 Broadcast selections are stored in `.ocmux.json` as `broadcast`. `agentp`
 sends a prompt to all selected sessions (waiting for busy sessions to go idle),
 and prints a labeled answer section for each. Errors/incomplete targets are
-reported individually with session name, id, error, and timestamp.
+reported individually with session name, id, error, and timestamp. Leaving
+broadcast mode (`Enter`/`ESC`/`q`) or picking a session in the normal switcher
+removes the stored `broadcast`, so a stale selection never keeps broadcasting.
+Opening `ocmux` reads it back: a valid list opens the picker directly in
+broadcast mode, while a stale or invalid list is cleared and the picker shows
+the (real) normal state.
 
 Subcommands:
 

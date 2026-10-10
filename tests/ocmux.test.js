@@ -35,10 +35,12 @@ function mockExecSync() { /* no-op */ }
 let httpMode = 'ok';          // 'ok' | 'down' (net error)
 let httpDownFor = null;       // (opts) => bool, per-request failure override
 let httpResponder = null;     // (opts) => body-string | null, per-request override
+let httpStatusCode = null;    // (opts) => status code | null (default 200)
+let httpCalls = [];           // { opts, body } recorded per request (for assertions)
 
 function mockHttpRequest(opts, callback) {
   const res = {
-    statusCode: 200,
+    statusCode: (httpStatusCode && httpStatusCode(opts)) || 200,
     _listeners: {},
     on(ev, fn) { (this._listeners[ev] = this._listeners[ev] || []).push(fn); return this; },
     _emit(ev, d) { (this._listeners[ev] || []).forEach(fn => fn(d)); },
@@ -47,6 +49,8 @@ function mockHttpRequest(opts, callback) {
   };
   const req = {
     _errHandler: null,
+    _written: [],
+    write(data) { this._written.push(String(data)); return true; },
     on(ev, fn) {
       if (ev === 'error') this._errHandler = fn;
       return this;
@@ -58,6 +62,7 @@ function mockHttpRequest(opts, callback) {
         if (req._errHandler) req._errHandler(new Error('ECONNREFUSED'));
         return;
       }
+      httpCalls.push({ opts, body: req._written.join('') });
       callback(res);
       const custom = httpResponder ? httpResponder(opts) : null;
       // Emit a v2 envelope so makeRequest()-based helpers settle.
@@ -101,6 +106,8 @@ function setupMocks() {
   httpMode = 'ok';
   httpDownFor = null;
   httpResponder = null;
+  httpStatusCode = null;
+  httpCalls = [];
   mockFiles = {};
   mockDirs = { '/proj': true, '/nope': true, '/proj1': true, '/proj2': true, '/other': true };
   fsWrites = [];
@@ -125,6 +132,8 @@ function tearDownMocks() {
   httpMode = 'ok';
   httpDownFor = null;
   httpResponder = null;
+  httpStatusCode = null;
+  httpCalls = [];
   mockFiles = {};
   mockDirs = {};
   fsWrites = [];
@@ -835,9 +844,9 @@ async function driveSessionMenu({ sessions, current, opts = {}, keys }) {
   process.stderr.write = (s) => { output.push(String(s)); return true; };
   try {
     const menuPromise = binOcmux.sessionMenu(sessions, current, {}, 'http://server', opts);
-    for (const [str, name, ctrl] of keys) {
+    for (const [str, name, ctrl, shift] of keys) {
       await new Promise((r) => setTimeout(r, 5));
-      process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false });
+      process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false, shift: !!shift });
     }
     const result = await Promise.race([
       menuPromise,
@@ -878,6 +887,48 @@ describe('sessionMenu broadcast exit', () => {
       ['inspect', 'sB'],
       ['bc', []],
       ['inspect', 'sA'],
+    ]);
+  });
+
+  it('Enter ends broadcast, clears the stored selection and switches to the cursor session', async () => {
+    const calls = [];
+    const { result } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [
+        ['', 'down'], [' ', 'space'],   // broadcast with Beta
+        ['', 'return'],                 // Enter ends broadcast and switches to Beta
+        ['q', 'q'],
+      ],
+    });
+    assert.strictEqual(result, null);
+    // No stale broadcast is left behind for agentp to keep sending to.
+    assert.deepStrictEqual(calls, [
+      ['bc', ['sA', 'sB']],
+      ['inspect', 'sB'],
+      ['bc', []],
+      ['pick', 'sB'],
+    ]);
+  });
+
+  it('picking a session in the normal switcher clears any persisted broadcast', async () => {
+    const calls = [];
+    const { result } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        onPick: async (row) => { calls.push(['pick', row.id]); },
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+      },
+      keys: [['', 'down'], ['', 'return'], ['q', 'q']],
+    });
+    assert.strictEqual(result, null);
+    assert.deepStrictEqual(calls, [
+      ['bc', []],
+      ['pick', 'sB'],
     ]);
   });
 
@@ -1238,6 +1289,78 @@ describe('sessionMenu broadcast exit', () => {
   });
 });
 
+describe('sessionMenu broadcast initialization', () => {
+  const sessions = [
+    { id: 'sA', title: 'Alpha' },
+    { id: 'sB', title: 'Beta' },
+    { id: 'sC', title: 'Gamma' },
+  ];
+
+  it('opens in broadcast mode when .ocmux.json holds a valid selection', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        broadcast: ['sA', 'sB'],
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+      },
+      keys: [['q', 'q'], ['q', 'q']], // cancel broadcast, then quit
+    });
+    assert.ok(output.some((o) => o.includes('Broadcast to sessions: Alpha, Beta')),
+      'expected the picker to open in broadcast mode with the stored selection');
+    // The valid list is adopted as-is: it is never rewritten to a different one.
+    assert.ok(!calls.some((c) => c[0] === 'bc' && c[1].length > 0),
+      'a valid persisted list must not be rewritten');
+  });
+
+  it('clears a stale broadcast (unknown ids) and starts in normal mode', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        broadcast: ['sA', 'sGone'],
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+      },
+      keys: [['q', 'q']],
+    });
+    assert.deepStrictEqual(calls, [['bc', []]], 'expected the stale list to be cleared once');
+    assert.ok(!output.some((o) => o.includes('Broadcast to sessions:')),
+      'expected no broadcast banner');
+    assert.ok(output.some((o) => o.includes('Enter: switch · Space: broadcast')),
+      'expected the normal session list');
+  });
+
+  it('drops unknown ids from a valid broadcast and persists the cleaned list', async () => {
+    const calls = [];
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        broadcast: ['sA', 'sB', 'sGone'],
+        onBroadcastChange: (ids) => calls.push(['bc', ids.slice()]),
+      },
+      keys: [['', 'c', true]], // Ctrl+C exits broadcast mode and ocmux
+    });
+    assert.deepStrictEqual(calls[0], ['bc', ['sA', 'sB']],
+      'expected the cleaned list to be written back');
+    assert.ok(output.some((o) => o.includes('Broadcast to sessions: Alpha, Beta')),
+      'expected the surviving sessions to be selected');
+  });
+
+  it('re-anchors the picker and the TUI on a selected session when the stored one is not in the list', async () => {
+    const calls = [];
+    await driveSessionMenu({
+      sessions, current: 'sC',
+      opts: {
+        broadcast: ['sA', 'sB'],
+        onInspectSession: (id) => calls.push(['inspect', id]),
+      },
+      keys: [['', 'c', true]],
+    });
+    assert.deepStrictEqual(calls, [['inspect', 'sA']],
+      'expected the TUI to follow the re-anchored session');
+  });
+});
+
 describe('sessionMenu status-bar prompts', () => {
   const sessions = [
     { id: 'sA', title: 'Alpha' },
@@ -1314,6 +1437,378 @@ describe('sessionMenu status-bar prompts', () => {
     assert.ok(bar.includes('y: delete'));
     assert.ok(bar.includes('n/Esc: cancel'));
     assert.ok(!outsideBar(frame, 'Delete session'), 'prompt should not sit in the list area');
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+// Pending markers (❓/🔒 two columns) + answer mode ('A')
+// ───────────────────────────────────────────────────────────────────
+const plainText = (output) => output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, ''));
+
+describe('sessionMenu pending markers', () => {
+  const sessions = [
+    { id: 'sA', title: 'Alpha' },
+    { id: 'sB', title: 'Beta' },
+    { id: 'sC', title: 'Gamma' },
+  ];
+  const pendingSets = () => ({ forms: new Set(['sA']), perms: new Set(['sB']) });
+
+  it('marks pending rows, leads the status bar, and pins the cursor marker top-right', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: pendingSets },
+      keys: [['q', 'q']],
+    });
+    // The marker draw happens right after the first pending poll, so inspect the
+    // last frame that actually renders the list (later frames are just the
+    // alt-screen teardown escape codes). The initial frame predates the poll.
+    const frames = plainText(output);
+    const last = frames.filter((f) => f.includes('ocmux — sessions')).pop();
+    assert.ok(last.includes('❓'), 'expected the ❓ marker once the pending poll lands');
+    const alphaLine = last.split('\n').find((l) => l.includes('Alpha'));
+    const betaLine = last.split('\n').find((l) => l.includes('Beta'));
+    const gammaLine = last.split('\n').find((l) => l.includes('Gamma'));
+    assert.ok(alphaLine.includes('❓'), 'expected ❓ on the session awaiting a question');
+    assert.ok(betaLine.includes('🔒'), 'expected 🔒 on the session awaiting a permission');
+    assert.ok(!gammaLine.includes('❓') && !gammaLine.includes('🔒'),
+      'expected no marker on a clean session');
+    // Both kinds pending → the 🔔 bell leads the status bar.
+    assert.ok(output.some((o) => o.includes('🔔 Enter: switch')), 'expected 🔔 to lead the status bar');
+    // The info panel pins the cursor session's marker columns to the top-right.
+    const titleLine = last.split('\n').find((l) => l.startsWith('Title: Alpha'));
+    assert.ok(/Title: Alpha\s+❓\s+$/.test(titleLine), 'expected ❓ pinned at the top-right of the info panel');
+  });
+
+  it('re-pins the info panel marker when the cursor moves', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: pendingSets },
+      keys: [['', 'down'], ['q', 'q']],
+    });
+    const frames = plainText(output);
+    const last = frames.filter((f) => f.includes('ocmux — sessions')).pop();
+    const titleLine = last.split('\n').find((l) => l.startsWith('Title: Beta'));
+    assert.ok(/Title: Beta\s+🔒$/.test(titleLine), 'expected 🔒 pinned for the cursor session Beta');
+  });
+
+  it('aggregates only sessions present in the list', async () => {
+    const pendingOther = () => ({ forms: new Set(['sA']), perms: new Set(['ghost']) });
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: pendingOther },
+      keys: [['q', 'q']],
+    });
+    // 'ghost' is not in the list, so only the question marker appears on rows
+    // and the bell still leads the bar (any listed session waits only if sA).
+    assert.ok(output.some((o) => o.includes('🔔 Enter: switch')), 'expected 🔔 when any listed session waits');
+    const frames = plainText(output);
+    const last = frames.filter((f) => f.includes('ocmux — sessions')).pop();
+    assert.ok(!last.includes('🔒'), 'expected no 🔒 marker for out-of-list sessions');
+  });
+});
+
+describe('sessionMenu answer mode', () => {
+  const sessions = [{ id: 'sA', title: 'Alpha' }];
+
+  const form = {
+    id: 'frm1', sessionID: 'sA', title: 'Model choice',
+    fields: [
+      { key: 'choice', title: 'Which?', type: 'string',
+        options: [{ label: 'Fast', value: 'fast' }, { label: 'Smart', value: 'smart' }], custom: true },
+      { key: 'notes', title: 'Notes', type: 'string' },
+    ],
+  };
+  const gatedForm = {
+    id: 'frm1', sessionID: 'sA', title: 'Model choice',
+    fields: [
+      { key: 'choice', title: 'Which?', type: 'string',
+        options: [{ label: 'Fast', value: 'fast' }, { label: 'Smart', value: 'smart' }] },
+      { key: 'extra', title: 'Extra option', type: 'string',
+        options: [{ label: 'Yes', value: 'yes' }, { label: 'No', value: 'no' }],
+        when: [{ key: 'choice', op: 'eq', value: 'smart' }] },
+    ],
+  };
+  const multiForm = {
+    id: 'frm1', sessionID: 'sA', title: 'Pick any',
+    fields: [
+      { key: 'tags', title: 'Tags', type: 'multiselect',
+        options: [{ label: 'One', value: '1' }, { label: 'Two', value: '2' }, { label: 'Three', value: '3' }] },
+    ],
+  };
+
+  // Responder for the answer flow: the first GET of /session/sA/form returns
+  // `forms`; subsequent GETs return `after` once, then an empty list. Replies
+  // resolve 200 with an empty body (override via replyBody/statusCode).
+  const serveAnswer = (forms, { after = [], replyBody = '{}', replyStatus = 200 } = {}) => {
+    let gets = 0;
+    let servedAfter = false;
+    httpResponder = (opts) => {
+      if (opts.method === 'GET' && opts.path && opts.path.includes('/api/session/sA/form')) {
+        gets++;
+        if (gets === 1) return JSON.stringify({ data: forms });
+        if (!servedAfter) { servedAfter = true; return JSON.stringify({ data: after }); }
+        return JSON.stringify({ data: [] });
+      }
+      if (opts.method === 'POST' && opts.path && opts.path.endsWith('/form/frm1/reply')) {
+        return replyBody;
+      }
+      return null;
+    };
+    httpStatusCode = (opts) => (opts.method === 'POST' && opts.path && opts.path.endsWith('/form/frm1/reply')
+      ? replyStatus
+      : null);
+  };
+  const replyCalls = () => httpCalls.filter((c) => c.opts.method === 'POST' && /\/form\/[^/]+\/reply$/.test(c.opts.path));
+
+  it('enters answer mode on A and submits keyed answers', async () => {
+    serveAnswer([form]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],                   // enter answer mode
+        ['', 'return'],               // select 'Fast' (cursor clamps to the first option)
+        ['', 'down'], ['', 'down'], ['', 'return'], // open the custom input
+        ['x', 'x'], ['y', 'y'], ['', 'return'],     // type 'xy' into the custom answer
+        ['', 'down'], ['', 'return'],               // free-text 'Notes' row → input
+        ['h', 'h'], ['i', 'i'], ['', 'enter'],      // type 'hi' into the notes
+        ['', 'down'], ['', 'return'],               // Submit
+        ['q', 'q'],
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('ocmux — answer: Alpha'), 'expected the answer frame to open');
+    assert.ok(plain.includes('( ) Fast') && plain.includes('( ) Smart'), 'expected the option rows');
+    assert.ok(plain.includes('Type your own answer'), 'expected the custom-answer row');
+    assert.ok(plain.includes('Custom: xy'), 'expected the typed custom answer to be shown');
+    assert.ok(plain.includes('✔ Answers submitted.'), 'expected the success notice after submit');
+    const reply = replyCalls().find((c) => c.opts.path.includes('/form/frm1/reply'));
+    assert.ok(reply, 'expected one reply request');
+    assert.deepStrictEqual(JSON.parse(reply.body), { answer: { choice: 'xy', notes: 'hi' } });
+  });
+
+  it('opens answer mode on Shift+A even when the terminal reports name "a" + shift flag', async () => {
+    serveAnswer([form]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'a', false, true],      // real terminal: Shift+A arrives as name 'a' with shift set
+        ['q', 'q'], ['q', 'q'],       // cancel answer mode, then quit the list
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('ocmux — answer: Alpha'), 'expected answer mode, not the agent switcher');
+    assert.ok(!plain.includes('Agents'), 'the agent switcher must not open');
+  });
+
+  it('re-validates when-conditions live (gated field appears once its gate is answered)', async () => {
+    serveAnswer([gatedForm]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'down'], ['', 'return'], // select 'Smart' (opens the gated group)
+        ['q', 'q'], ['q', 'q'],       // cancel answer mode, then quit the list
+      ],
+    });
+    const answerIdx = output.findIndex((o) => o.includes('ocmux — answer: Alpha'));
+    const before = plainText([output[answerIdx]])[0];
+    assert.ok(!before.includes('Extra option'), 'gated field must stay hidden before answering Smart');
+    const after = plainText(output.slice(answerIdx + 1)).join('\n');
+    assert.ok(after.includes('Extra option'), 'gated field must appear once Smart is chosen');
+    assert.ok(after.includes('( ) Yes'), 'expected the gated field’s options rendered');
+  });
+
+  it('toggles multiple entries on a multiselect field', async () => {
+    serveAnswer([multiForm]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'space'],               // toggle 'One'
+        ['', 'down'], ['', 'space'], // toggle 'Two'
+        ['', 'down'], ['', 'down'], ['', 'return'], // Submit
+        ['q', 'q'],
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('✔ Answers submitted.'), 'expected the success notice');
+    const reply = replyCalls().find((c) => c.opts.path.includes('/form/frm1/reply'));
+    assert.deepStrictEqual(JSON.parse(reply.body), { answer: { tags: ['1', '2'] } });
+  });
+
+  it('shows the server error in the status bar and stays in answer mode', async () => {
+    serveAnswer([form], { replyBody: '{"message":"Invalid answer for field \\"choice\\"."}', replyStatus: 400 });
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'return'],               // select 'Fast'
+        ['', 'down'], ['', 'down'], ['', 'down'], ['', 'down'], // …to Submit (headers auto-skip)
+        ['', 'return'],               // Submit → 400
+        ['q', 'q'], ['q', 'q'],       // cancel answer mode, then quit
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('✖ Invalid answer for field "choice".'), 'expected the server message in the status bar');
+    assert.ok(!plain.includes('✔ Answers submitted.'), 'must NOT report success');
+    assert.ok(plain.includes('ocmux — answer: Alpha'), 'must stay in answer mode after a 400');
+  });
+
+  it('leaves answer mode with a notice when the form was already answered (409)', async () => {
+    serveAnswer([form], { replyBody: '{"message":"Already answered elsewhere."}', replyStatus: 409 });
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'return'],               // select 'Fast'
+        ['', 'down'], ['', 'down'], ['', 'down'], ['', 'down'], // …to Submit (headers auto-skip)
+        ['', 'return'],               // Submit → 409 → back to the list
+        ['q', 'q'],
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('Already answered elsewhere.'), 'expected the 409 message as a notice');
+    const last = plainText(output).filter((f) => f.includes('ocmux — sessions')).pop();
+    assert.ok(last.includes('Enter: switch'), 'expected to return to the session list');
+    assert.ok(!last.includes('ocmux — answer:'), 'must leave answer mode');
+  });
+
+  it('submits each pending form in turn (Form 1/2 → Form 2/2)', async () => {
+    const f1 = {
+      id: 'frm1', sessionID: 'sA', title: 'First',
+      fields: [{ key: 'q1', title: 'Q1', type: 'string', options: [{ label: 'One', value: '1' }] }],
+    };
+    const f2 = {
+      id: 'frm2', sessionID: 'sA', title: 'Second',
+      fields: [{ key: 'q2', title: 'Q2', type: 'string', options: [{ label: 'O', value: 'o' }] }],
+    };
+    // First GET returns both forms; the follow-up returns only the second.
+    let multiGets = 0;
+    httpResponder = (opts) => {
+      if (opts.method === 'GET' && opts.path && opts.path.includes('/api/session/sA/form')) {
+        multiGets++;
+        if (multiGets === 1) return JSON.stringify({ data: [f1, f2] });
+        return JSON.stringify({ data: multiGets === 2 ? [f2] : [] });
+      }
+      if (opts.method === 'POST' && opts.path && opts.path.endsWith('/form/frm1/reply')) return '{}';
+      if (opts.method === 'POST' && opts.path && opts.path.endsWith('/form/frm2/reply')) return '{}';
+      return null;
+    };
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'return'],               // frm1: select 'One'
+        ['', 'down'], ['', 'return'], // frm1: Submit
+        ['', 'return'],               // frm2: select 'O' (cursor clamps to it)
+        ['', 'down'], ['', 'return'], // frm2: Submit
+        ['q', 'q'],
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('Form 1/2 · First'), 'expected the form 1 header');
+    // The follow-up list has ONE remaining form, so the counter prefix drops and
+    // only the second form's own header (title + Q2 field) is shown.
+    assert.ok(plain.includes('Second'), 'expected the second form to render after the first submit');
+    assert.ok(plain.includes('Q2'), 'expected the second form’s field to render');
+    assert.ok(plain.includes('✔ Answers submitted.'), 'expected the final success notice');
+    const bodies = replyCalls().map((c) => JSON.parse(c.body));
+    assert.deepStrictEqual(bodies, [
+      { answer: { q1: '1' } },
+      { answer: { q2: 'o' } },
+    ]);
+  });
+
+  it('ESC cancels answer mode without answering', async () => {
+    serveAnswer([form]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(['sA']), perms: new Set() }) },
+      keys: [
+        ['A', 'A'],
+        ['', 'escape'],
+        ['q', 'q'],
+      ],
+    });
+    const last = plainText(output).filter((f) => f.includes('ocmux — sessions')).pop();
+    assert.ok(last.includes('Enter: switch'), 'expected ESC to return to the session list');
+    assert.strictEqual(replyCalls().length, 0, 'no reply must be sent on cancel');
+  });
+});
+
+describe('sessionMenu permission mode', () => {
+  const sessions = [{ id: 'sA', title: 'Alpha' }];
+
+  // Responder for the permission flow: GET /api/permission/request serves
+  // `requests`; POST .../permission/per1/reply resolves with replyStatus.
+  const servePerm = (requests, { replyStatus = 200 } = {}) => {
+    httpResponder = (opts) => {
+      if (opts.method === 'GET' && opts.path && opts.path.startsWith('/api/permission/request')) {
+        return JSON.stringify({ data: requests });
+      }
+      if (opts.method === 'POST' && opts.path && opts.path.includes('/permission/per1/reply')) {
+        return '';
+      }
+      return null;
+    };
+    httpStatusCode = (opts) =>
+      (opts.method === 'POST' && opts.path && opts.path.includes('/permission/per1/reply') ? replyStatus : null);
+  };
+  const permReplies = () =>
+    httpCalls.filter((c) => c.opts.method === 'POST' && /\/permission\/[^/]+\/reply$/.test(c.opts.path));
+
+  it('opens permission mode on Shift+P and answers "always"', async () => {
+    servePerm([{ id: 'per1', sessionID: 'sA', action: 'read', resources: ['/tmp'], message: 'just testing' }]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(), perms: new Set(['sA']) }) },
+      keys: [
+        ['P', 'p', false, true],       // real terminal: Shift+P arrives as name 'p' with shift set
+        ['a', 'a'],                    // allow always
+        ['q', 'q'],
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('ocmux — permission: Alpha'), 'expected the permission frame to open, not the project switcher');
+    assert.ok(plain.includes('Action: read') && plain.includes('Resources: /tmp'), 'expected the request summary');
+    assert.ok(plain.includes('Message: just testing'), 'expected the request message shown');
+    assert.ok(plain.includes('✔ Permission answered.'), 'expected the success notice');
+    const reply = permReplies().find((c) => c.opts.path.includes('/permission/per1/reply'));
+    assert.ok(reply, 'expected one permission reply request');
+    assert.deepStrictEqual(JSON.parse(reply.body), { decision: 'always' });
+  });
+
+  it('answers each pending request in turn (once, then reject)', async () => {
+    servePerm([
+      { id: 'per1', sessionID: 'sA', action: 'read', resources: ['/tmp'] },
+      { id: 'per2', sessionID: 'sA', action: 'write', resources: ['/etc'] },
+    ]);
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(), perms: new Set(['sA']) }) },
+      keys: [
+        ['P', 'p', false, true],
+        ['o', 'o'],                    // allow once (first request)
+        ['r', 'r'],                    // reject (second request)
+        ['q', 'q'],
+      ],
+    });
+    const replies = permReplies();
+    assert.strictEqual(replies.length, 2, 'expected one reply per request');
+    assert.deepStrictEqual(JSON.parse(replies[0].body), { decision: 'once' });
+    assert.deepStrictEqual(JSON.parse(replies[1].body), { decision: 'reject' });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('✔ Permission answered.'), 'expected the success notice after the last request');
+  });
+
+  it('leaves the request pending on a failed reply and shows the server message', async () => {
+    servePerm([{ id: 'per1', sessionID: 'sA', action: 'read', resources: ['/tmp'] }], { replyStatus: 400 });
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA', opts: { loadPending: () => ({ forms: new Set(), perms: new Set(['sA']) }) },
+      keys: [
+        ['P', 'p', false, true],
+        ['1', '1'],                    // allow once → 400
+        ['h', 'h'],                    // perm help (proves we stayed in perm mode)
+        ['q', 'q'], ['q', 'q'], ['q', 'q'], // help → perm → list → quit
+      ],
+    });
+    const plain = plainText(output).join('\n');
+    assert.ok(plain.includes('✖'), 'expected the rejection in the status bar');
+    assert.strictEqual(permReplies().length, 1, 'expected exactly one (failed) reply');
   });
 });
 
@@ -1430,8 +1925,8 @@ describe('switchMenu (project switcher)', () => {
     const frame = output.find((o) => o.includes('Other'));
     assert.ok(frame, 'expected unfolded session rows');
     const plain = frame.replace(/\x1b\[[0-9;]*m/g, '');
-    assert.ok(plain.includes('▾ proj1'), 'expected the project shown as unfolded');
-    assert.ok(plain.includes('Stored  *  s1'), 'expected the stored session marked');
+    assert.ok(/▾\s+proj1/.test(plain), 'expected the project shown as unfolded');
+    assert.ok(/Stored\s+\*\s+s1/.test(plain), 'expected the stored session marked');
     assert.deepStrictEqual(opened, [['/proj1', 'sX']]);
     assert.strictEqual(fsWrites.length, 0, '.ocmux.json must stay untouched (view selector)');
   });
@@ -1458,7 +1953,7 @@ describe('switchMenu (project switcher)', () => {
     const plain = output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, '')).join('\n');
     assert.ok(plain.includes('! proj1: no server recorded'), 'expected a fold error, not a hang');
     const unfolded = output.find((o) => o.includes('no server recorded'));
-    assert.ok(unfolded && unfolded.includes('▾ proj1'), 'expected the project shown as open');
+    assert.ok(unfolded && /▾\s+proj1/.test(unfolded.replace(/\x1b\[[0-9;]*m/g, '')), 'expected the project shown as open');
   });
 
   it('help explains the mode: inspect-only vs --all-projects', async () => {
@@ -1467,6 +1962,33 @@ describe('switchMenu (project switcher)', () => {
     const multi = await driveSwitchMenu(rows, [['h', 'h'], ['q', 'q'], ['q', 'q']], { allProjects: true });
     assert.ok(multi.output.some((o) => o.includes('--all-projects: selecting moves the picker')));
     assert.ok(multi.output.some((o) => o.includes('ocmux — project switcher (all projects)')));
+  });
+
+  it('carries pending markers: aggregate on folded project rows, per-session when unfolded', async () => {
+    httpResponder = (opts) => (opts.path && opts.path.startsWith('/api/session')
+      ? JSON.stringify({ data: [
+          { id: 'sX', title: 'Other', time: {} },
+          { id: 's1', title: 'Stored', time: {} },
+        ] })
+      : null);
+    const pending = new Map([
+      ['/proj1', { forms: new Set(['sX']), perms: new Set(['s1']) }],
+    ]);
+    const { output } = await driveSwitchMenu(
+      [{ dir: '/proj1', status: 'alive', session: 's1', index: 1, server: 'http://server' }],
+      [[' ', 'space'], ['q', 'q']],
+      { pending },
+    );
+    const frames = plainText(output);
+    // The still-folded project row (first rendered frame) carries both marker
+    // columns, ❓ and 🔒, side by side.
+    const folded = frames.find((f) => f.includes('proj1'));
+    assert.ok(folded.includes('❓🔒'), 'expected the ❓+🔒 columns on the folded project row');
+    const plain = frames.join('\n');
+    const sXline = plain.split('\n').find((l) => l.includes('sX'));
+    const s1line = plain.split('\n').find((l) => l.trimEnd().endsWith('s1'));
+    assert.ok(sXline.includes('❓'), 'expected ❓ on the session with a pending question');
+    assert.ok(s1line.includes('🔒'), 'expected 🔒 on the session with a pending permission');
   });
 });
 

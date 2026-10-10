@@ -34,7 +34,11 @@ is the durable source of truth:
 
 `directory`, `session`, and `server` route prompts. `annotations` stores optional
 per-session reminders. `broadcast` exists only with at least two selected main
-sessions. Writes use a temporary file plus atomic rename.
+sessions and is removed as soon as broadcast mode ends (`Enter`/`ESC`/`q`) or any
+session is picked in the normal switcher. On open it is validated against the
+live session list: a valid list starts the picker directly in broadcast mode,
+while a stale/invalid one is cleared and the normal state shown. Writes use a
+temporary file plus atomic rename.
 
 No tmux socket, pane ID, process ID, or TUI assignment belongs in project state.
 Those values are ephemeral and machine-local.
@@ -178,12 +182,64 @@ TUI refresh, and list highlight); deleting any other session leaves the current
 selection unchanged. In broadcast mode `d` deletes just the cursor session
 while `D` (Shift+d) deletes every selected session at once — after confirming,
 broadcast mode ends and the row under the cursor becomes the new current.
+In broadcast mode `Enter` switches to the cursor session and ends broadcast,
+while `ESC`/`q` cancel it; every exit clears the persisted `broadcast` list, as
+does picking any session in the normal switcher, so a stale selection never
+survives to keep `agentp` broadcasting. On start the picker adopts a stored
+`broadcast` only when at least two of its ids still name listed sessions; it then
+opens in broadcast mode (re-anchoring on a selected session when the stored
+`session` is not in the list), and otherwise clears the invalid list before
+showing the normal state.
 Interactive prompts (create/rename/reminder/delete/delete-all) take over the
 status bar and flip its background from brown to light yellow — the same color
 as the session-list pointer — so an active question is immediately visible.
 The broadcast info line (`Broadcast to sessions: …`) never wraps: it holds up
 to 480 characters of names (or the terminal width, whichever is smaller), and
 an oversized selection is truncated from the beginning with a leading `...`.
+
+**Pending-answer awareness.** While the picker is open it re-polls the project
+every 2 seconds (`GET /api/form` and `GET /api/permission/request`, both
+location-scoped with the `location[directory]=…` deepObject parameter) and
+tracks which session ids currently await an agent question (a form) or a
+permission reply. Sessions carry two independent marker columns — ❓ (question)
+and 🔒 (permission) — each a fixed 2-column cell whose placeholder keeps rows
+aligned when a session has no marker. A single 🔔 leads the status bar (forced
+left-aligned) whenever any listed session is waiting, and the cursor session's
+marker columns are pinned to the info panel's top-right corner (the Title line
+is padded out to `cols - cells.length`).
+Failures of the poll degrade silently: the previous sets stay and the next poll
+retries.
+
+**Answer mode (`A`).** When the cursor session has a pending form, `A` fetches
+`GET /api/session/{id}/form` and switches to a dedicated answer screen. It
+renders each visible field as a header plus its option rows; multi-select
+fields toggle extra entries, boolean fields render Yes/No, choice fields with
+`custom` get a "Type your own answer" row, and option-less (free-text/numeric)
+fields open the status-bar input directly. Fields with `hidden` or `when`
+conditions are filtered live over the answers chosen so far (a gated group
+appears the moment its gate question is answered). The final `Submit answers
+(n/m answered)` row posts the keyed answer map
+(`POST /api/session/{id}/form/{formID}/reply`, `{answer: {fieldKey: value}}`).
+On success the remaining forms are re-fetched: the next pending form is
+answered in turn, or the picker returns to the session list with a
+`✔ Answers submitted.` notice. A 400 rejection shows the server's message
+(`message` or `error.message` from the body) in the status bar and stays in
+answer mode for correction; a 409 (already settled elsewhere) reports the
+server message and returns to the list. `h` toggles the answer-mode help,
+`q`/`ESC` cancels without answering, `Ctrl+C` exits.
+
+**Permission answering (`P`).** Permissions are answered from a dedicated
+screen opened with `P` on a session with a pending permission request (🔒
+marker). It re-reads the location-scoped `GET /api/permission/request` list
+(currently answered requests settle out of it) and filters to the cursor
+session. Each request is shown with its action, resources and optional message;
+one key answers it — `o`/`1` allow once, `a` allow always, `r` reject — posting
+`POST /api/session/{sessionID}/permission/{requestID}/reply` with
+`{decision: 'once' | 'always' | 'reject'}`. Success drops the request and
+advances to the next; after the last it returns to the session list with a
+`✔ Permission answered.` notice. A rejected reply (400) shows the server's
+message in the status bar and stays; `h` toggles a help screen, `q`/`ESC` leaves
+everything pending, `Ctrl+C` exits.
 
 ### `ocmux session <id|title> [dir]`
 
@@ -198,6 +254,12 @@ that are locations but not separate OpenCode project records.
 By default the switcher only inspects sessions through the routed TUI and never
 writes another project's state. `--all-projects` lets the outer session picker
 move to another project and subsequently update that project's state.
+
+The switcher shows the same pending-answer awareness as the session picker:
+session rows carry their own ❓/🔒 marker columns, and a folded project row
+shows them aggregated over all of its sessions' pending forms/permissions
+(fetched once per project when the switcher opens, from each project's recorded
+server).
 
 ### `ocmux list [-l]`
 

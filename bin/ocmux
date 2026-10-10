@@ -9,7 +9,7 @@ const child_process = require('child_process');
 const os = require('os');
 const { tuiArgs, switchTui } = require('../lib/ocmux');
 const tuiRegistry = require('../lib/tui-registry');
-const { listSessions, listProjects: listOpenCodeProjects, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions, getSession } = require('../lib/opencode');
+const { listSessions, listProjects: listOpenCodeProjects, createSession, createSessionWithModel, updateSession, listModels, switchModel, resolveModelRef, getAuthHeaders, sortSessionsByRecency, deleteSession, listAgents, getActiveSessions, getSession, listPendingForms, listSessionForms, replyToForm, listPendingPermissions, replyToPermission } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
 
 // ---------------------------------------------------------------------------
@@ -213,6 +213,23 @@ const BROWN = '\x1b[33m';            // text: brown/dark-yellow
 const BAR_BG = '\x1b[30;43m';        // title/status bar: black on brown
 const LIGHT_YELLOW = '\x1b[1;33m';   // text: light-yellow (bold brown)
 const QUESTION_BG = '\x1b[30;103m';  // question/input bar: black on light-yellow
+
+// Pending-state markers shown in the session list rows, the info panel and the
+// project switcher. Two INDEPENDENT columns — ❓ pending agent question(s) and
+// 🔒 pending permission request(s) — each always reserves a 2-column slot
+// (glyph or 2-space placeholder) so every row stays aligned with or without a
+// marker. The status bar uses a single 🔔 when any listed session waits.
+const GLYPH_FORMS = '❓';     // pending agent question (pending form)
+const GLYPH_PERMS = '🔒';    // pending permission request
+const GLYPH_BELL = '🔔';     // status bar: at least one marker in the list
+const CELL_NONE = '  ';      // placeholder reserving one absent marker column
+const PENDING_POLL_MS = 2000; // how often the open picker re-checks pending state
+
+// The two marker columns for a session/project: ❓ and/or 🔒, each column fixed
+// at 2 columns wide so rows stay aligned whether or not a marker is present.
+function pendingCells(hasForms, hasPerms) {
+  return (hasForms ? GLYPH_FORMS : CELL_NONE) + (hasPerms ? GLYPH_PERMS : CELL_NONE);
+}
 
 // ── '/' incremental search for interactive lists ──────────────────────────
 // Filter `items` by `pattern`: case-insensitive, space-separated tokens that
@@ -421,14 +438,23 @@ function labeledLine(label, value, cols, labelColor = '\x1b[1m') {
 // grid. Fields are ALWAYS present (placeholders when unknown).
 // Labels are brown (the same shade as the title/status bars); when `highlight`
 // is true (the cursor is on the session currently selected in the TUI) they are
-// light-yellow instead.
-function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false) {
+// light-yellow instead. `pending` (a 2-column-wide marker glyph) is pinned to
+// the top-right corner of the panel so the pending state of the CURSOR session
+// is visible at a glance.
+function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false, pending = '') {
   if (!s) return [];
   const labelColor = highlight ? LIGHT_YELLOW : BROWN;
   const title = (s.title && s.title.trim()) || 'Untitled';
   const location = (s.location && s.location.directory) || 'Unknown';
+  // When pending markers are shown they are pinned to the top-right corner:
+  // pad the Title line up to `cols - pending.length` (pending is the 4-column
+  // two-marker cell, or '' when nothing is pending) and append them.
+  const titleLine = `${labelColor}Title:\x1b[0m ${title}`;
+  const firstLine = pending
+    ? titleLine + ' '.repeat(Math.max(0, cols - pending.length - titleLine.length)) + pending
+    : titleLine;
   const out = [
-    labeledLine('Title', title, cols, labelColor),
+    firstLine,
     labeledLine('Location', location, cols, labelColor),
   ];
 
@@ -539,20 +565,26 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 
 // Render an interactive session picker (alt screen). Sorted most-recently-viewed
 // first by the caller. Keys: Enter/Space switch (menu stays open), n create,
-// r rename, d delete (confirm), a annotate, p switch project, h help,
+// r rename, d delete (confirm), a annotate, p switch project, A answer the
+// cursor session's pending questions, P answer its permission requests, h help,
 // q/Ctrl+C quit. Input mode offers readline-style caret editing.
 // Resolves on quit (null) or with the string 'switch-project' (caller then runs
 // the project switcher and re-invokes this picker for the new project).
 // `dir` names the project this list belongs to — it heads the title bar so a
 // multi-project run always says which project's sessions are on screen.
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [] } = {}) {
+// `loadPending` (optional async () => ({ forms: Set, perms: Set })) supplies the
+// session ids that currently await an agent question (pending form) or a
+// permission reply. When provided the picker polls it every PENDING_POLL_MS and
+// renders the ❓/🔒 marker columns; `A` answers the cursor session's questions
+// and `P` its pending permission requests (allow once/always, reject).
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [], loadPending, broadcast = null } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
     let rows = [...sessions];
     let current = currentSession;
     let cursor = 0;
-    let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input'
+    let mode = 'normal';        // 'normal' | 'help' | 'confirm' | 'input' | 'perm' | 'perm-help'
     let confirmDel = null;
     let confirmAll = false;     // 'D' deletes every broadcast-selected session
     let input = null;           // { label, value, kind, caret }
@@ -568,17 +600,65 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let view = rows;              // rows filtered by `search` (what is displayed)
     let inspected = false;        // broadcast inspection moved the TUI off `current`
 
+    // Adopt a persisted broadcast selection, but only when it is still valid:
+    // at least two of its ids must name existing sessions in this project's
+    // list (main sessions only — the caller already excluded child sessions).
+    // A stale list (too few entries, or ids that no longer exist) is cleared and
+    // the correction written back, so the picker never shows a normal list while
+    // agentp would still broadcast to the old one.
+    const persistedBroadcast = (Array.isArray(broadcast) ? broadcast : [])
+      .map(String)
+      .filter((id, i, arr) => arr.indexOf(id) === i)
+      .filter((id) => rows.some((s) => String(s.id) === id));
+    if (persistedBroadcast.length >= 2) {
+      broadcastSel = new Set(persistedBroadcast);
+      mode = 'broadcast';
+      // Anchor the picker (and the TUI) on a session that is actually selected.
+      if (!broadcastSel.has(String(current))) {
+        current = persistedBroadcast[0];
+        if (onInspectSession) onInspectSession(current);
+      }
+      // Write back when validation dropped dead or duplicate ids.
+      if (onBroadcastChange && persistedBroadcast.length !== (Array.isArray(broadcast) ? broadcast.length : 0)) {
+        onBroadcastChange(persistedBroadcast);
+      }
+    } else if (onBroadcastChange && Array.isArray(broadcast) && broadcast.length > 0) {
+      // Stale or invalid persisted list: clear it so agentp stops broadcasting.
+      onBroadcastChange([]);
+    }
+
+    // Pending agent questions / permission replies, polled via `loadPending`.
+    // Each is a Set of session ids that currently await that thing.
+    let pendingForms = new Set();
+    let pendingPerms = new Set();
+    let pendingBusy = false;
+    let pendingTimer = null;
+    // Answer mode ('A') state: the pending forms of the cursor session being
+    // answered one at a time, the answers chosen so far and the flat item list.
+    let answer = null;
+    // Permission mode ('P') state: the pending permission request(s) of the
+    // cursor session being answered one at a time.
+    let perm = null;
+    // The two marker columns (❓ and/or 🔒), always 4 columns wide — each in a
+    // fixed 2-column slot — so rows stay aligned with or without a marker.
+    const cellsOf = (id) => pendingCells(pendingForms.has(String(id)), pendingPerms.has(String(id)));
+
     const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
     const helpLines = [
       'Enter            switch to the selected session (stays open)',
       'Space            start BROADCAST: add the selected session to the current one',
-      '                 (Space toggles each session; Enter keeps the selection)',
+      '                 (Space toggles each session; Enter ends broadcast and',
+      '                  switches; ESC/q also end it and clear the selection)',
       'n                create a new session (type a name, Enter; blank = auto)',
       'r                rename the selected session (edit in place; ESC cancels)',
       'R (Shift+r)      set a REMINDER for the selected session (sent in front of',
       '                  every agentp prompt; blank clears)',
       'd                delete the selected session (then y/N to confirm)',
       'D (Shift+d)      in BROADCAST: delete ALL selected sessions (then y/N)',
+      'A                answer pending agent question(s) of the selected session',
+      '                 (only when it shows a ❓ marker)',
+      'P                answer pending permission request(s) of the selected session',
+      '                 (only when it shows a 🔒 marker)',
       'a                switch the AGENT of the selected session',
       'm                switch the MODEL of the selected session',
       'p                open the project switcher',
@@ -598,6 +678,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       process.stderr.write('\x1b[?25h');
       process.stderr.write('\x1b[?1049l');
       if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
+      if (pendingTimer) { clearInterval(pendingTimer); pendingTimer = null; }
       process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
       process.stdin.pause();
@@ -619,12 +700,20 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const draw = () => {
+      if (answer && (mode === 'answer' || mode === 'answer-help' || (mode === 'input' && input && input.kind === 'answer'))) {
+        drawAnswer();
+        return;
+      }
+      if (perm && (mode === 'perm' || mode === 'perm-help')) {
+        drawPerm();
+        return;
+      }
       if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
         let out = '\x1b[2J\x1b[H';
         if (mode === 'broadcast-help') {
           out += 'ocmux broadcast mode — help\n\n';
           out += '  Space            select/deselect the cursor session\n';
-          out += '  Enter            keep the broadcast selection; switch TUI to cursor\n';
+          out += '  Enter            end broadcast (clear the selection); switch TUI to cursor\n';
           out += '  m                switch the model for ALL selected sessions\n';
           out += '  d                delete the cursor session (with confirmation)\n';
           out += '  D (Shift+d)      delete ALL selected sessions (with confirmation)\n';
@@ -692,10 +781,15 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           names = '... ' + keep;
         }
         infoLines = [bcHead + names];
-        footer = 'Enter: switch · Space: toggle · d: delete · D: delete all · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
+        footer = 'Enter: switch (ends) · Space: toggle · d: delete · D: delete all · m: model · /: search · h: help · q: cancel · Ctrl+C: quit';
       } else {
         const selIsCurrent = !!(selected && String(selected.id) === String(current));
-        infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent);
+        // The cursor session's marker columns (❓/🔒) are pinned to the info
+        // panel's top-right corner ('' when nothing is pending).
+        const selF = selected && pendingForms.has(String(selected.id));
+        const selP = selected && pendingPerms.has(String(selected.id));
+        const selPending = (selF || selP) ? pendingCells(selF, selP) : '';
+        infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent, selPending);
       }
       // 'd'/n/r/R prompts take over the status bar (previously an easy-to-miss
       // line at the bottom of the list) with their essential keys on the right.
@@ -720,6 +814,19 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       } else {
         footer = searchFooter(search, footer);
       }
+      // Pending-response awareness: when any session in this list is waiting
+      // for an agent question and/or a permission reply, lead the status bar
+      // with the bell (🔔) and flip the bar left-aligned so it sits at the very
+      // beginning.
+      if (!questionBar) {
+        const anyF = rows.some(r => pendingForms.has(String(r.id)));
+        const anyP = rows.some(r => pendingPerms.has(String(r.id)));
+        const bell = (anyF || anyP) ? GLYPH_BELL : '';
+        if (bell && footer.length < cols - 4) {
+          footer = `${bell} ${footer}`;
+          footerLeft = true;
+        }
+      }
       process.stderr.write(renderList({
         // The project name heads the title so you always know which project's
         // sessions are listed (matters when --all-projects moves you around).
@@ -733,7 +840,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
           const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
-          const text = `${sel}${spin}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
+          const text = `${sel}${spin}${cellsOf(s.id)}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
           // Brown for the session currently selected in the TUI window.
           return String(s.id) === String(current) ? `${BROWN}${text}\x1b[0m` : text;
         },
@@ -746,8 +853,8 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       }));
     };
 
-    const startInput = (prompt, hint, value, kind) => {
-      input = { prompt, hint, value, kind, caret: value.length };
+    const startInput = (prompt, hint, value, kind, targetKey) => {
+      input = { prompt, hint, value, kind, targetKey, caret: value.length };
       mode = 'input';
       draw();
     };
@@ -778,6 +885,11 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     };
 
     const applyPick = (row) => {
+      // Selecting a session always drops any persisted broadcast list: a stale
+      // 'broadcast' in .ocmux.json would otherwise keep agentp sending prompts
+      // to sessions that are no longer selected.
+      persistBroadcast([]);
+      broadcastSel = new Set();
       Promise.resolve(onPick ? onPick(row) : null).then((created) => {
         if (row.new && created) {
           rows.unshift(created);
@@ -796,6 +908,404 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         process.stderr.write(`\nError: ${err.message}\n`);
         confirmDel = null;
         confirmAll = false;
+        draw();
+      });
+    };
+
+    // ── Pending-response polling (❓/🔒 marker columns) ─────────────
+    // Re-read `loadPending` every PENDING_POLL_MS while the picker is open so
+    // the markers appear/disappear without re-opening the menu. Errors degrade
+    // gracefully: the previous set stays and the next poll retries.
+    const refreshPending = () => {
+      if (!loadPending || pendingBusy) return Promise.resolve();
+      pendingBusy = true;
+      return Promise.resolve(loadPending()).then((p) => {
+        pendingForms = (p && p.forms) || new Set();
+        pendingPerms = (p && p.perms) || new Set();
+        pendingBusy = false;
+        if (!done) draw();
+      }).catch(() => { pendingBusy = false; });
+    };
+
+    // ── Answer mode (A): answer the agent's pending form(s) ─────────
+    // Field applicability honours `hidden` and `when` conditions over the
+    // answers chosen SO FAR (live re-validation: groups appear/disappear as you
+    // answer their gate questions).
+    const fieldVisible = (field) => {
+      if (!field || field.hidden) return false;
+      if (!Array.isArray(field.when) || field.when.length === 0) return true;
+      return field.when.every((w) => {
+        const got = answer.answers[w.key];
+        if (got === undefined || got === null) return false;
+        // For multiselect gates `eq` means the value is among the chosen ones.
+        const matches = Array.isArray(got) ? got.includes(w.value) : got === w.value;
+        return (w.op === 'neq') ? !matches : matches;
+      });
+    };
+    const fieldOptions = (field) => {
+      if (field.type === 'boolean') {
+        return [{ label: 'Yes', value: true }, { label: 'No', value: false }];
+      }
+      if (field.type === 'string' || field.type === 'multiselect') {
+        return Array.isArray(field.options) ? field.options : [];
+      }
+      return [];
+    };
+    const knownValues = (field) => new Set((field.options || []).map(o => String(o.value)));
+    // The custom text (if any) behind "Type your own answer" — distinguishes a
+    // typed answer from a chosen option for single-choice and multiselect.
+    const customText = (field) => {
+      const v = answer.answers[field.key];
+      if (v === undefined || v === null) return null;
+      if (Array.isArray(v)) {
+        const extra = v.filter(x => !knownValues(field).has(String(x)));
+        return extra.length ? extra.join(', ') : null;
+      }
+      return knownValues(field).has(String(v)) ? null : String(v);
+    };
+    const isSelected = (field, opt) => {
+      const v = answer.answers[field.key];
+      if (v === undefined || v === null) return false;
+      if (Array.isArray(v)) return v.some(x => String(x) === String(opt.value));
+      return String(v) === String(opt.value);
+    };
+    const toggleSelect = (field, opt) => {
+      if (field.type === 'multiselect') {
+        const arr = Array.isArray(answer.answers[field.key]) ? [...answer.answers[field.key]] : [];
+        const i = arr.findIndex(x => String(x) === String(opt.value));
+        if (i >= 0) arr.splice(i, 1); else arr.push(opt.value);
+        answer.answers[field.key] = arr;
+      } else {
+        answer.answers[field.key] = opt.value;
+      }
+      answer.error = null;
+    };
+    // Save a typed value (custom / free-text / numeric field). No client-side
+    // validation beyond numeric coercion — the server decides and its message
+    // is shown in the status bar.
+    const applyAnswerValue = (fieldKey, raw) => {
+      const form = answer.forms[answer.index];
+      const field = (form.fields || []).find(f => f.key === fieldKey);
+      const v = raw.trim();
+      if (!v) {
+        delete answer.answers[fieldKey];
+      } else if (field && (field.type === 'number' || field.type === 'integer')) {
+        const num = Number(v);
+        answer.answers[fieldKey] = Number.isNaN(num) ? v : num;
+      } else if (field && field.type === 'multiselect') {
+        // Keep the built-in selections and replace any custom entries with the
+        // newly typed value.
+        const known = knownValues(field);
+        const base = Array.isArray(answer.answers[fieldKey]) ? answer.answers[fieldKey].filter(x => known.has(String(x))) : [];
+        base.push(v);
+        answer.answers[fieldKey] = base;
+      } else {
+        answer.answers[fieldKey] = v;
+      }
+      answer.error = null;
+    };
+    // Prefill `default` values once per form, before the user starts editing
+    // (rebuilt answers never clobber what was already chosen).
+    const seedDefaults = () => {
+      const form = answer.forms[answer.index];
+      if (!form || !Array.isArray(form.fields)) return;
+      for (const f of form.fields) {
+        if (fieldVisible(f) && f.default !== undefined && f.default !== null && answer.answers[f.key] === undefined) {
+          answer.answers[f.key] = f.default;
+        }
+      }
+    };
+    // Flat list of *visible* rows for the current form: a section header per
+    // applicable field, one row per option (or a single type-in row for
+    // free-text/numeric fields), then the Submit row.
+    const buildAnswerItems = (form) => {
+      const items = [];
+      for (const field of (form.fields || []).filter(fieldVisible)) {
+        if (field.type === 'external') {
+          items.push({ kind: 'external', field });
+          continue;
+        }
+        items.push({ kind: 'field', field });
+        const opts = fieldOptions(field);
+        for (const opt of opts) items.push({ kind: 'option', field, opt });
+        const wantTypedRow = opts.length === 0 || ((field.type === 'string' || field.type === 'multiselect') && field.custom);
+        if (wantTypedRow) {
+          items.push({ kind: 'option', field, opt: null, custom: !!field.custom, inputOnly: opts.length === 0 });
+        }
+      }
+      items.push({ kind: 'submit' });
+      return items;
+    };
+    const answerItems = () => {
+      const form = answer.forms[answer.index];
+      return form ? buildAnswerItems(form) : [];
+    };
+    const isAnswerClickable = (item) => item && (item.kind === 'option' || item.kind === 'submit');
+    // After a `when` re-validation some rows disappear; keep the cursor on a
+    // selectable row (called from drawAnswer so the frame always self-heals).
+    const clampAnswerCursor = () => {
+      const items = answerItems();
+      if (!items.length) { answer.cursor = 0; return; }
+      if (isAnswerClickable(items[answer.cursor])) return;
+      for (let off = 1; off < items.length; off++) {
+        const i = (answer.cursor + off) % items.length;
+        if (isAnswerClickable(items[i])) { answer.cursor = i; return; }
+      }
+      answer.cursor = 0;
+    };
+    const moveAnswerCursor = (delta) => {
+      const items = answerItems();
+      const n = items.length;
+      if (!n) return;
+      let i = answer.cursor;
+      do {
+        i = (i + delta + n) % n;
+      } while (!isAnswerClickable(items[i]) && i !== answer.cursor);
+      answer.cursor = i;
+      draw();
+    };
+    const activateOption = (item) => {
+      if (item.inputOnly || item.custom) {
+        // Open the text input (custom answer / free-text / numeric field).
+        const label = item.field.title || item.field.key;
+        const cur = (item.inputOnly && answer.answers[item.field.key] !== undefined)
+          ? String(answer.answers[item.field.key])
+          : (item.custom ? (customText(item.field) || '') : '');
+        startInput(`Answer for "${label}":`, 'Enter: save · Esc: cancel', cur, 'answer', item.field.key);
+        return;
+      }
+      toggleSelect(item.field, item.opt);
+      draw();
+    };
+    const submitAnswer = () => {
+      if (answer.busy) return;
+      const form = answer.forms[answer.index];
+      if (!form) return;
+      answer.busy = true;
+      answer.error = null;
+      draw();
+      replyToForm(server, form.sessionID, form.id, answer.answers).then(() => {
+        answer.busy = false;
+        return listSessionForms(server, form.sessionID).then((forms) => {
+          if (!forms || forms.length === 0) {
+            // All questions answered — back to the session list (marker clears
+            // after the pending set is re-polled).
+            answer = null;
+            mode = 'normal';
+            notices.push('✔ Answers submitted.');
+            return refreshPending();
+          }
+          // Move on to the session's next pending form.
+          answer.forms = forms;
+          answer.index = 0;
+          answer.answers = {};
+          answer.cursor = 0;
+          answer.error = null;
+          seedDefaults();
+          draw();
+          return refreshPending();
+        });
+      }).catch((err) => {
+        answer.busy = false;
+        if (err && err.status === 409) {
+          // Answered elsewhere (e.g. from the TUI) while we were editing.
+          answer = null;
+          mode = 'normal';
+          notices.push(err.message || 'Already answered.');
+          return refreshPending();
+        }
+        // The server rejected the answers — surface its message in the status
+        // bar and stay in answer mode so the user can adjust.
+        answer.error = (err && err.message) || 'Failed to submit answers.';
+        draw();
+      });
+    };
+    const startAnswer = (target) => {
+      listSessionForms(server, target.id).then((forms) => {
+        if (!forms || forms.length === 0) { draw(); return; }
+        answer = {
+          forms,
+          index: 0,
+          answers: {},
+          cursor: 0,
+          error: null,
+          busy: false,
+          title: (target.title && target.title.trim()) || target.id || 'session',
+        };
+        seedDefaults();
+        mode = 'answer';
+        draw();
+      }).catch(commandErr);
+    };
+    const renderAnswerItem = (item, cols) => {
+      if (item.kind === 'field') {
+        const label = (item.field.title || item.field.key).slice(0, Math.max(4, cols - 6));
+        const req = item.field.required ? ' *' : '';
+        return `${BROWN}▸ ${label}${req}\x1b[0m`;
+      }
+      if (item.kind === 'external') {
+        const label = (item.field.title || item.field.key).slice(0, Math.max(4, cols - 6));
+        return `  ⛓ ${label} (external link, can't be answered here)`;
+      }
+      if (item.kind === 'submit') {
+        const fields = answerItems().filter(i => i.kind === 'field');
+        const done = fields.filter(i => answer.answers[i.field.key] !== undefined).length;
+        const total = fields.length;
+        const tally = total > 0 ? ` (${done}/${total} answered)` : '';
+        return `  ${done === total && total > 0 ? '✓' : ' '} Submit answers${tally}`;
+      }
+      // Option / custom / free-text row.
+      let selected;
+      let label;
+      if (item.custom) {
+        const cv = customText(item.field);
+        selected = cv !== null;
+        label = selected ? `Custom: ${cv}` : 'Type your own answer';
+      } else if (item.inputOnly) {
+        const v = answer.answers[item.field.key];
+        selected = v !== undefined;
+        label = selected ? String(v) : (item.field.placeholder || 'Type your answer');
+      } else {
+        selected = isSelected(item.field, item.opt);
+        label = item.opt.label;
+      }
+      const prefix = selected ? '(•)' : '( )';
+      return `  ${prefix} ${String(label).slice(0, Math.max(4, cols - 10))}`;
+    };
+    const drawAnswer = () => {
+      let out = '\x1b[2J\x1b[H';
+      if (mode === 'answer-help') {
+        out += 'ocmux — answer mode help\n\n';
+        out += '  j / k, arrows    move between the questions and their options\n';
+        out += '  Space / Enter    select an option (extra entries toggle on\n';
+        out += '                   multi-select questions); on "Type your own\n';
+        out += '                   answer" / free-text rows it opens the input\n';
+        out += '  Submit answers   the last row: send all answers in one request\n';
+        out += '  h                toggle this help\n';
+        out += '  q / ESC          cancel WITHOUT answering (back to the list)\n';
+        out += '  Ctrl+C           quit ocmux\n';
+        out += '\nPress any key to return.\n';
+        process.stderr.write(out);
+        return;
+      }
+      const form = answer.forms[answer.index];
+      const items = answerItems();
+      clampAnswerCursor();
+      const cols = process.stdout.columns || 80;
+      const termRows = process.stdout.rows || 24;
+      // Title bar + form line + status bar eat 3 rows.
+      const viewHeight = Math.max(1, termRows - 3);
+      const win = windowFor(items.length, answer.cursor, viewHeight);
+      const title = `ocmux — answer: ${answer.title}`.slice(0, cols);
+      out += BAR_BG + centerIn(title, cols) + '\x1b[0m\n';
+      const formLine = (answer.forms.length > 1 ? `Form ${answer.index + 1}/${answer.forms.length} · ` : '')
+        + (form && form.title ? form.title : '');
+      out += formLine ? `${BROWN}${formLine.slice(0, cols)}\x1b[0m\n` : '\n';
+      for (let i = win.start; i < win.start + win.count && i < items.length; i++) {
+        const item = items[i];
+        const clickable = isAnswerClickable(item);
+        const ptr = (clickable && i === answer.cursor) ? `${LIGHT_YELLOW}▶\x1b[0m ` : '  ';
+        out += ptr + renderAnswerItem(item, cols) + '\n';
+      }
+      for (let i = win.start + win.count; i < viewHeight; i++) out += '\n';
+      if (mode === 'input' && input) {
+        out += QUESTION_BG + padLeft(`${input.prompt} ${renderInputValue(input.value)}`, cols) + '\x1b[0m\n';
+        return;
+      }
+      let footer;
+      if (answer.busy) footer = 'Submitting answers…';
+      else if (answer.error) footer = `✖ ${answer.error}`;
+      else footer = 'Space/Enter: select · h: help · q: cancel · Ctrl+C: quit';
+      out += BAR_BG + (footer.length > cols ? footer.slice(0, cols) : padLeft(footer, cols)) + '\x1b[0m\n';
+      process.stderr.write(out);
+    };
+
+    // ── Permission-answer screen ('P') ────────────────────────────────
+    // Each pending permission request of the cursor session is answered in
+    // turn: o/1 allow once, a allow always, r reject. drawPerm renders the
+    // request summary; the decision keys post the reply and advance.
+    const drawPerm = () => {
+      let out = '\x1b[2J\x1b[H';
+      if (mode === 'perm-help') {
+        out += 'ocmux — permission help\n\n';
+        out += '  o / 1            allow this request ONCE\n';
+        out += '  a                allow ALWAYS (remembered for the session)\n';
+        out += '  r                REJECT\n';
+        out += '  h                toggle this help\n';
+        out += '  q / ESC          back to the session list (leave it pending)\n';
+        out += '  Ctrl+C           quit ocmux\n';
+        out += '\nPress any key to return.\n';
+        process.stderr.write(out);
+        return;
+      }
+      const cols = process.stdout.columns || 80;
+      const termRows = process.stdout.rows || 24;
+      const req = perm.list[perm.cursor];
+      out += BAR_BG + centerIn(`ocmux — permission: ${perm.title}`, cols) + '\x1b[0m\n';
+      const countLine = perm.list.length > 1 ? `Request ${perm.cursor + 1}/${perm.list.length}` : '';
+      out += (countLine ? `${BROWN}${countLine.slice(0, cols)}\x1b[0m\n` : '\n');
+      if (req) {
+        out += `  Action: ${String(req.action || 'unknown').slice(0, cols - 9)}\n`;
+        const res = (req.resources || []).join(', ') || '(none)';
+        out += `  Resources: ${res.slice(0, cols - 12)}\n`;
+        if (req.message) out += `  Message: ${String(req.message).slice(0, cols - 10)}\n`;
+        if (req.save && req.save.length) out += `  Remember: ${req.save.join(', ').slice(0, cols - 11)}\n`;
+      }
+      const bodyCount = req ? 2 + (req.message ? 1 : 0) + (req.save && req.save.length ? 1 : 0) : 0;
+      for (let i = 2 + bodyCount; i < termRows - 1; i++) out += '\n';
+      let footer;
+      if (perm.busy) footer = 'Replying…';
+      else if (perm.error) footer = `✖ ${perm.error}`;
+      else footer = 'o: allow once · a: allow always · r: reject · h: help · q: back · Ctrl+C: quit';
+      out += BAR_BG + (footer.length > cols ? footer.slice(0, cols) : padLeft(footer, cols)) + '\x1b[0m\n';
+      process.stderr.write(out);
+    };
+
+    // Open permission mode for the cursor session: fetch the location's pending
+    // permission requests and keep only this session's (the poll only tracks
+    // ids, not the full request objects).
+    const startPerm = (target) => {
+      listPendingPermissions(server, dir).then((all) => {
+        const list = (all || []).filter((r) => String(r.sessionID) === String(target.id));
+        if (!list.length) { notices.push('No pending permission to answer.'); draw(); return; }
+        perm = {
+          list,
+          cursor: 0,
+          error: null,
+          busy: false,
+          title: (target.title && target.title.trim()) || target.id || 'session',
+        };
+        mode = 'perm';
+        draw();
+      }).catch(commandErr);
+    };
+
+    // Post a decision for the current permission request; on success drop it
+    // from the list and advance to the next (or return to the session list
+    // once all are answered).
+    const submitPerm = (decision) => {
+      if (perm.busy) return;
+      const req = perm.list[perm.cursor];
+      if (!req) return;
+      perm.busy = true;
+      perm.error = null;
+      draw();
+      replyToPermission(server, req.sessionID, req.id, decision).then(() => {
+        perm.busy = false;
+        perm.list.splice(perm.cursor, 1);
+        if (perm.list.length === 0) {
+          perm = null;
+          mode = 'normal';
+          notices.push('✔ Permission answered.');
+          return refreshPending();
+        }
+        perm.cursor = Math.min(perm.cursor, perm.list.length - 1);
+        perm.error = null;
+        draw();
+        return refreshPending();
+      }).catch((err) => {
+        perm.busy = false;
+        perm.error = (err && err.message) || 'Failed to reply.';
         draw();
       });
     };
@@ -821,26 +1331,27 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           // Deleting the whole broadcast selection ends broadcast mode; adopt
           // the row now under the cursor as the new current (state + TUI +
           // highlight) so the list and the TUI agree on the new selection.
-          persistBroadcast([]);
+          // (applyPick clears the persisted broadcast; the explicit clear is
+          // only needed when there is no row left to adopt.)
           broadcastSel = new Set();
           mode = 'normal';
           const next = view[cursor];
           if (next) applyPick(next);
-          else { current = null; draw(); }
+          else { persistBroadcast([]); current = null; draw(); }
           return;
         }
         if (wasBroadcast) {
           broadcastSel.delete(String(s.id));
           if (broadcastSel.size < 2) {
             // Broadcast ended: make the remaining selected session the real
-            // selection (switch the TUI to it and store it).
+            // selection (switch the TUI to it and store it). applyPick clears
+            // the persisted broadcast; clear it here too when no row remains.
             const remaining = [...broadcastSel][0];
-            persistBroadcast([]);
             broadcastSel = new Set();
             mode = 'normal';
             const row = rows.find(r => String(r.id) === String(remaining));
             if (row) applyPick(row);
-            else { draw(); }
+            else { persistBroadcast([]); draw(); }
           } else {
             persistBroadcast([...broadcastSel]);
             mode = 'broadcast';
@@ -914,14 +1425,14 @@ const toggleBroadcast = (idx) => {
   if (adding && onInspectSession) { onInspectSession(id); inspected = true; }
   if (broadcastSel.size < 2) {
     // Deselecting down to one session ends broadcast mode by making that
-    // remaining session the actual selection.
+    // remaining session the actual selection. applyPick clears the persisted
+    // broadcast; clear it here too when no row remains.
     const remaining = [...broadcastSel][0];
-    persistBroadcast([]);
     broadcastSel = new Set();
     mode = 'normal';
     const row = rows.find(r => String(r.id) === String(remaining));
     if (row) applyPick(row);
-    else { restoreCurrent(); draw(); }
+    else { persistBroadcast([]); restoreCurrent(); draw(); }
     return;
   }
   persistBroadcast([...broadcastSel]);
@@ -968,8 +1479,11 @@ const toggleBroadcast = (idx) => {
         }
         return finish(null);
       }
-      if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
-        mode = mode === 'broadcast-help' ? 'broadcast' : (mode === 'list-help' ? 'list' : 'normal');
+      if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help' || mode === 'answer-help' || mode === 'perm-help') {
+        mode = mode === 'broadcast-help' ? 'broadcast'
+          : (mode === 'list-help' ? 'list'
+            : (mode === 'answer-help' ? 'answer'
+              : (mode === 'perm-help' ? 'perm' : 'normal')));
         draw();
         return;
       }
@@ -985,19 +1499,24 @@ const toggleBroadcast = (idx) => {
       }
       if (mode === 'input') {
         if (key.name === 'escape') {
+          const wasAnswer = input && input.kind === 'answer';
           input = null;
-          mode = 'normal';
+          mode = wasAnswer ? 'answer' : 'normal';
           draw();
         } else if (key.name === 'return' || key.name === 'enter') {
           const v = input.value;
           const kind = input.kind;
+          const targetKey = input.targetKey;
           input = null;
-          mode = 'normal';
+          mode = kind === 'answer' ? 'answer' : 'normal';
           draw();
           if (kind === 'create') {
             applyPick({ new: true, name: v.trim() });
           } else if (kind === 'reminder') {
             applyReminder(v.trim());
+          } else if (kind === 'answer') {
+            applyAnswerValue(targetKey, v);
+            draw();
           } else if (v.trim()) {
             applyRenameWith(v.trim());
           }
@@ -1062,6 +1581,47 @@ const toggleBroadcast = (idx) => {
       }
       const sr = handleSearch(str, key, search);
       if (sr !== 'pass') { applySearch(); draw(); return; }
+      if (mode === 'answer' && answer) {
+        if (answer.busy) return;
+        if (key.name === 'escape' || key.name === 'q') {
+          // Cancel WITHOUT answering — back to the session list.
+          answer = null;
+          mode = 'normal';
+          draw();
+        } else if (key.name === 'h') {
+          mode = 'answer-help';
+          draw();
+        } else if (key.name === 'up' || str === 'k') {
+          moveAnswerCursor(-1);
+        } else if (key.name === 'down' || str === 'j') {
+          moveAnswerCursor(1);
+        } else if (key.name === 'return' || key.name === 'enter' || key.name === 'space') {
+          const items = answerItems();
+          const item = items[answer.cursor];
+          if (item && item.kind === 'submit') submitAnswer();
+          else if (item && item.kind === 'option') activateOption(item);
+        }
+        return;
+      }
+      if (mode === 'perm' && perm) {
+        if (perm.busy) return;
+        if (key.name === 'escape' || key.name === 'q') {
+          // Back to the session list, leaving the request(s) pending.
+          perm = null;
+          mode = 'normal';
+          draw();
+        } else if (key.name === 'h') {
+          mode = 'perm-help';
+          draw();
+        } else if (str === 'o' || str === '1') {
+          submitPerm('once');
+        } else if (str === 'a') {
+          submitPerm('always');
+        } else if (str === 'r') {
+          submitPerm('reject');
+        }
+        return;
+      }
       if (mode === 'broadcast') {
         if (key.name === 'escape') {
           persistBroadcast([]);
@@ -1103,8 +1663,9 @@ const toggleBroadcast = (idx) => {
           });
         } else if (key.name === 'return' || key.name === 'enter') {
           if (cursor < view.length) {
+            // Enter ends broadcast mode: applyPick clears the persisted
+            // selection so agentp stops broadcasting to these sessions.
             mode = 'normal';
-            broadcastSel = new Set(); // selection stays persisted for agentp
             applyPick(view[cursor]);
           }
         } else if (view.length > 0 && (key.name === 'up' || str === 'k')) {
@@ -1117,6 +1678,14 @@ const toggleBroadcast = (idx) => {
         return;
       }
       if (key.name === 'q') return finish(null);
+      // 'P' (Shift+p) answers the cursor session's pending permission request(s).
+      // Checked before the 'p' project-switcher below for the same readline
+      // reason as 'A'/'a': Shift+P arrives as name 'p' with the shift flag.
+      if (str === 'P' || (key.name === 'p' && key.shift)) {
+        const target = view[cursor];
+        if (target && pendingPerms.has(String(target.id))) startPerm(target);
+        return;
+      }
       if (key.name === 'p') return finish('switch-project');
       if (key.name === 'h') {
         mode = 'help';
@@ -1136,6 +1705,17 @@ const toggleBroadcast = (idx) => {
       }
       if (key.name === 'r' && cursor < view.length) {
         startInput('Rename to:', 'Enter: rename · Esc: cancel', view[cursor].title || '', 'rename');
+        return;
+      }
+      // 'A' (Shift+a) answers pending agent questions. It MUST be checked
+      // before the 'a' agent handler below: readline reports Shift+A as
+      // name 'a' with the shift flag (str 'A'), so the lowercase branch would
+      // otherwise swallow it and open the agent switcher instead.
+      if (str === 'A' || (key.name === 'a' && key.shift)) {
+        // Answer-mode: only when the cursor session actually has a pending
+        // agent question (a pending form) — 'P' answers permissions instead.
+        const target = view[cursor];
+        if (target && pendingForms.has(String(target.id))) startAnswer(target);
         return;
       }
       if (key.name === 'a') {
@@ -1189,6 +1769,12 @@ const toggleBroadcast = (idx) => {
     if (rows.some(s => runningIds && runningIds.has(s.id))) {
       spinTimer = setInterval(() => { spinIdx++; draw(); }, 120);
     }
+    // Poll for pending agent questions / permission replies while the picker is
+    // open (the ❓/🔒 marker columns and the 'A' entry refresh live).
+    if (loadPending) {
+      refreshPending();
+      pendingTimer = setInterval(() => { refreshPending(); }, PENDING_POLL_MS);
+    }
     process.stderr.write('\x1b[?1049h\x1b[?25l');
     draw();
   });
@@ -1206,7 +1792,7 @@ const toggleBroadcast = (idx) => {
 // row also records the target directory, so the caller moves its picker there
 // and can then write that project's `.ocmux.json` — the file `agentp` reads in
 // that directory.
-function switchMenu(rows, { allProjects = false, onOpen } = {}) {
+function switchMenu(rows, { allProjects = false, onOpen, pending } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) {
       console.error('Error: "switch" is interactive and requires a TTY.');
@@ -1217,6 +1803,8 @@ function switchMenu(rows, { allProjects = false, onOpen } = {}) {
       resolve(null);
       return;
     }
+
+    const pendingOf = (dir) => (pending && pending.get(dir)) || { forms: new Set(), perms: new Set() };
 
     const nameW = Math.max(...rows.map(r => path.basename(r.dir).length), 4);
     const stsW = Math.max(...rows.map(r => r.status.length), 6);
@@ -1317,6 +1905,10 @@ function switchMenu(rows, { allProjects = false, onOpen } = {}) {
         out += '  h                toggle this help\n';
         out += '  q                return to the session menu\n';
         out += '  Ctrl+C           quit ocmux\n';
+        out += '  \n';
+        out += '  Markers: ❓ pending question · 🔒 pending permission, always two\n';
+        out += '           columns (the slot is reserved when absent); 🔔 in the\n';
+        out += '           status bar when any listed session waits\n';
         out += '\n';
         for (const l of modeNote) out += `${l}\n`;
         out += '\nPress any key to return.\n';
@@ -1343,12 +1935,19 @@ function switchMenu(rows, { allProjects = false, onOpen } = {}) {
             const id = String(s.id || '');
             const mark = String(s.id) === String(node.project.session) ? '  *' : '';
             const title = (s.title || id).slice(0, Math.max(8, nameW + 6));
-            return `  ${title}${mark}  ${id}`;
+            // Pending marker columns for this session (❓/🔒), always 4 cols.
+            const pe = pendingOf(node.project.dir);
+            const gr = pendingCells(pe.forms.has(id), pe.perms.has(id));
+            return `  ${title}${mark} ${gr} ${id}`;
           }
           const p = node.project;
           const fold = foldOf(p).open ? '▾' : '▸';
           const session = p.session ? p.session.slice(0, 14) : '(none)';
-          const text = `${fold} ${pad(path.basename(p.dir), nameW)}  ${pad(p.status, stsW)}  ${pad(session, ssnW)}  ${p.dir}`;
+          // A folded project shows its aggregate marker columns when ANY of its
+          // sessions (per the location-scoped pending fetch) awaits an answer.
+          const pe = pendingOf(p.dir);
+          const gr = pendingCells(pe.forms.size > 0, pe.perms.size > 0);
+          const text = `${fold} ${gr} ${pad(path.basename(p.dir), nameW)}  ${pad(p.status, stsW)}  ${pad(session, ssnW)}  ${p.dir}`;
           return text;
         },
         footer: searchFooter(search, `${enterHint} · Space: fold · /: search · h: help · q: back · Ctrl+C: quit`),
@@ -1529,7 +2128,9 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
     } catch { /* context limits unavailable */ }
 
     const applySession = (id) => {
-      projectState.writeProjectState(sf, { session: id });
+      // A session switch also drops any persisted broadcast list, so agentp
+      // never keeps broadcasting to sessions that are no longer selected.
+      projectState.writeProjectState(sf, { session: id, broadcast: [] });
       refreshTui(dir, server, id);
     };
 
@@ -1566,6 +2167,18 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
         runningIds,
         modelContext,
         notices,
+        // A persisted broadcast list, so the picker opens in broadcast mode when
+        // one is active (validated and cleaned inside `sessionMenu`).
+        broadcast: state.broadcast,
+        // Pending agent questions / permission replies for this project, polled
+        // by the picker while it is open. Failures degrade to empty sets.
+        loadPending: () => Promise.all([
+          listPendingForms(server, dir).catch(() => []),
+          listPendingPermissions(server, dir).catch(() => []),
+        ]).then(([forms, perms]) => ({
+          forms: new Set((forms || []).map(f => f.sessionID).filter(Boolean)),
+          perms: new Set((perms || []).map(x => x.sessionID).filter(Boolean)),
+        })),
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
         onInspectSession: (id) => refreshTui(dir, server, id),
         onPick: async (row) => {
@@ -1616,8 +2229,24 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
         console.error(`Error listing projects: ${err.message}`);
         return [];
       });
+      // Fetch each listed project's pending questions/permissions once, so
+      // folded project rows (and unfolded sessions) can carry the markers.
+      // Errors degrade to empty sets (no markers for that project).
+      const pendingByDir = new Map();
+      await Promise.all(rows.map(async (p) => {
+        if (!p.server) return;
+        const [forms, perms] = await Promise.all([
+          listPendingForms(p.server, p.dir).catch(() => []),
+          listPendingPermissions(p.server, p.dir).catch(() => []),
+        ]);
+        pendingByDir.set(p.dir, {
+          forms: new Set((forms || []).map(f => f.sessionID).filter(Boolean)),
+          perms: new Set((perms || []).map(x => x.sessionID).filter(Boolean)),
+        });
+      }));
       const picked = await switchMenu(rows, {
         allProjects,
+        pending: pendingByDir,
         onOpen: (project, id) => refreshTui(project.dir, project.server, id),
       });
       if (picked === SWITCH_QUIT) break;
@@ -1930,8 +2559,13 @@ function printHelp() {
   console.error('project (requires a TTY). The title bar names the project whose');
   console.error('sessions are listed. In the picker:');
   console.error('  Enter switch · n new · r rename · R remind · d delete · a agents · m model');
-  console.error('  p projects · h help · q quit');
+  console.error('  p projects · h help · q quit · A answer the selected session\'s questions');
+  console.error('  P answer its pending permission requests (allow once / always / reject)');
   console.error('  In BROADCAST: Space toggles a session · d deletes cursor · D deletes all');
+  console.error('List rows and the project switcher carry pending marker columns: ❓ agent');
+  console.error('question, 🔒 permission request (one column each, the slot is always');
+  console.error('reserved); the status bar shows 🔔 when any listed session waits.');
+  console.error('The picker re-checks every 2s while open.');
   console.error('Selecting updates .ocmux.json and refreshes a dedicated TUI, falling');
   console.error('back to the shared TUI. Opening the picker also routes that project\'s');
   console.error('TUI to its stored session. Silent on success. (p opens projects; by');

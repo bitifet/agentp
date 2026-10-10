@@ -2,7 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.1.2] - 2026-10-10
+
+The **pending answers** release, plus a broadcast-cleanup fix. The interactive
+session picker now watches each project's pending agent questions (forms) and
+permission requests, marking the sessions that need attention — ❓ question ·
+🔒 permission, two independent columns — in the list rows, the status bar, the
+info panel and the project switcher. A new `A` key answers the selected
+session's pending questions in a dedicated mode with multi-select support,
+custom/free-text answers, live `when`-condition validation, per-form submission
+and automatic advance through multi-form sessions; `P` answers its pending
+permission requests (allow once / always, reject), one at a time. The picker now
+also reads a stored broadcast selection back on start — and never leaves a stale
+`broadcast` list in `.ocmux.json`.
+
+### Fixed
+
+- **Broadcast selections were never fully cleared.** Leaving broadcast mode
+  cleared the persisted `.ocmux.json` `broadcast` list only on `ESC`/`q`;
+  `Enter` kept the list "for agentp", so a later prompt still broadcast to every
+  previously selected session. Every exit from broadcast mode — `Enter`, `ESC`
+  or `q` — now drops the list, as does picking any session in the normal
+  switcher (or `ocmux session <id>`), so a stale selection can no longer keep
+  `agentp` broadcasting.
+- **The picker ignored a stored broadcast.** Reopening `ocmux` while
+  `.ocmux.json` held a `broadcast` list started in the normal session switcher
+  and highlighted the stored session, even though `agentp` would broadcast to
+  the whole list. The picker now reads the list back on start: when it is valid
+  (at least two ids that still name listed sessions, re-anchoring on a selected
+  session when the stored `session` is not among them) it opens directly in
+  broadcast mode; an invalid or stale list is cleared first, so the picker never
+  shows a normal state that `agentp` would contradict.
+
+### Added
+
+- **Pending markers (❓/🔒 two columns + 🔔 bell).** The open picker re-checks
+  `/api/form` and `/api/permission/request` for the project every 2 seconds.
+  Rows always reserve a slot for each of the two marker columns (❓ question,
+  🔒 permission) so the columns stay aligned; the status bar leads with 🔔 when
+  any listed session is waiting; the info panel pins the cursor session's marker
+  columns to its top-right corner. The project switcher shows the columns per
+  session and aggregated per (folded) project.
+- **`A` — answer mode.** Answers the cursor session's pending form(s) from the
+  picker: choices, multi-select toggles, "type your own answer" / free-text
+  rows, `when`-gated fields re-validated live, a per-form **Submit answers**
+  row. The server's message is shown in the status bar on rejection (400), an
+  already-answered form (409) reports and returns to the list, and multi-form
+  sessions advance form to form. `h` toggles answer-mode help, `q`/`ESC`
+  cancels without answering. (`A` is detected before the `a` agent key — a real
+  terminal sends Shift+A as name `a` plus the shift flag.)
+- **`P` — permission answering.** Answers the cursor session's pending
+  permission request(s) from the picker: each is shown with its action,
+  resources and optional message, and `o`/`1` allow once, `a` allow always,
+  `r` reject post the decision and advance to the next request. Rejections
+  (400) show the server's message in the status bar and stay put; after the
+  last request it returns to the list with a `✔ Permission answered.` notice
+  (`h` help, `q`/`ESC` leaves everything pending). Shift+P is checked before
+  the `p` project-switcher key for the same readline reason as `A`/`a`.
+- **form/permission API helpers** in `lib/opencode.js`: `listPendingForms`,
+  `listSessionForms`, `replyToForm` (keyed answer map, carries `err.status` +
+  the server message for 400/409), `listPendingPermissions`, `replyToPermission`
+  (posts `{decision}` with `err.status` + message on failure) and a
+  `serverMessage` error-text extractor. Location-scoped fetches use the
+  documented `location[directory]=…` deepObject query parameter.
 
 ## [2.1.1] - 2026-10-09
 

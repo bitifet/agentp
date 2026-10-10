@@ -784,6 +784,193 @@ describe('respondToQuestion (v2)', { concurrency: false }, () => {
 });
 
 // ───────────────────────────────────────────────────────────────────
+// Pending forms / permissions + form replies (answer mode support)
+// ───────────────────────────────────────────────────────────────────
+describe('listPendingForms (v2 location filter)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('GET /api/form?location[directory]=… returns a location form array', async () => {
+    ctrl.reset({
+      status: 200,
+      body: JSON.stringify({ location: { directory: '/proj' }, data: [{ id: 'f1', sessionID: 's1' }] }),
+    });
+    const forms = await opencode.listPendingForms('http://localhost:4096', '/proj');
+    assert.deepStrictEqual(forms, [{ id: 'f1', sessionID: 's1' }]);
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.method, 'GET');
+    assert.ok(req.opts.path.includes('/api/form?'), 'expected the /api/form route');
+    assert.ok(req.opts.path.includes('location%5Bdirectory%5D=%2Fproj'),
+      'expected the deepObject location[directory] filter');
+  });
+
+  it('returns [] for an empty data array', async () => {
+    ctrl.reset({ status: 200, body: JSON.stringify({ data: [] }) });
+    assert.deepStrictEqual(await opencode.listPendingForms('http://localhost:4096'), []);
+  });
+
+  it('throws on non-200', async () => {
+    ctrl.reset({ status: 500, body: '' });
+    await assert.rejects(() => opencode.listPendingForms('http://localhost:4096', '/proj'), /Failed to list pending forms/);
+  });
+});
+
+describe('listSessionForms (v2)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('GET /api/session/:id/form returns the session’s pending forms with fields', async () => {
+    ctrl.reset({
+      status: 200,
+      body: JSON.stringify({
+        data: [{
+          id: 'f1', sessionID: 's1', title: 'Pick a model',
+          fields: [{ key: 'model', type: 'string', options: [{ label: 'A', value: 'a' }] }],
+        }],
+      }),
+    });
+    const forms = await opencode.listSessionForms('http://localhost:4096', 's1');
+    assert.strictEqual(forms.length, 1);
+    assert.strictEqual(forms[0].id, 'f1');
+    assert.ok(Array.isArray(forms[0].fields), 'expected the fields payload for the answer UI');
+    assert.strictEqual(ctrl.lastReq().opts.path, '/api/session/s1/form');
+  });
+});
+
+describe('replyToForm (v2 keyed answer)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('POSTs the keyed answer map to the form reply endpoint', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await opencode.replyToForm('http://localhost:4096', 's1', 'f1', { model: 'a', tags: ['x', 'y'] });
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.method, 'POST');
+    assert.match(req.opts.path, /\/api\/session\/s1\/form\/f1\/reply/);
+    assert.deepStrictEqual(JSON.parse(req.req._written.join('')), { answer: { model: 'a', tags: ['x', 'y'] } });
+  });
+
+  it('rejects with err.status 400 and the server message on an invalid answer', async () => {
+    ctrl.reset({
+      status: 400,
+      body: JSON.stringify({ message: 'Invalid answer for field "model".' }),
+    });
+    await assert.rejects(
+      () => opencode.replyToForm('http://localhost:4096', 's1', 'f1', { model: 42 }),
+      (err) => {
+        assert.strictEqual(err.status, 400);
+        assert.strictEqual(err.message, 'Invalid answer for field "model".');
+        return true;
+      },
+    );
+  });
+
+  it('rejects with err.status 409 when the form was already settled', async () => {
+    ctrl.reset({ status: 409, body: JSON.stringify({ message: 'Already settled' }) });
+    await assert.rejects(
+      () => opencode.replyToForm('http://localhost:4096', 's1', 'f1', {}),
+      (err) => {
+        assert.strictEqual(err.status, 409);
+        assert.strictEqual(err.message, 'Already settled');
+        return true;
+      },
+    );
+  });
+
+  it('falls back to a generic message when the body carries no message', async () => {
+    ctrl.reset({ status: 400, body: 'not json' });
+    await assert.rejects(
+      () => opencode.replyToForm('http://localhost:4096', 's1', 'f1', {}),
+      (err) => err.status === 400 && /Failed to answer form: 400/.test(err.message),
+    );
+  });
+});
+
+describe('listPendingPermissions (v2 location filter)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('GET /api/permission/request?location[directory]=… returns the request array', async () => {
+    ctrl.reset({
+      status: 200,
+      body: JSON.stringify({
+        location: { directory: '/proj' },
+        data: [{ id: 'per_a', sessionID: 's1', action: 'run', resources: ['.'] }],
+      }),
+    });
+    const perms = await opencode.listPendingPermissions('http://localhost:4096', '/proj');
+    assert.deepStrictEqual(perms, [{ id: 'per_a', sessionID: 's1', action: 'run', resources: ['.'] }]);
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.method, 'GET');
+    assert.ok(req.opts.path.includes('/api/permission/request?'), 'expected the permission route');
+    assert.ok(req.opts.path.includes('location%5Bdirectory%5D=%2Fproj'), 'expected the location filter');
+  });
+
+  it('throws on non-200', async () => {
+    ctrl.reset({ status: 500, body: '' });
+    await assert.rejects(
+      () => opencode.listPendingPermissions('http://localhost:4096', '/proj'),
+      /Failed to list pending permissions/,
+    );
+  });
+});
+
+describe('replyToPermission (v2 decision)', { concurrency: false }, () => {
+  let ctrl;
+  before(() => { ctrl = setupMock({}); });
+  after(() => tearDownMock());
+
+  it('POSTs the decision to the session permission reply endpoint', async () => {
+    ctrl.reset({ status: 204, body: '' });
+    await opencode.replyToPermission('http://localhost:4096', 's1', 'per_a', 'always');
+    const req = ctrl.lastReq();
+    assert.strictEqual(req.opts.method, 'POST');
+    assert.match(req.opts.path, /\/api\/session\/s1\/permission\/per_a\/reply/);
+    assert.deepStrictEqual(JSON.parse(req.req._written.join('')), { decision: 'always' });
+  });
+
+  it('rejects with err.status and the server message on failure', async () => {
+    ctrl.reset({ status: 400, body: JSON.stringify({ message: 'Permission already resolved.' }) });
+    await assert.rejects(
+      () => opencode.replyToPermission('http://localhost:4096', 's1', 'per_a', 'once'),
+      (err) => {
+        assert.strictEqual(err.status, 400);
+        assert.strictEqual(err.message, 'Permission already resolved.');
+        return true;
+      },
+    );
+  });
+
+  it('falls back to a generic message when the body carries no message', async () => {
+    ctrl.reset({ status: 404, body: 'not json' });
+    await assert.rejects(
+      () => opencode.replyToPermission('http://localhost:4096', 's1', 'per_a', 'reject'),
+      (err) => err.status === 404 && /Failed to reply to permission: 404/.test(err.message),
+    );
+  });
+});
+
+describe('serverMessage', () => {
+  it('extracts message from a tagged v2 error body', () => {
+    assert.strictEqual(opencode.serverMessage(JSON.stringify({ message: 'nope' })), 'nope');
+  });
+
+  it('falls back to error.message', () => {
+    assert.strictEqual(opencode.serverMessage(JSON.stringify({ error: { message: 'inner' } })), 'inner');
+  });
+
+  it('returns null for non-JSON bodies', () => {
+    assert.strictEqual(opencode.serverMessage(''), null);
+    assert.strictEqual(opencode.serverMessage('not json'), null);
+    assert.strictEqual(opencode.serverMessage(null), null);
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
 // Misc
 // ───────────────────────────────────────────────────────────────────
 describe('sortSessionsByRecency', () => {
