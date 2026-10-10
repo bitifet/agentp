@@ -197,6 +197,15 @@ The broadcast info line (`Broadcast to sessions: …`) never wraps: it holds up
 to 480 characters of names (or the terminal width, whichever is smaller), and
 an oversized selection is truncated from the beginning with a leading `...`.
 
+**Live activity.** Every listed session that is currently running (a foreground
+drain, per `GET /api/session/active`) shows an animated spinner in its row, and
+the info panel's status says `BUSY`. The picker's initial `runningIds` is a
+snapshot taken at open; while the picker stays open it re-polls that endpoint
+every second and updates the set, so sessions that start a turn after the menu
+opened begin spinning and sessions that finish stop — the animation timer starts
+and stops to match. Failures of the poll degrade silently: the previous set
+stays and the next poll retries.
+
 **Pending-answer awareness.** While the picker is open it re-polls the project
 every 2 seconds (`GET /api/form` and `GET /api/permission/request`, both
 location-scoped with the `location[directory]=…` deepObject parameter) and

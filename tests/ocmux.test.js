@@ -828,7 +828,7 @@ describe('search helpers', () => {
 // ───────────────────────────────────────────────────────────────────
 // Interactive sessionMenu (broadcast exit + '/' search) with a stubbed TTY
 // ───────────────────────────────────────────────────────────────────
-async function driveSessionMenu({ sessions, current, opts = {}, keys }) {
+async function driveSessionMenu({ sessions, current, opts = {}, keys, stepDelay = 5 }) {
   const saved = {
     isTTY: process.stdin.isTTY,
     setRawMode: process.stdin.setRawMode,
@@ -845,7 +845,7 @@ async function driveSessionMenu({ sessions, current, opts = {}, keys }) {
   try {
     const menuPromise = binOcmux.sessionMenu(sessions, current, {}, 'http://server', opts);
     for (const [str, name, ctrl, shift] of keys) {
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, stepDelay));
       process.stdin.emit('keypress', str, { name, ctrl: !!ctrl, meta: false, shift: !!shift });
     }
     const result = await Promise.race([
@@ -1358,6 +1358,67 @@ describe('sessionMenu broadcast initialization', () => {
     });
     assert.deepStrictEqual(calls, [['inspect', 'sA']],
       'expected the TUI to follow the re-anchored session');
+  });
+});
+
+describe('sessionMenu activity spinner', () => {
+  const sessions = [
+    { id: 'sA', title: 'Alpha' },
+    { id: 'sB', title: 'Beta' },
+    { id: 'sC', title: 'Gamma' },
+  ];
+  const SPIN_RE = /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/;
+  const rowWith = (frame, title) =>
+    frame.replace(/\x1b\[[0-9;]*m/g, '').split('\n').find((l) => l.includes(title)) || '';
+
+  it('spins every listed session that is running, and only those', async () => {
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: { runningIds: new Set(['sA', 'sC']) },
+      keys: [['q', 'q']],
+    });
+    const frame = output.find((o) => o.includes('Alpha'));
+    assert.ok(frame, 'expected an initial frame');
+    assert.ok(SPIN_RE.test(rowWith(frame, 'Alpha')), 'active session row should spin');
+    assert.ok(SPIN_RE.test(rowWith(frame, 'Gamma')), 'active session row should spin');
+    assert.ok(!SPIN_RE.test(rowWith(frame, 'Beta')), 'idle session row should not spin');
+  });
+
+  it('polls for activity and starts spinning a session that became active later', async () => {
+    let calls = 0;
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        runningIds: new Set(),
+        loadRunning: () => new Set(calls++ === 0 ? ['sB'] : ['sB', 'sC']),
+      },
+      keys: [['', 'c', true]],
+      stepDelay: 1200, // let one RUNNING_POLL_MS pass so the picker re-checks
+    });
+    assert.ok(output.some((o) => SPIN_RE.test(rowWith(o, 'Beta'))),
+      'expected a spinner next to the session once it was polled active');
+    assert.ok(output.every((o) => !SPIN_RE.test(rowWith(o, 'Alpha'))),
+      'expected the idle session to stay spinner-free');
+  });
+
+  it('polls for activity and stops spinning a session that finished its turn', async () => {
+    let calls = 0;
+    const { output } = await driveSessionMenu({
+      sessions, current: 'sA',
+      opts: {
+        runningIds: new Set(['sA']),
+        loadRunning: () => { calls++; return new Set(); },
+      },
+      keys: [['', 'c', true]],
+      stepDelay: 1200,
+    });
+    assert.ok(calls > 0, 'expected at least one activity poll');
+    const frames = output.filter((o) => o.includes('Alpha'));
+    assert.ok(frames.length >= 2, 'expected frames before and after the poll');
+    assert.ok(frames.some((o) => SPIN_RE.test(rowWith(o, 'Alpha'))),
+      'expected the spinner while the session was active');
+    assert.ok(!SPIN_RE.test(rowWith(frames[frames.length - 1], 'Alpha')),
+      'expected the last rendered frame to show the session idle');
   });
 });
 

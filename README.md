@@ -381,6 +381,10 @@ the project found upward from `<directory>` (default: `$PWD`):
   waiting, and the cursor session's marker columns are pinned to the **top-right
   corner of the info panel**. The same markers appear in the project switcher,
   per session and — when folded — aggregated over the project.
+- **live activity**: sessions with a running turn show an **animated spinner**
+  next to their row (and `BUSY` in the info panel). While the picker is open
+  ocmux re-checks activity every second, so the spinner appears when a session
+  starts a turn and disappears when it finishes — no re-opening needed.
 - `A` answers the pending **question(s)** of the selected session (only when it
   shows a ❓ marker). Answer mode
   lists the form's fields and options: `Space`/`Enter` selects (`(•)`), extra

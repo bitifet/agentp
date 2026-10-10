@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **The activity spinner was a start-up snapshot.** `ocmux` fetched the list of
+  running sessions once, when the picker opened: sessions that started a turn
+  later never spun, sessions that finished kept spinning, and the `BUSY`/`IDLE`
+  status in the info panel froze. The picker now re-polls activity every second
+  while it is open — every listed session that is running shows the animated
+  spinner (and it stops as soon as the session idles), and the status stays
+  accurate.
+
 ## [2.1.2] - 2026-10-10
 
 The **pending answers** release, plus a broadcast-cleanup fix. The interactive

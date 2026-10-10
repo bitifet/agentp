@@ -224,6 +224,8 @@ const GLYPH_PERMS = '🔒';    // pending permission request
 const GLYPH_BELL = '🔔';     // status bar: at least one marker in the list
 const CELL_NONE = '  ';      // placeholder reserving one absent marker column
 const PENDING_POLL_MS = 2000; // how often the open picker re-checks pending state
+const RUNNING_POLL_MS = 1000; // how often the open picker re-checks which sessions are running
+const SPIN_INTERVAL_MS = 120; // spinner frame rate while any listed session runs
 
 // The two marker columns for a session/project: ❓ and/or 🔒, each column fixed
 // at 2 columns wide so rows stay aligned whether or not a marker is present.
@@ -577,7 +579,11 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 // permission reply. When provided the picker polls it every PENDING_POLL_MS and
 // renders the ❓/🔒 marker columns; `A` answers the cursor session's questions
 // and `P` its pending permission requests (allow once/always, reject).
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [], loadPending, broadcast = null } = {}) {
+// `runningIds` is the caller's snapshot of actively-running session ids (Set);
+// `loadRunning` (optional async () => Set) refreshes it every RUNNING_POLL_MS
+// so every row that is running shows the spinner and the BUSY/IDLE status
+// tracks the session's real activity.
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [], loadPending, loadRunning, broadcast = null } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -633,6 +639,13 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let pendingPerms = new Set();
     let pendingBusy = false;
     let pendingTimer = null;
+    // Which listed sessions are actively running. The caller passes a snapshot
+    // taken at open; `loadRunning` (optional) refreshes it while the picker is
+    // open, so the spinner and BUSY/IDLE status keep up with sessions that start
+    // or finish a turn at any time.
+    let runningSet = runningIds instanceof Set ? runningIds : new Set();
+    let runningBusy = false;
+    let runningTimer = null;
     // Answer mode ('A') state: the pending forms of the cursor session being
     // answered one at a time, the answers chosen so far and the flat item list.
     let answer = null;
@@ -679,6 +692,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       process.stderr.write('\x1b[?1049l');
       if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
       if (pendingTimer) { clearInterval(pendingTimer); pendingTimer = null; }
+      if (runningTimer) { clearInterval(runningTimer); runningTimer = null; }
       process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
       process.stdin.pause();
@@ -789,7 +803,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         const selF = selected && pendingForms.has(String(selected.id));
         const selP = selected && pendingPerms.has(String(selected.id));
         const selPending = (selF || selP) ? pendingCells(selF, selP) : '';
-        infoLines = sessionInfoLines(selected, runningIds, modelContext, cols, selIsCurrent, selPending);
+        infoLines = sessionInfoLines(selected, runningSet, modelContext, cols, selIsCurrent, selPending);
       }
       // 'd'/n/r/R prompts take over the status bar (previously an easy-to-miss
       // line at the bottom of the list) with their essential keys on the right.
@@ -839,7 +853,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           const timeStr = showTime ? padLeft(fmtClock(s.time && s.time.viewed), TIME_W) + '  ' : '';
           const mark = String(s.id) === String(current) ? ' *' : '';
           const hasNote = annotations && annotations[s.id] ? ' ◈' : '';
-          const spin = (runningIds && runningIds.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
+          const spin = (runningSet.has(s.id)) ? SPINNER[spinIdx % SPINNER.length] + ' ' : '  ';
           const text = `${sel}${spin}${cellsOf(s.id)}${timeStr}${pad(title, maxLen)}${mark}${hasNote}`;
           // Brown for the session currently selected in the TUI window.
           return String(s.id) === String(current) ? `${BROWN}${text}\x1b[0m` : text;
@@ -925,6 +939,33 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         pendingBusy = false;
         if (!done) draw();
       }).catch(() => { pendingBusy = false; });
+    };
+
+    // ── Live activity polling (spinner + BUSY/IDLE status) ──────────
+    // Re-read `loadRunning` every RUNNING_POLL_MS while the picker is open so a
+    // session that starts or finishes a turn after the menu opened shows it
+    // without re-opening. Errors degrade gracefully: the previous set stays.
+    const refreshRunning = () => {
+      if (!loadRunning || runningBusy) return Promise.resolve();
+      runningBusy = true;
+      return Promise.resolve(loadRunning()).then((ids) => {
+        runningSet = ids instanceof Set ? ids : new Set(ids || []);
+        runningBusy = false;
+        syncSpin();
+      }).catch(() => { runningBusy = false; });
+    };
+    // Keep the spinner animation in sync with the running set: animate while at
+    // least one listed session is active, stop when none is, and paint a fresh
+    // frame so a poll update is visible immediately.
+    const syncSpin = (redraw = true) => {
+      const anyRunning = rows.some((s) => runningSet.has(s.id));
+      if (anyRunning && !spinTimer) {
+        spinTimer = setInterval(() => { spinIdx++; draw(); }, SPIN_INTERVAL_MS);
+      } else if (!anyRunning && spinTimer) {
+        clearInterval(spinTimer);
+        spinTimer = null;
+      }
+      if (redraw && !done) draw();
     };
 
     // ── Answer mode (A): answer the agent's pending form(s) ─────────
@@ -1765,9 +1806,12 @@ const toggleBroadcast = (idx) => {
     process.stdin.setRawMode(true);
     process.stdin.resume();
     process.stdout.on('resize', draw);
-    // Animate the spinner while any listed session is running.
-    if (rows.some(s => runningIds && runningIds.has(s.id))) {
-      spinTimer = setInterval(() => { spinIdx++; draw(); }, 120);
+    // Animate the spinner while any listed session is running. `loadRunning`
+    // (when provided) polls for activity so the spinner follows sessions that
+    // start or finish a turn after the picker opened.
+    syncSpin(false);
+    if (loadRunning) {
+      runningTimer = setInterval(() => { refreshRunning(); }, RUNNING_POLL_MS);
     }
     // Poll for pending agent questions / permission replies while the picker is
     // open (the ❓/🔒 marker columns and the 'A' entry refresh live).
@@ -2179,6 +2223,9 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
           forms: new Set((forms || []).map(f => f.sessionID).filter(Boolean)),
           perms: new Set((perms || []).map(x => x.sessionID).filter(Boolean)),
         })),
+        // Which sessions are actively running, re-polled while the picker is
+        // open so the spinner and BUSY/IDLE status stay accurate.
+        loadRunning: () => getActiveSessions(server),
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
         onInspectSession: (id) => refreshTui(dir, server, id),
         onPick: async (row) => {
