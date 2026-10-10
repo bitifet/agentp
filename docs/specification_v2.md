@@ -83,7 +83,8 @@ There is no `--global` alias.
 
 ## 4. TUI routing
 
-When `ocmux` selects or inspects a session, it resolves the display in order:
+When `ocmux` selects or inspects a session — or `agentp` sends a prompt or
+re-submits a deferred ticket (section 8) — the display is resolved in order:
 
 1. live TUI dedicated to the target directory;
 2. the one live shared TUI;
@@ -285,9 +286,17 @@ The old managed-window `kill` and `resurrect` commands do not exist.
 ## 8. `agentp`
 
 `agentp` resolves project/session/server from explicit options and the nearest
-state file, then sends directly to the session API. It does not focus, move, or
-refresh a TUI; TUI routing is an explicit consequence of ocmux session
-selection, not prompt submission.
+state file, then sends directly to the session API. Sending a prompt (normal or
+`--defer`) also routes the project's TUI to the target session, so the answer
+streams in view: the pane is respawned only when it does not already show that
+project/session. Re-submitting a deferred ticket does the same for the ticket's
+session, whose project directory is derived from the session's own location.
+
+Routing is best-effort and never fails the prompt. It resolves like section 4
+(dedicated → shared → headless, silent when no pane is registered), is skipped
+for broadcast prompts (no single session to show) and for the detached
+`--defer-child` worker, and routing always keys on `sessionId`/`sessionIds` —
+the human-readable session name on a ticket is display-only.
 
 ## 9. Failure behavior
 

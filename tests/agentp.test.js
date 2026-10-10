@@ -14,6 +14,8 @@ const child_process = require('child_process');
 const { Readable, Writable } = require('stream');
 
 const opencode = require('../lib/opencode');
+const ocmuxLib = require('../lib/ocmux');
+const projectState = require('../lib/project-state');
 
 // ── Mock http.request ──────────────────────────────────────────────
 let mockCfg = null;
@@ -197,6 +199,7 @@ function setupOpencodeMocks() {
   });
   nodeMock.method(opencode, 'getSession', async (server, sessionId) => {
     mockCfg._getSessionCalled = { server, sessionId };
+    if (mockCfg._getSessionHook) return await mockCfg._getSessionHook(server, sessionId);
     return mockCfg.session || null;
   });
   nodeMock.method(opencode, 'selectSession', async (server, sessionId) => {
@@ -206,6 +209,13 @@ function setupOpencodeMocks() {
   nodeMock.method(opencode, 'interruptSession', async (server, sessionId) => {
     mockCfg._interruptCalled = { server, sessionId };
     return mockCfg.interruptResult !== undefined ? mockCfg.interruptResult : true;
+  });
+
+  // Mock TUI routing so tests never touch a real tmux or the live TUI registry
+  // (which may exist on the developer's machine). Records the attempted switch.
+  nodeMock.method(ocmuxLib, 'switchTui', (directory, server, session) => {
+    mockCfg._switchTuiCalled = { directory, server, session };
+    return mockCfg.switchTuiResult === undefined ? { ok: true } : mockCfg.switchTuiResult;
   });
 }
 
@@ -552,6 +562,94 @@ describe('agentp CLI', () => {
       cleanupSpawnFiles();
     });
 
+    it('--defer tickets include the session name for display', async () => {
+      mockCfg.session = { id: 'new-session-id', title: 'My Task' };
+      setArgv(['--defer']);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(t.sessionName, 'My Task');
+      assert.strictEqual(t.sessionId, 'new-session-id'); // routing still by id
+      cleanupSpawnFiles();
+    });
+
+    it('re-prints refresh the session name in case the session was renamed', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_rename_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      mockCfg.session = { id: 's42', title: 'Renamed title' };
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42","sessionName":"Old title"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      const t = parseTicketOutput();
+      assert.strictEqual(t.sessionName, 'Renamed title');
+      assert.strictEqual(t.sessionId, 's42');
+      assert.ok(t.elapsed >= 0);
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('routes a registered TUI to the target session for --defer prompts', async () => {
+      nodeMock.method(projectState, 'resolveContext', () => ({
+        statefile: '/tmp/proj/.ocmux.json',
+        state: { directory: '/tmp/proj' },
+        directory: '/tmp/proj',
+        session: null,
+        server: null,
+      }));
+      mockCfg.sessions = [{ id: 's1', title: 'task', time: { updated: 1 } }];
+      setArgv(['--defer']);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._switchTuiCalled, {
+        directory: '/tmp/proj',
+        server: 'http://localhost:4096',
+        session: 's1',
+      });
+      cleanupSpawnFiles();
+    });
+
+    it('re-sending a --defer ticket routes the TUI to the ticket session project', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_defer_tui_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'plain answer');
+      mockCfg.session = { id: 's42', title: 'My Task', location: { directory: '/home/proj' } };
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._switchTuiCalled, {
+        directory: '/home/proj',
+        server: 'http://localhost:9999',
+        session: 's42',
+      });
+      assert.ok(stdout.join('').includes('plain answer'));
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('does not route the TUI for a broadcast ticket resubmitted via --defer', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_defer_bcast_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, '');
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionIds":["s1","s2"]}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._switchTuiCalled, undefined);
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('skips TUI routing when the ticket session has no directory', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_defer_nodir_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'plain answer');
+      mockCfg.session = { id: 's42', title: 'My Task' }; // no location
+      setArgv(['--defer']);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._switchTuiCalled, undefined);
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
     it('--defer N includes the defer field in the ticket', async () => {
       setArgv(['--defer', '1']);
       provideStdin('hello');
@@ -878,6 +976,57 @@ describe('agentp CLI', () => {
       assert.ok(!('defer' in t));
       try { fs.unlinkSync(tmp); } catch {}
     });
+
+    it('routes a registered TUI to the target session for a normal prompt', async () => {
+      nodeMock.method(projectState, 'resolveContext', () => ({
+        statefile: '/tmp/proj/.ocmux.json',
+        state: { directory: '/tmp/proj' },
+        directory: '/tmp/proj',
+        session: null,
+        server: null,
+      }));
+      mockCfg.sessions = [{ id: 's1', title: 'task', time: { updated: 1 } }];
+      mockCfg._spawnAnswer = 'done answer';
+      setArgv([]);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._switchTuiCalled, {
+        directory: '/tmp/proj',
+        server: 'http://localhost:4096',
+        session: 's1',
+      });
+      assert.ok(stdout.join('').includes('done answer'));
+      cleanupSpawnFiles();
+    });
+
+    it('re-sending a normal-mode ticket routes the TUI to the ticket session project', async () => {
+      const tmp = path.join(os.tmpdir(), `agentp_test_norm_tui_${Date.now()}.tmp`);
+      fs.writeFileSync(tmp, 'the stored answer');
+      mockCfg.session = { id: 's42', title: 'My Task', location: { directory: '/home/proj' } };
+      setArgv([]);
+      provideStdin(`agentp_ticket {"ctime":"2026-08-03T14:30:00.000Z","path":"${tmp}","server":"http://localhost:9999","sessionId":"s42"}`);
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.deepStrictEqual(mockCfg._switchTuiCalled, {
+        directory: '/home/proj',
+        server: 'http://localhost:9999',
+        session: 's42',
+      });
+      assert.ok(stdout.join('').includes('the stored answer'));
+      try { fs.unlinkSync(tmp); } catch {}
+    });
+
+    it('does not attempt TUI routing without project context', async () => {
+      mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
+      mockCfg._spawnAnswer = 'done answer';
+      setArgv([]);
+      provideStdin('hello');
+      const { main } = require('../bin/agentp');
+      await assert.rejects(main(), /EXIT:0/);
+      assert.strictEqual(mockCfg._switchTuiCalled, undefined);
+      cleanupSpawnFiles();
+    });
   });
 
   describe('deferred ticket helpers', () => {
@@ -953,6 +1102,58 @@ describe('agentp CLI', () => {
       const parsed = parseDeferredTicket(s);
       assert.deepStrictEqual(parsed.sessionIds, ['s1', 's2']);
       assert.strictEqual(parsed.sessionId, null);
+    });
+
+    it('formats and parses the session name (display-only)', () => {
+      const { formatTicket, parseDeferredTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: 't', path: '/tmp/x.tmp', server: 'http://x', sessionId: 's1', sessionName: 'Daily fix' });
+      const raw = JSON.parse(s.slice('agentp_ticket '.length));
+      assert.strictEqual(raw.sessionId, 's1');
+      assert.strictEqual(raw.sessionName, 'Daily fix');
+      const parsed = parseDeferredTicket(s);
+      assert.strictEqual(parsed.sessionId, 's1');
+      assert.strictEqual(parsed.sessionName, 'Daily fix');
+    });
+
+    it('formats and parses broadcast session names per id', () => {
+      const { formatTicket, parseDeferredTicket } = require('../bin/agentp');
+      const s = formatTicket({ ctime: 't', path: '/tmp/b.tmp', server: 'http://x', sessionIds: ['s1', 's2'], sessionNames: { s1: 'Alpha', s2: 'Beta' } });
+      const raw = JSON.parse(s.slice('agentp_ticket '.length));
+      assert.deepStrictEqual(raw.sessionIds, ['s1', 's2']);
+      assert.deepStrictEqual(raw.sessionNames, { s1: 'Alpha', s2: 'Beta' });
+      const parsed = parseDeferredTicket(s);
+      assert.deepStrictEqual(parsed.sessionNames, { s1: 'Alpha', s2: 'Beta' });
+      assert.deepStrictEqual(parsed.sessionIds, ['s1', 's2']);
+    });
+
+    it('refreshTicketSessionNames re-fetches the current title (rename support)', async () => {
+      const { refreshTicketSessionNames } = require('../bin/agentp');
+      mockCfg.session = { id: 's42', title: 'Fresh title' };
+      const t = await refreshTicketSessionNames({ server: 'http://x', sessionId: 's42', sessionName: 'Old title' });
+      assert.strictEqual(t.sessionName, 'Fresh title');
+      assert.strictEqual(t.sessionId, 's42'); // routing untouched
+    });
+
+    it('refreshTicketSessionNames keeps the last known name when the fetch fails', async () => {
+      const { refreshTicketSessionNames } = require('../bin/agentp');
+      mockCfg.netError = new Error('boom');
+      const t = await refreshTicketSessionNames({ server: 'http://x', sessionId: 's42', sessionName: 'Old title' });
+      assert.strictEqual(t.sessionName, 'Old title');
+    });
+
+    it('refreshTicketSessionNames fills broadcast names per id', async () => {
+      const { refreshTicketSessionNames } = require('../bin/agentp');
+      mockCfg._getSessionHook = async (server, id) => ({ id, title: String(id) === 's1' ? 'Alpha' : 'Beta' });
+      const t = await refreshTicketSessionNames({ server: 'http://x', sessionIds: ['s1', 's2'], sessionNames: { s1: 'Stale' } });
+      assert.deepStrictEqual(t.sessionNames, { s1: 'Alpha', s2: 'Beta' });
+      assert.deepStrictEqual(t.sessionIds, ['s1', 's2']);
+    });
+
+    it('refreshTicketSessionNames skips fetch without a server (legacy ticket)', async () => {
+      const { refreshTicketSessionNames } = require('../bin/agentp');
+      const t = { path: '/tmp/x.tmp', sessionId: 's42' };
+      assert.strictEqual(await refreshTicketSessionNames(t), t);
+      assert.strictEqual(mockCfg._getSessionCalled, undefined);
     });
 
     it('parses a pretty-printed multi-line ticket', () => {

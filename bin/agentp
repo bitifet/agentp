@@ -21,6 +21,7 @@ const {
   getActiveSessions,
 } = require('../lib/opencode');
 const projectState = require('../lib/project-state');
+const ocmuxLib = require('../lib/ocmux');
 
 const TGAGENTP_PORT_FILE = '/tmp/tgagentp-port';
 
@@ -177,8 +178,20 @@ function parseDeferredTicketInput(text) {
     cancelled: data.cancelled === true,
     followupText,
   };
+  // Display-only name(s): carried through for fallback when a refresh fails,
+  // never used for routing (which keys on sessionId/sessionIds).
+  if (typeof data.sessionName === 'string' && data.sessionName) {
+    ticket.sessionName = data.sessionName;
+  }
   if (Array.isArray(data.sessionIds)) {
     ticket.sessionIds = data.sessionIds.filter(x => typeof x === 'string' && x);
+  }
+  if (data.sessionNames && typeof data.sessionNames === 'object' && !Array.isArray(data.sessionNames)) {
+    const names = {};
+    for (const [k, v] of Object.entries(data.sessionNames)) {
+      if (typeof v === 'string' && v) names[k] = v;
+    }
+    if (Object.keys(names).length > 0) ticket.sessionNames = names;
   }
   return ticket;
 }
@@ -197,7 +210,15 @@ function formatTicket(ticket, elapsed, compact) {
   const fields = { ctime: ticket.ctime, path: ticket.path };
   if (ticket.server) fields.server = ticket.server;
   if (ticket.sessionId) fields.sessionId = ticket.sessionId;
-  if (Array.isArray(ticket.sessionIds) && ticket.sessionIds.length > 0) fields.sessionIds = ticket.sessionIds;
+  // Session name(s) are display-only convenience (ids are hard to read for a
+  // human); the actual routing always keys on `sessionId` / `sessionIds`.
+  if (ticket.sessionName) fields.sessionName = ticket.sessionName;
+  if (Array.isArray(ticket.sessionIds) && ticket.sessionIds.length > 0) {
+    fields.sessionIds = ticket.sessionIds;
+    if (ticket.sessionNames && Object.keys(ticket.sessionNames).length > 0) {
+      fields.sessionNames = ticket.sessionNames;
+    }
+  }
   if (elapsed !== undefined) fields.elapsed = elapsed;
   if (ticket.defer > 0) fields.defer = ticket.defer;
   // Always present so it can be flipped to true and piped back to cancel.
@@ -223,13 +244,74 @@ async function cancelTicket(ticket) {
   process.exit(0);
 }
 
-// Print a deferred ticket (with elapsed) and exit — used for the interrupt path.
-function printTicketAndExit(ticket, onlineTicket) {
-  const elapsed = ticket && ticket.ctime
-    ? Math.max(0, Math.floor((Date.now() - Date.parse(ticket.ctime)) / 1000))
+// Re-fetch the display name(s) of a ticket's target session(s) right before
+// printing, so a session renamed since the ticket was created shows its
+// current title. Display-only: routing always keys on `sessionId`/`sessionIds`.
+// Failures keep the last known name (carried in the parsed ticket) rather than
+// dropping it.
+async function refreshTicketSessionNames(ticket) {
+  if (!ticket || !ticket.server) return ticket;
+  const out = { ...ticket };
+  if (out.sessionId) {
+    try {
+      const s = await getSession(out.server, out.sessionId);
+      if (s && (s.title || s.id)) out.sessionName = s.title || s.id;
+    } catch { /* keep the last known name */ }
+  }
+  if (Array.isArray(out.sessionIds) && out.sessionIds.length > 0) {
+    const names = {};
+    if (out.sessionNames && typeof out.sessionNames === 'object') {
+      for (const [k, v] of Object.entries(out.sessionNames)) if (v) names[k] = v;
+    }
+    for (const id of out.sessionIds) {
+      try {
+        const s = await getSession(out.server, id);
+        if (s && (s.title || s.id)) names[String(id)] = s.title || s.id;
+      } catch { /* keep the last known name for this id */ }
+    }
+    const kept = {};
+    for (const id of out.sessionIds) {
+      const k = String(id);
+      if (names[k]) kept[k] = names[k];
+    }
+    if (Object.keys(kept).length > 0) out.sessionNames = kept;
+    else delete out.sessionNames;
+  }
+  return out;
+}
+
+// Print a deferred ticket (with refreshed session name and elapsed) and exit —
+// used for the interrupt path.
+async function printTicketAndExit(ticket, onlineTicket) {
+  const fresh = await refreshTicketSessionNames(ticket);
+  const elapsed = fresh && fresh.ctime
+    ? Math.max(0, Math.floor((Date.now() - Date.parse(fresh.ctime)) / 1000))
     : 0;
-  process.stdout.write(formatTicket(ticket, elapsed, onlineTicket) + '\n');
+  process.stdout.write(formatTicket(fresh, elapsed, onlineTicket) + '\n');
   process.exit(0);
+}
+
+// Route a registered TUI (if any) to the session a ticket refers to, so
+// re-sending a ticket brings that session into view while it works. Tickets
+// carry no project directory — it is derived from the session's own location.
+// Best-effort: a missing directory, server hiccup or absent registered pane is
+// silently ignored, and broadcast tickets are skipped (no single session to
+// show).
+async function routeTuiToTicketSession(ticket) {
+  if (!ticket || !ticket.server || !ticket.sessionId) return;
+  let directory = null;
+  try {
+    const s = await getSession(ticket.server, ticket.sessionId);
+    directory = s && s.location && s.location.directory ? s.location.directory : null;
+  } catch {
+    return;
+  }
+  if (!directory) return;
+  try {
+    ocmuxLib.switchTui(directory, ticket.server, ticket.sessionId);
+  } catch {
+    // TUI routing is best-effort; never fail the retrieval because of it.
+  }
 }
 
 async function resolveTargetSession(serverBase, sessionName, newSession, opts = {}) {
@@ -912,6 +994,9 @@ async function main() {
       // ignored; the ticket's own "defer" timeout is used instead (default 0).
       const deferredPath = ticket.path;
 
+      // Bring the ticket's session into view in any registered TUI (best-effort).
+      await routeTuiToTicketSession(ticket);
+
       if (ticket.cancelled) {
         await cancelTicket(ticket);
       }
@@ -970,10 +1055,12 @@ async function main() {
       }
 
       // Answer not available yet — re-print the ticket with updated elapsed
-      const elapsed = ticket.ctime
-        ? Math.max(0, Math.floor((Date.now() - Date.parse(ticket.ctime)) / 1000))
+      // and a freshly resolved session name (it may have been renamed).
+      const freshTicket = await refreshTicketSessionNames(ticket);
+      const elapsed = freshTicket.ctime
+        ? Math.max(0, Math.floor((Date.now() - Date.parse(freshTicket.ctime)) / 1000))
         : 0;
-      process.stdout.write(formatTicket(ticket, elapsed, onlineTicket) + '\n');
+      process.stdout.write(formatTicket(freshTicket, elapsed, onlineTicket) + '\n');
       process.exit(0);
     }
 
@@ -995,6 +1082,13 @@ async function main() {
         process.exit(1);
       }
     }
+
+    // Route the project's registered TUI (if any) to the target session so the
+    // prompt streams in view while the deferred child works. Best-effort and
+    // skipped for broadcasts (no single session to show).
+    try {
+      if (projectDir && targetSessionId) ocmuxLib.switchTui(projectDir, serverBase, targetSessionId);
+    } catch {}
 
     const newTicket = spawnDeferredChild({
       promptText,
@@ -1026,8 +1120,10 @@ async function main() {
       }
     }
 
-    // Output the deferred ticket
-    process.stdout.write(formatTicket(newTicket, undefined, onlineTicket) + '\n');
+    // Output the deferred ticket with the session name resolved for display
+    // (ids are hard to remember; the name is fetch-and-forget, never routed on).
+    const freshTicket = await refreshTicketSessionNames(newTicket);
+    process.stdout.write(formatTicket(freshTicket, undefined, onlineTicket) + '\n');
     process.exit(0);
   }
 
@@ -1040,6 +1136,9 @@ async function main() {
       // Recognize a deferred ticket: wait indefinitely for the answer, and
       // re-print the ticket only if the user interrupts with Ctrl+C.
       const deferredPath = ticket.path;
+
+      // Bring the ticket's session into view in any registered TUI (best-effort).
+      await routeTuiToTicketSession(ticket);
 
       if (ticket.cancelled) {
         await cancelTicket(ticket);
@@ -1075,7 +1174,7 @@ async function main() {
       }
 
       const wait = await waitForDeferredResultForever(deferredPath);
-      if (wait.interrupted) printTicketAndExit(ticket, onlineTicket);
+      if (wait.interrupted) await printTicketAndExit(ticket, onlineTicket);
       outputReadyResult(deferredPath, wait.result, qaMode, unusedFollowup, await ticketHeader(ticket, qaMode));
     }
 
@@ -1096,6 +1195,13 @@ async function main() {
       }
     }
 
+    // Route the project's registered TUI (if any) to the target session so the
+    // answer streams in view. Best-effort and skipped for broadcasts (no single
+    // session to show).
+    try {
+      if (projectDir && targetSessionId) ocmuxLib.switchTui(projectDir, serverBase, targetSessionId);
+    } catch {}
+
     const newTicket = spawnDeferredChild({
       promptText,
       serverBase,
@@ -1110,7 +1216,7 @@ async function main() {
     });
 
     const wait = await waitForDeferredResultForever(newTicket.path);
-    if (wait.interrupted) printTicketAndExit(newTicket, onlineTicket);
+    if (wait.interrupted) await printTicketAndExit(newTicket, onlineTicket);
 
     // Answer ready — output it and clean up.
     try {
@@ -1171,8 +1277,8 @@ async function main() {
         preferredSession,
       });
 
-      // Prepend the session's annotation (if any) to the prompt. TUI routing is
-      // owned by explicit ocmux session switches, not by prompt submission.
+      // Prepend the session's annotation (if any) to the prompt. (The parent
+      // already routed the project's TUI to this session before spawning us.)
       let prompt = actualPromptText;
       try {
         if (ctx && ctx.statefile) {
@@ -1281,4 +1387,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, waitForDeferredResult, waitForDeferredResultForever, runBroadcastSend, buildBroadcastSection, formatBroadcastResults, isBroadcastActive };
+module.exports = { main, notifyAgentpGateway, readAllStdin, parseDeferredTicket, parseDeferredTicketInput, formatTicket, refreshTicketSessionNames, waitForDeferredResult, waitForDeferredResultForever, runBroadcastSend, buildBroadcastSection, formatBroadcastResults, isBroadcastActive };

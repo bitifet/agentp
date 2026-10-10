@@ -2,7 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.1.3] - 2026-10-10
+
+The **agentp UX and live activity** release. Deferred tickets now carry the
+session name(s) — `sessionName` for single-session jobs and a `sessionNames`
+id→title map for broadcasts — so a ticket is readable to a human at a glance,
+and the name is re-fetched every time the ticket is printed, so a session
+renamed while a job runs shows its current title. Sending a prompt with
+`agentp` (normal or `--defer`) routes a registered TUI pane for the project to
+the session the prompt went to, so the answer streams in view; re-submitting a
+deferred ticket does the same for the ticket's session. All of it is
+best-effort — no registered pane, no project context, or a broadcast prompt
+leaves the TUI untouched, and routing always keys on the session ids. The
+session picker's activity spinner, meanwhile, now tracks real activity instead
+of a start-up snapshot: it re-polls every second while the picker is open.
+
+### Added
+
+- **Deferred tickets now carry the session name(s).** Agentp tickets include a
+  `sessionName` (normal jobs) or a `sessionNames` id→title map (broadcast jobs)
+  so a human can tell which session a ticket belongs to without decoding the
+  id. The name is display-only — routing still keys on `sessionId`/`sessionIds`
+  — and it is re-fetched every time the ticket is printed, so a session renamed
+  while a deferred job is running shows its current title.
+- **Prompts route the project TUI to the target session.** Sending a prompt
+  with `agentp` (normal or `--defer`) switches a registered TUI pane for the
+  project to the session the prompt went to, so the answer streams in view;
+  re-submitting a deferred ticket does the same for the ticket's session
+  (derived from the session's own location). Best-effort and silent when no
+  pane is registered — and skipped for broadcast prompts, which have no single
+  session to show.
 
 ### Fixed
 

@@ -114,6 +114,7 @@ Arguments:
 
 - `url`: OpenCode server URL or port number (defaults to `4096`). Examples: `4096`, `http://localhost:4096`, `http://192.168.1.50:4096`
 - Omit it and agentp resolves the project itself: the nearest `.ocmux.json` (upward from the working directory) supplies the server URL, the project directory, and the target session id. `agentp $(ocmux)` still works as an override, but is no longer needed.
+- When a registered TUI pane exists for the project, `agentp` routes it to the session the prompt went to (normal and `--defer`), so the answer streams in view; re-submitting a deferred ticket does the same for the ticket's session. Best-effort and silent when no pane is registered — broadcast prompts are left untouched (no single session to show).
 
 ## Examples
 
@@ -218,6 +219,8 @@ The ticket is `agentp_ticket` followed by a JSON object with these fields:
 - `server` — OpenCode server URL used by the deferred job.
 - `sessionId` — OpenCode session ID used by a normal deferred job.
 - `sessionIds` — array of OpenCode session IDs used by a **broadcast** deferred job (replaces `sessionId`).
+- `sessionName` — the session's current title, display-only: routing always keys on `sessionId`. Refreshed on every ticket print, so a session renamed while a job is running shows its up-to-date name.
+- `sessionNames` — map of session ID → current title for **broadcast** tickets (display-only, refreshed on every print).
 - `elapsed` — seconds since `ctime`, included only when the ticket is re-printed (not on first print).
 - `defer` — the timeout requested at submission, included only when it was > 0.
 - `cancelled` — always present (defaults to `false`). Set it to `true` and pipe the ticket back to cancel the running job (see below).
