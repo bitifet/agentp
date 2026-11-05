@@ -1273,7 +1273,9 @@ async function main() {
       answer = formatBroadcastResults(bres);
     } else {
       sessionId = resolvedSessionId || await resolveTargetSession(serverBase, sessionName, newSession, {
-        directory: projectDir,
+        // Without state, scope implicit selection to the invoking directory;
+        // never use the server-wide most-recent session.
+        directory: projectDir || process.cwd(),
         preferredSession,
       });
 

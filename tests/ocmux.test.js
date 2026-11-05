@@ -2114,6 +2114,61 @@ describe('model picker ordering', () => {
     });
     assert.strictEqual(pointerLine(output, 'ocmux — Broadcast model'), '▶ aaa/model');
   });
+
+  it('updates the info panel immediately after a model switch', async () => {
+    httpResponder = (opts) => (opts.path && opts.path.startsWith('/api/model')
+      ? JSON.stringify({ data: [{ providerID: 'zzz', id: 'new' }] })
+      : null);
+    const initial = [{ id: 'sA', title: 'Alpha', model: { providerID: 'aaa', id: 'old' } }];
+    const updated = [{ id: 'sA', title: 'Alpha', model: { providerID: 'zzz', id: 'new' } }];
+    const { output } = await driveSessionMenu({
+      sessions: initial, current: 'sA',
+      opts: { loadSessions: () => Promise.resolve(updated) },
+      keys: [['m', 'm'], ['', 'return'], ['q', 'q']],
+      stepDelay: 30,
+    });
+    const infoFrames = output
+      .map((o) => o.replace(/\x1b\[[0-9;]*m/g, ''))
+      .filter((f) => f.includes('Alpha') && f.includes('Model:'));
+    assert.ok(infoFrames.some((f) => f.includes('Model: aaa/old')),
+      'expected the initial model before the switch');
+    assert.ok(infoFrames.some((f) => f.includes('Model: zzz/new')),
+      'expected the new model without waiting for the next poll');
+  });
+});
+
+describe('session metadata refresh', () => {
+  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('updates the info panel immediately after an agent switch', async () => {
+    httpResponder = (opts) => {
+      if (opts.path && opts.path.startsWith('/api/agent')) {
+        return JSON.stringify({ data: [
+          { id: 'build', name: 'build', mode: 'primary' },
+          { id: 'plan', name: 'plan', mode: 'primary' },
+        ] });
+      }
+      if (opts.path && opts.path === '/api/session/sA') {
+        return JSON.stringify({ data: { id: 'sA', title: 'Alpha', agent: 'plan' } });
+      }
+      return null;
+    };
+    const initial = [{ id: 'sA', title: 'Alpha', agent: 'build' }];
+    const updated = [{ id: 'sA', title: 'Alpha', agent: 'plan' }];
+    const { output } = await driveSessionMenu({
+      sessions: initial, current: 'sA',
+      opts: { loadSessions: () => Promise.resolve(updated) },
+      keys: [['a', 'a'], ['', 'down'], ['', 'return'], ['q', 'q']],
+      stepDelay: 30,
+    });
+    const infoFrames = output
+      .map(stripAnsi)
+      .filter((f) => f.includes('Alpha') && f.includes('Agent:'));
+    assert.ok(infoFrames.some((f) => f.includes('Agent: build')),
+      'expected the initial agent before the switch');
+    assert.ok(infoFrames.some((f) => f.includes('Agent: plan')),
+      'expected the new agent without waiting for the next poll');
+  });
 });
 
 // ───────────────────────────────────────────────────────────────────

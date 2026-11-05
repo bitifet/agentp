@@ -225,6 +225,7 @@ const GLYPH_BELL = '🔔';     // status bar: at least one marker in the list
 const CELL_NONE = '  ';      // placeholder reserving one absent marker column
 const PENDING_POLL_MS = 2000; // how often the open picker re-checks pending state
 const RUNNING_POLL_MS = 1000; // how often the open picker re-checks which sessions are running
+const SESSION_POLL_MS = 3000; // how often the open picker re-reads session metadata (agent/model)
 const SPIN_INTERVAL_MS = 120; // spinner frame rate while any listed session runs
 
 // The two marker columns for a session/project: ❓ and/or 🔒, each column fixed
@@ -583,7 +584,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
 // `loadRunning` (optional async () => Set) refreshes it every RUNNING_POLL_MS
 // so every row that is running shows the spinner and the BUSY/IDLE status
 // tracks the session's real activity.
-function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [], loadPending, loadRunning, broadcast = null } = {}) {
+function sessionMenu(sessions, currentSession, annotations, server, { onPick, onRename, onDelete, onReminder, runningIds, modelContext, onBroadcastChange, onInspectSession, dir, notices = [], loadPending, loadRunning, loadSessions, broadcast = null } = {}) {
   return new Promise((resolve) => {
     if (!process.stdin.isTTY) return resolve(null);
 
@@ -646,6 +647,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let runningSet = runningIds instanceof Set ? runningIds : new Set();
     let runningBusy = false;
     let runningTimer = null;
+    let sessionTimer = null;
     // Answer mode ('A') state: the pending forms of the cursor session being
     // answered one at a time, the answers chosen so far and the flat item list.
     let answer = null;
@@ -693,6 +695,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       if (spinTimer) { clearInterval(spinTimer); spinTimer = null; }
       if (pendingTimer) { clearInterval(pendingTimer); pendingTimer = null; }
       if (runningTimer) { clearInterval(runningTimer); runningTimer = null; }
+      if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; }
       process.stdout.removeListener('resize', draw);
       try { process.stdin.setRawMode(false); } catch {}
       process.stdin.pause();
@@ -1436,6 +1439,25 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         (r) => `${r.title || ''} ${r.id || ''}`);
       if (cursor >= view.length) cursor = Math.max(0, view.length - 1);
     };
+
+    // ── Live session-metadata refresh (agent/model) ─────────────────
+    // Agent/model can change here or in the OpenCode TUI. Re-read the session
+    // list on a timer AND immediately after ocmux performs a change, so the
+    // info panel never keeps showing the previous value until the next poll.
+    // A request counter makes sure a slow, older response cannot overwrite a
+    // newer snapshot.
+    let sessionsReq = 0;
+    const refreshSessions = () => {
+      if (!loadSessions) return Promise.resolve();
+      const req = ++sessionsReq;
+      return Promise.resolve(loadSessions()).then((latest) => {
+        if (req !== sessionsReq) return;
+        const byId = new Map((latest || []).map((s) => [String(s.id), s]));
+        rows = rows.map((s) => ({ ...s, ...(byId.get(String(s.id)) || {}) }));
+        applySearch();
+        if (!done) draw();
+      }).catch(() => { /* metadata refresh is best effort */ });
+    };
     // Recompute the filtered view of the currently open inline list.
     const applyListSearch = () => {
       if (!list) return;
@@ -1701,6 +1723,7 @@ const toggleBroadcast = (idx) => {
         } else if (key.name === 'm') {
           openModelPicker('Broadcast model (all selected sessions)', view[cursor], 'broadcast', async (item) => {
             await Promise.all([...broadcastSel].map(id => switchModel(server, id, item)));
+            await refreshSessions();
           });
         } else if (key.name === 'return' || key.name === 'enter') {
           if (cursor < view.length) {
@@ -1766,14 +1789,15 @@ const toggleBroadcast = (idx) => {
             const primary = all.filter(x => x.mode === 'primary' && !x.hidden);
             const agents = primary.length ? primary : all;
             openList('Agents', agents, (x) => `${x.name || x.id}${x.description ? ' — ' + x.description.slice(0, 40) : ''}`, (item) =>
-              updateSession(server, target.id, null, item.id));
+              updateSession(server, target.id, null, item.id).then(() => refreshSessions()));
           }).catch(commandErr);
         }
         return;
       }
       if (key.name === 'm') {
         const target = view[cursor];
-        if (target) openModelPicker('Models', target, 'normal', (item) => switchModel(server, target.id, item));
+        if (target) openModelPicker('Models', target, 'normal', (item) =>
+          switchModel(server, target.id, item).then(() => refreshSessions()));
         return;
       }
       if (key.name === 'd') {
@@ -1812,6 +1836,9 @@ const toggleBroadcast = (idx) => {
     syncSpin(false);
     if (loadRunning) {
       runningTimer = setInterval(() => { refreshRunning(); }, RUNNING_POLL_MS);
+    }
+    if (loadSessions) {
+      sessionTimer = setInterval(() => { refreshSessions(); }, SESSION_POLL_MS);
     }
     // Poll for pending agent questions / permission replies while the picker is
     // open (the ❓/🔒 marker columns and the 'A' entry refresh live).
@@ -2226,6 +2253,7 @@ async function cmdSessionSwitch(targetDir, directRef, allProjects = false) {
         // Which sessions are actively running, re-polled while the picker is
         // open so the spinner and BUSY/IDLE status stay accurate.
         loadRunning: () => getActiveSessions(server),
+        loadSessions: () => listSessions(server, dir).then((items) => items.filter(s => !s.parentID)),
         onBroadcastChange: (ids) => projectState.writeProjectState(sf, { broadcast: ids }),
         onInspectSession: (id) => refreshTui(dir, server, id),
         onPick: async (row) => {
@@ -2428,7 +2456,9 @@ async function cmdTui(targetDir, serverArg, shared, sessionArg) {
   }
   // The shared TUI is a cross-project fallback, so it can run without a project
   // state file (defaulting to the configured/default server).
-  const directory = state ? state.directory : targetDir;
+  // A shared TUI is server-wide when no project state exists. Do not filter
+  // sessions (or create its initial session) under an arbitrary cwd.
+  const directory = state ? state.directory : (shared ? undefined : targetDir);
   const server = serverArg || (state && state.server) || DEFAULT_SERVER;
   if (!await checkServer(server)) {
     console.error(`Error: OpenCode server not reachable at ${server}.`);
