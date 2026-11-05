@@ -504,7 +504,7 @@ function sessionInfoLines(s, runningIds, modelContext, cols, highlight = false, 
 //                 pass QUESTION_BG so an active prompt stands out)
 //   infoLines  -> details below the status bar (colours supplied by the caller)
 // A "(start-end/total)" range is appended to the heading when scrolling.
-function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg, footerLeft = false, footerRight = null, footerBg = BAR_BG }) {
+function renderList({ title, items, cursor, row, footer, infoLines = [], extraLines = [], cols: colsArg, rows: rowsArg, footerLeft = false, footerRight = null, footerBg = BAR_BG, showPointer = true }) {
   const cols = colsArg || process.stdout.columns || 80;
   const termRows = rowsArg || process.stdout.rows || 24;
   const extras = (extraLines || []).filter((l) => l != null && l !== '');
@@ -536,7 +536,7 @@ function renderList({ title, items, cursor, row, footer, infoLines = [], extraLi
       const reverse = r && typeof r === 'object' && r.reverse;
       // The pointer sits outside the row's own styling so a light-yellow arrow
       // stays visible even on a reverse-video row.
-      const ptr = idx === cursor ? `${LIGHT_YELLOW}▶\x1b[0m ` : '  ';
+      const ptr = showPointer && idx === cursor ? `${LIGHT_YELLOW}▶\x1b[0m ` : '  ';
       const body = text == null ? '' : text;
       out += ptr + (reverse ? `\x1b[7m${body}\x1b[0m` : body) + '\n';
       rendered++;
@@ -764,6 +764,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
           footer: searchFooter(listSearch, 'Enter: select · /: search · h: help · ESC: back'),
           footerLeft: listSearch.active,
           footerRight: listSearch.active ? SEARCH_HINT : null,
+          showPointer: !listSearch.live,
           extraLines: listExtras,
         }));
         return;
@@ -1440,24 +1441,6 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
       if (cursor >= view.length) cursor = Math.max(0, view.length - 1);
     };
 
-    // ── Live session-metadata refresh (agent/model) ─────────────────
-    // Agent/model can change here or in the OpenCode TUI. Re-read the session
-    // list on a timer AND immediately after ocmux performs a change, so the
-    // info panel never keeps showing the previous value until the next poll.
-    // A request counter makes sure a slow, older response cannot overwrite a
-    // newer snapshot.
-    let sessionsReq = 0;
-    const refreshSessions = () => {
-      if (!loadSessions) return Promise.resolve();
-      const req = ++sessionsReq;
-      return Promise.resolve(loadSessions()).then((latest) => {
-        if (req !== sessionsReq) return;
-        const byId = new Map((latest || []).map((s) => [String(s.id), s]));
-        rows = rows.map((s) => ({ ...s, ...(byId.get(String(s.id)) || {}) }));
-        applySearch();
-        if (!done) draw();
-      }).catch(() => { /* metadata refresh is best effort */ });
-    };
     // Recompute the filtered view of the currently open inline list.
     const applyListSearch = () => {
       if (!list) return;
@@ -1723,7 +1706,6 @@ const toggleBroadcast = (idx) => {
         } else if (key.name === 'm') {
           openModelPicker('Broadcast model (all selected sessions)', view[cursor], 'broadcast', async (item) => {
             await Promise.all([...broadcastSel].map(id => switchModel(server, id, item)));
-            await refreshSessions();
           });
         } else if (key.name === 'return' || key.name === 'enter') {
           if (cursor < view.length) {
@@ -1789,15 +1771,14 @@ const toggleBroadcast = (idx) => {
             const primary = all.filter(x => x.mode === 'primary' && !x.hidden);
             const agents = primary.length ? primary : all;
             openList('Agents', agents, (x) => `${x.name || x.id}${x.description ? ' — ' + x.description.slice(0, 40) : ''}`, (item) =>
-              updateSession(server, target.id, null, item.id).then(() => refreshSessions()));
+              updateSession(server, target.id, null, item.id));
           }).catch(commandErr);
         }
         return;
       }
       if (key.name === 'm') {
         const target = view[cursor];
-        if (target) openModelPicker('Models', target, 'normal', (item) =>
-          switchModel(server, target.id, item).then(() => refreshSessions()));
+        if (target) openModelPicker('Models', target, 'normal', (item) => switchModel(server, target.id, item));
         return;
       }
       if (key.name === 'd') {
@@ -1838,7 +1819,15 @@ const toggleBroadcast = (idx) => {
       runningTimer = setInterval(() => { refreshRunning(); }, RUNNING_POLL_MS);
     }
     if (loadSessions) {
-      sessionTimer = setInterval(() => { refreshSessions(); }, SESSION_POLL_MS);
+      sessionTimer = setInterval(async () => {
+        try {
+          const latest = await loadSessions();
+          const byId = new Map((latest || []).map((s) => [String(s.id), s]));
+          rows = rows.map((s) => ({ ...s, ...(byId.get(String(s.id)) || {}) }));
+          applySearch();
+          draw();
+        } catch { /* metadata refresh is best effort */ }
+      }, SESSION_POLL_MS);
     }
     // Poll for pending agent questions / permission replies while the picker is
     // open (the ❓/🔒 marker columns and the 'A' entry refresh live).

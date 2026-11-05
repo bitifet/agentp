@@ -2115,59 +2115,34 @@ describe('model picker ordering', () => {
     assert.strictEqual(pointerLine(output, 'ocmux — Broadcast model'), '▶ aaa/model');
   });
 
-  it('updates the info panel immediately after a model switch', async () => {
-    httpResponder = (opts) => (opts.path && opts.path.startsWith('/api/model')
-      ? JSON.stringify({ data: [{ providerID: 'zzz', id: 'new' }] })
-      : null);
-    const initial = [{ id: 'sA', title: 'Alpha', model: { providerID: 'aaa', id: 'old' } }];
-    const updated = [{ id: 'sA', title: 'Alpha', model: { providerID: 'zzz', id: 'new' } }];
+  it('hides the current-selection pointer while filtering and restores it on Enter', async () => {
+    serveModels();
     const { output } = await driveSessionMenu({
-      sessions: initial, current: 'sA',
-      opts: { loadSessions: () => Promise.resolve(updated) },
-      keys: [['m', 'm'], ['', 'return'], ['q', 'q']],
-      stepDelay: 30,
+      sessions: [{ id: 'sA', title: 'Alpha', model: { providerID: 'openai', id: 'gpt' } }],
+      current: 'sA', opts: {},
+      keys: [['m', 'm'], ['/', 'slash'], ['g', 'g'], ['', 'return'], ['', 'escape'], ['q', 'q'], ['q', 'q']],
     });
-    const infoFrames = output
-      .map((o) => o.replace(/\x1b\[[0-9;]*m/g, ''))
-      .filter((f) => f.includes('Alpha') && f.includes('Model:'));
-    assert.ok(infoFrames.some((f) => f.includes('Model: aaa/old')),
-      'expected the initial model before the switch');
-    assert.ok(infoFrames.some((f) => f.includes('Model: zzz/new')),
-      'expected the new model without waiting for the next poll');
+    const frames = output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, ''));
+    const liveSearchFrame = frames.find((f) => f.includes('Search: g'));
+    assert.ok(liveSearchFrame, 'expected the model list to remain in search mode');
+    assert.ok(!liveSearchFrame.includes('▶'), 'expected no selection pointer while typing a filter');
+    const returnedFrame = frames.find((f) => f.includes('ocmux — Models') && f.includes('Enter: select'));
+    assert.ok(returnedFrame && returnedFrame.includes('▶'),
+      'expected the selection pointer to return after confirming the filter');
   });
-});
 
-describe('session metadata refresh', () => {
-  const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
-
-  it('updates the info panel immediately after an agent switch', async () => {
-    httpResponder = (opts) => {
-      if (opts.path && opts.path.startsWith('/api/agent')) {
-        return JSON.stringify({ data: [
-          { id: 'build', name: 'build', mode: 'primary' },
-          { id: 'plan', name: 'plan', mode: 'primary' },
-        ] });
-      }
-      if (opts.path && opts.path === '/api/session/sA') {
-        return JSON.stringify({ data: { id: 'sA', title: 'Alpha', agent: 'plan' } });
-      }
-      return null;
-    };
-    const initial = [{ id: 'sA', title: 'Alpha', agent: 'build' }];
-    const updated = [{ id: 'sA', title: 'Alpha', agent: 'plan' }];
+  it('hides the current-selection pointer while filtering and restores it on Esc', async () => {
+    serveModels();
     const { output } = await driveSessionMenu({
-      sessions: initial, current: 'sA',
-      opts: { loadSessions: () => Promise.resolve(updated) },
-      keys: [['a', 'a'], ['', 'down'], ['', 'return'], ['q', 'q']],
-      stepDelay: 30,
+      sessions: [{ id: 'sA', title: 'Alpha', model: { providerID: 'openai', id: 'gpt' } }],
+      current: 'sA', opts: {},
+      keys: [['m', 'm'], ['/', 'slash'], ['g', 'g'], ['', 'escape'], ['', 'escape'], ['q', 'q']],
     });
-    const infoFrames = output
-      .map(stripAnsi)
-      .filter((f) => f.includes('Alpha') && f.includes('Agent:'));
-    assert.ok(infoFrames.some((f) => f.includes('Agent: build')),
-      'expected the initial agent before the switch');
-    assert.ok(infoFrames.some((f) => f.includes('Agent: plan')),
-      'expected the new agent without waiting for the next poll');
+    const frames = output.map((o) => o.replace(/\x1b\[[0-9;]*m/g, ''));
+    const liveSearchFrame = frames.find((f) => f.includes('Search: g'));
+    assert.ok(liveSearchFrame && !liveSearchFrame.includes('▶'));
+    const returnedFrame = frames.find((f) => f.includes('ocmux — Models') && f.includes('Enter: select'));
+    assert.ok(returnedFrame && returnedFrame.includes('▶'));
   });
 });
 
