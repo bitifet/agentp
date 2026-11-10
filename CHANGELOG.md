@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.4] - 2026-11-10
+
+The **shared TUI and session-scoping** release. The shared TUI now starts
+server-wide when no project state exists, and `agentp` no longer risks sending
+an implicit prompt to a different project's most-recent session. The session
+picker also refreshes agent/model metadata every three seconds and hides the
+selection pointer while filtering. The README additionally clarifies the
+Neovim-specific Ctrl-C filter limitation and its `--defer N` workaround.
+
+### Fixed
+
+- **Shared TUI startup without project state.** `ocmux tui --shared` now works
+  without a `.ocmux.json` and discovers sessions server-wide instead of
+  incorrectly scoping itself to the current directory.
+- **Implicit `agentp` session selection without project state.** When no
+  project state identifies a session, `agentp` now scopes session resolution to
+  the invoking directory rather than using the server-wide most-recent session,
+  avoiding accidental prompts to another project's session.
+- **Filtered picker selection pointer.** The current-selection arrow is hidden
+  while typing a filter and restored when the filter is confirmed or cancelled.
+- **Session agent/model metadata refresh.** The session picker continues to
+  refresh metadata every three seconds, including changes made outside the
+  picker; the refresh is intentionally not immediate after picker changes to
+  avoid displaying stale data.
+
+### Documentation
+
+- Clarified that the Ctrl-C ticket handoff works in the shell and as a Vim
+  visual filter, while Neovim currently discards the filter output after
+  Ctrl-C. The README recommends `--defer N` as a Neovim workaround.
+
 ## [2.1.3] - 2026-10-10
 
 The **agentp UX and live activity** release. Deferred tickets now carry the

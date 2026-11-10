@@ -167,6 +167,22 @@ From Vim/Neovim, send the current visual selection and keep the prompt with the 
 :'<,'>!agentp --qa
 ```
 
+When `agentp` is run from a shell, pressing `Ctrl+C` while it waits for an
+answer prints a deferred ticket to stdout so the work can continue in the
+background. This also works as a Vim `:!` visual filter. Neovim currently
+discards the filter's output in this interrupted case, even when `agentp`
+handles the signal, prints the ticket, and exits successfully. This is a
+Neovim-specific limitation; normal completion of `:!` filters is unaffected.
+As a workaround in Neovim, use `--defer N`: it prints the answer if it arrives
+within `N` seconds, or replaces the selection with a ticket if it does not:
+
+```vim
+:<,'>!agentp --qa --defer 2
+```
+
+You can later retrieve the answer by piping the ticket back to `agentp --defer`;
+see the deferred-execution section below for details.
+
 From Vim/Neovim, forward the answer to your Telegram:
 
 ```vim
