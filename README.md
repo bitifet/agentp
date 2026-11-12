@@ -169,12 +169,13 @@ From Vim/Neovim, send the current visual selection and keep the prompt with the 
 
 When `agentp` is run from a shell, pressing `Ctrl+C` while it waits for an
 answer prints a deferred ticket to stdout so the work can continue in the
-background. This also works as a Vim `:!` visual filter. Neovim currently
-discards the filter's output in this interrupted case, even when `agentp`
-handles the signal, prints the ticket, and exits successfully. This is a
-Neovim-specific limitation; normal completion of `:!` filters is unaffected.
-As a workaround in Neovim, use `--defer N`: it prints the answer if it arrives
-within `N` seconds, or replaces the selection with a ticket if it does not:
+background. This also works as a Vim `:!` visual filter. The corresponding
+Neovim filter-output issue was fixed in the `master` branch and verified there
+on 2026-11-12; the fix is expected in a future Neovim release. Until using a
+Neovim build that includes the fix, `Ctrl+C` may cause Neovim to discard the
+filter's output. As a workaround, use `--defer N`: it prints the answer if it
+arrives within `N` seconds, or replaces the selection with a ticket if it does
+not:
 
 ```vim
 :<,'>!agentp --qa --defer 2
@@ -182,6 +183,30 @@ within `N` seconds, or replaces the selection with a ticket if it does not:
 
 You can later retrieve the answer by piping the ticket back to `agentp --defer`;
 see the deferred-execution section below for details.
+
+To try the fix before it is released, build Neovim's latest `master` locally.
+Install the prerequisites listed in the [Neovim build instructions](https://github.com/neovim/neovim/blob/master/BUILD.md#build-prerequisites),
+then run:
+
+```bash
+git clone --depth 1 --branch master https://github.com/neovim/neovim.git neovim-master
+cd neovim-master
+make CMAKE_BUILD_TYPE=RelWithDebInfo
+VIMRUNTIME=runtime ./build/bin/nvim --clean
+```
+
+This runs the locally built editor without installing it system-wide. For
+Ubuntu x86_64, if you choose to build and install the Debian package using the
+Neovim build instructions, the generated package may be named `nvim.deb`:
+
+```bash
+cd build
+cpack -G DEB
+sudo dpkg -i nvim.deb
+```
+
+Check the generated filename before installing, as it may vary by build or
+Neovim version.
 
 From Vim/Neovim, forward the answer to your Telegram:
 
