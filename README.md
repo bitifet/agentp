@@ -418,6 +418,8 @@ the project found upward from `<directory>` (default: `$PWD`):
   state is obvious at a glance. Deleting the current session adopts the session
   under the cursor as the new current (recorded, refreshed in the TUI, and
   highlighted)
+- When the session-picker help does not fit in the terminal, scroll with the
+  arrow keys or `j`/`k`; any other key returns to the picker.
 - **pending-answer awareness**: while the picker is open, ocmux re-checks the
   project every 2 seconds and marks sessions that are waiting on the agent.
   Two independent marker columns: ❓ = pending agent **question** (a form),

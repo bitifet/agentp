@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.1.5] - 2026-11-12
+
+The **safer session targeting and accessible help** release. `agentp` now
+refuses to guess a session when no project context is available, preventing a
+prompt from going to an unrelated server-wide session. The `ocmux` session
+picker help can now be scrolled on short terminals.
+
+### Fixed
+
+- **Implicit session selection without project context.** `agentp` previously
+  could choose the server-wide most-recent session when `.ocmux.json` was
+  missing. It now exits with an actionable error instead; initialize the
+  project with `ocmux serve` or explicitly name a session with `--session`
+  (and use `--new` to create it if needed).
+
+### Improved
+
+- **Scrollable session-picker help.** When the help text is taller than the
+  terminal, use the arrow keys or `j`/`k` to scroll through it. Any other key
+  returns to the picker.
+
 ## [2.1.4] - 2026-11-10
 
 The **shared TUI and session-scoping** release. The shared TUI now starts
