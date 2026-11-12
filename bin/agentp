@@ -321,6 +321,13 @@ async function resolveTargetSession(serverBase, sessionName, newSession, opts = 
   const directory = opts.directory || undefined;
   const preferredSession = opts.preferredSession || null;
 
+  // Never let an implicit target fall back to the server-wide most-recent
+  // session. Without project state (or another directory context), require the
+  // caller to name a session explicitly rather than guessing.
+  if (!directory && !sessionName && !preferredSession) {
+    throw new Error('No project context found (.ocmux.json); refusing to choose a session implicitly. Run \'ocmux serve\' or pass --session <name>.');
+  }
+
   let sessions;
   try {
     sessions = await listSessions(serverBase, directory);
@@ -756,6 +763,7 @@ async function main() {
       console.error('  --getLast   Retrieve last N assistant answers (or QA pairs with --qa) from session history');
       console.error('  --session   Target a specific session by name (creates it if not found with --new)');
       console.error('  --new       Create a new session with the given title (requires --session)');
+      console.error('              Without project state, specify --session instead of relying on an implicit session.');
       console.error('  --server    OpenCode server URL (overrides .ocmux.json); e.g. http://host:4096');
       console.error('  --help      Show this help message');
       console.error('');

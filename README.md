@@ -114,6 +114,7 @@ Arguments:
 
 - `url`: OpenCode server URL or port number (defaults to `4096`). Examples: `4096`, `http://localhost:4096`, `http://192.168.1.50:4096`
 - Omit it and agentp resolves the project itself: the nearest `.ocmux.json` (upward from the working directory) supplies the server URL, the project directory, and the target session id. `agentp $(ocmux)` still works as an override, but is no longer needed.
+- Without a usable `.ocmux.json`, `agentp` refuses to guess a session. Initialize the project with `ocmux serve`, or explicitly target one with `--session <name>` (add `--new` to create it if needed).
 - When a registered TUI pane exists for the project, `agentp` routes it to the session the prompt went to (normal and `--defer`), so the answer streams in view; re-submitting a deferred ticket does the same for the ticket's session. Best-effort and silent when no pane is registered — broadcast prompts are left untouched (no single session to show).
 
 ## Examples

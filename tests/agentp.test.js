@@ -321,7 +321,7 @@ describe('agentp CLI', () => {
     });
 
     it('port number sets server base', async () => {
-      setArgv(['8080']);
+      setArgv(['--session', 'test', '8080']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
       mockCfg._spawnAnswer = 'hi';
@@ -332,7 +332,7 @@ describe('agentp CLI', () => {
     });
 
     it('URL argument sets server base', async () => {
-      setArgv(['http://192.168.1.1:5000/']);
+      setArgv(['--session', 'test', 'http://192.168.1.1:5000/']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
       mockCfg._spawnAnswer = 'hi';
@@ -400,7 +400,7 @@ describe('agentp CLI', () => {
       assert.ok(errors.some(e => e.includes('no session found matching')));
     });
 
-    it('picks most recent session without --session', async () => {
+    it('refuses to pick a server-wide most recent session without project context', async () => {
       setArgv([]);
       provideStdin('hello');
       mockCfg.sessions = [
@@ -410,11 +410,12 @@ describe('agentp CLI', () => {
       ];
       mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await assert.rejects(main(), /EXIT:0/);
-      assert.strictEqual(spawnResolvedSessionId(), 's2');
+      await assert.rejects(main(), /EXIT:1/);
+      assert.ok(errors.some(e => e.includes('refusing to choose a session implicitly')));
+      assert.strictEqual(mockCfg._spawn, undefined);
     });
 
-    it('uses time.created as fallback for sorting', async () => {
+    it('does not select a session by recency when project context is missing', async () => {
       setArgv([]);
       provideStdin('hello');
       mockCfg.sessions = [
@@ -423,12 +424,12 @@ describe('agentp CLI', () => {
       ];
       mockCfg._spawnAnswer = 'hi';
       const { main } = require('../bin/agentp');
-      await assert.rejects(main(), /EXIT:0/);
-      assert.strictEqual(spawnResolvedSessionId(), 's1');
+      await assert.rejects(main(), /EXIT:1/);
+      assert.strictEqual(mockCfg._spawn, undefined);
     });
 
-    it('creates agentp session when no sessions exist', async () => {
-      setArgv([]);
+    it('creates a named session when explicitly requested without project state', async () => {
+      setArgv(['--session', 'agentp', '--new']);
       provideStdin('hello');
       mockCfg.sessions = [];
       mockCfg._spawnAnswer = 'hi';
@@ -440,7 +441,7 @@ describe('agentp CLI', () => {
 
   describe('output formatting', () => {
     it('outputs plain answer without --qa', async () => {
-      setArgv([]);
+      setArgv(['--session', 'test']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
       mockCfg._spawnAnswer = 'hi\n';
@@ -547,7 +548,7 @@ describe('agentp CLI', () => {
     }
 
     it('--defer returns a ticket immediately', async () => {
-      setArgv(['--defer']);
+      setArgv(['--defer', '--session', 'agentp', '--new']);
       provideStdin('hello');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -564,7 +565,7 @@ describe('agentp CLI', () => {
 
     it('--defer tickets include the session name for display', async () => {
       mockCfg.session = { id: 'new-session-id', title: 'My Task' };
-      setArgv(['--defer']);
+      setArgv(['--defer', '--session', 'agentp', '--new']);
       provideStdin('hello');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -651,7 +652,7 @@ describe('agentp CLI', () => {
     });
 
     it('--defer N includes the defer field in the ticket', async () => {
-      setArgv(['--defer', '1']);
+      setArgv(['--defer', '1', '--session', 'agentp', '--new']);
       provideStdin('hello');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -664,7 +665,7 @@ describe('agentp CLI', () => {
     });
 
     it('--onlineTicket prints a compact single-line ticket', async () => {
-      setArgv(['--defer', '--onlineTicket']);
+      setArgv(['--defer', '--onlineTicket', '--session', 'agentp', '--new']);
       provideStdin('hello');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -677,7 +678,7 @@ describe('agentp CLI', () => {
     });
 
     it('--defer N returns the answer when it arrives within the timeout', async () => {
-      setArgv(['--defer', '5']);
+      setArgv(['--defer', '5', '--session', 'agentp', '--new']);
       provideStdin('hello');
       mockCfg._spawnAnswer = 'the fast answer';
       const { main } = require('../bin/agentp');
@@ -832,7 +833,7 @@ describe('agentp CLI', () => {
     });
 
     it('new tickets include cancelled:false', async () => {
-      setArgv(['--defer']);
+      setArgv(['--defer', '--session', 'agentp', '--new']);
       provideStdin('hello\n');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -842,7 +843,7 @@ describe('agentp CLI', () => {
 
     it('--server overrides the server URL', async () => {
       mockCfg.sessions = [{ id: 's1', time: { updated: 1 } }];
-      setArgv(['--defer', '--server', 'http://remote:9999']);
+      setArgv(['--defer', '--session', 's1', '--server', 'http://remote:9999']);
       provideStdin('hello\n');
       const { main } = require('../bin/agentp');
       await assert.rejects(main(), /EXIT:0/);
@@ -850,6 +851,13 @@ describe('agentp CLI', () => {
     });
 
     it('ignores child/subagent sessions when picking the newest target', async () => {
+      nodeMock.method(projectState, 'resolveContext', () => ({
+        statefile: '/tmp/proj/.ocmux.json',
+        state: { directory: '/tmp/proj' },
+        directory: '/tmp/proj',
+        session: null,
+        server: null,
+      }));
       mockCfg.sessions = [
         { id: 'child', parentID: 'parent', time: { updated: 200 } }, // newest, but a subagent
         { id: 'main', time: { updated: 100 } },
@@ -924,7 +932,7 @@ describe('agentp CLI', () => {
     }
 
     it('interrupting a prompt with SIGINT prints a ticket', async () => {
-      setArgv([]);
+      setArgv(['--session', 'test']);
       provideStdin('hello');
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
       // No _spawnAnswer → the child never completes, so the wait blocks.
@@ -1017,15 +1025,16 @@ describe('agentp CLI', () => {
       try { fs.unlinkSync(tmp); } catch {}
     });
 
-    it('does not attempt TUI routing without project context', async () => {
+    it('refuses an implicit prompt when project context is missing instead of choosing a session', async () => {
       mockCfg.sessions = [{ id: 's1', title: 'test', time: { updated: 1 } }];
       mockCfg._spawnAnswer = 'done answer';
       setArgv([]);
       provideStdin('hello');
       const { main } = require('../bin/agentp');
-      await assert.rejects(main(), /EXIT:0/);
+      await assert.rejects(main(), /EXIT:1/);
+      assert.ok(errors.some(e => e.includes('refusing to choose a session implicitly')));
       assert.strictEqual(mockCfg._switchTuiCalled, undefined);
-      cleanupSpawnFiles();
+      assert.strictEqual(mockCfg._spawn, undefined);
     });
   });
 
