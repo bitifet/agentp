@@ -828,19 +828,21 @@ describe('search helpers', () => {
 // ───────────────────────────────────────────────────────────────────
 // Interactive sessionMenu (broadcast exit + '/' search) with a stubbed TTY
 // ───────────────────────────────────────────────────────────────────
-async function driveSessionMenu({ sessions, current, opts = {}, keys, stepDelay = 5 }) {
+async function driveSessionMenu({ sessions, current, opts = {}, keys, rows, stepDelay = 5 }) {
   const saved = {
     isTTY: process.stdin.isTTY,
     setRawMode: process.stdin.setRawMode,
     resume: process.stdin.resume,
     pause: process.stdin.pause,
     write: process.stderr.write,
+    rows: process.stdout.rows,
   };
   const output = [];
   process.stdin.isTTY = true;
   process.stdin.setRawMode = () => {};
   process.stdin.resume = () => {};
   process.stdin.pause = () => {};
+  if (rows !== undefined) process.stdout.rows = rows;
   process.stderr.write = (s) => { output.push(String(s)); return true; };
   try {
     const menuPromise = binOcmux.sessionMenu(sessions, current, {}, 'http://server', opts);
@@ -859,6 +861,7 @@ async function driveSessionMenu({ sessions, current, opts = {}, keys, stepDelay 
     process.stdin.resume = saved.resume;
     process.stdin.pause = saved.pause;
     process.stderr.write = saved.write;
+    if (saved.rows === undefined) delete process.stdout.rows; else process.stdout.rows = saved.rows;
     process.stdin.removeAllListeners('keypress');
   }
 }
@@ -1011,6 +1014,20 @@ describe('sessionMenu broadcast exit', () => {
       ['bc', []],
       ['inspect', 'sA'],
     ]);
+  });
+
+  it('scrolls the session help when it exceeds terminal height', async () => {
+    const { result, output } = await driveSessionMenu({
+      sessions, current: 'sA', rows: 8,
+      keys: [['h', 'h'], ['', 'down'], ['j', 'j'], ['', 'up'], ['k', 'k'], ['', 'escape'], ['q', 'q']],
+    });
+    assert.strictEqual(result, null);
+    const helpFrames = output.filter((o) => o.includes('ocmux session picker — help'));
+    assert.ok(helpFrames.length >= 5, 'expected redraws while scrolling help');
+    assert.ok(helpFrames.some((o) => o.includes('Space            start BROADCAST')),
+      'expected a scrolled frame to show commands below the initial viewport');
+    assert.ok(helpFrames.some((o) => o.includes('↑/k up · ↓/j down')),
+      'expected scroll navigation hints');
   });
 
   it('Ctrl+C fully exits from broadcast mode', async () => {

@@ -648,6 +648,7 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
     let runningBusy = false;
     let runningTimer = null;
     let sessionTimer = null;
+    let helpOffset = 0;
     // Answer mode ('A') state: the pending forms of the cursor session being
     // answered one at a time, the answers chosen so far and the flat item list.
     let answer = null;
@@ -726,31 +727,44 @@ function sessionMenu(sessions, currentSession, annotations, server, { onPick, on
         return;
       }
       if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
-        let out = '\x1b[2J\x1b[H';
+        let title;
+        let lines;
         if (mode === 'broadcast-help') {
-          out += 'ocmux broadcast mode — help\n\n';
-          out += '  Space            select/deselect the cursor session\n';
-          out += '  Enter            end broadcast (clear the selection); switch TUI to cursor\n';
-          out += '  m                switch the model for ALL selected sessions\n';
-          out += '  d                delete the cursor session (with confirmation)\n';
-          out += '  D (Shift+d)      delete ALL selected sessions (with confirmation)\n';
-          out += '  j / k, arrows    move the cursor (selecting shows it in the TUI)\n';
-          out += '  /                search/filter the session list\n';
-          out += '  ESC / q          cancel broadcast mode (back to the session list)\n';
-          out += '  Ctrl+C           quit ocmux\n';
+          title = 'ocmux broadcast mode — help';
+          lines = [
+            '  Space            select/deselect the cursor session',
+            '  Enter            end broadcast (clear the selection); switch TUI to cursor',
+            '  m                switch the model for ALL selected sessions',
+            '  d                delete the cursor session (with confirmation)',
+            '  D (Shift+d)      delete ALL selected sessions (with confirmation)',
+            '  j / k, arrows    move the cursor (selecting shows it in the TUI)',
+            '  /                search/filter the session list',
+            '  ESC / q          cancel broadcast mode (back to the session list)',
+            '  Ctrl+C           quit ocmux',
+          ];
         } else if (mode === 'list-help') {
-          out += `ocmux ${list && list.title ? list.title : 'list'} — help\n\n`;
-          out += '  j / k, arrows    move the cursor\n';
-          out += '  Enter / Space    select the highlighted item\n';
-          out += '  /                search/filter the list (Enter keeps, ESC clears)\n';
-          out += '  h                toggle this help\n';
-          out += '  ESC / q / Backspace   return to the previous menu\n';
-          out += '  Ctrl+C           quit ocmux\n';
+          title = `ocmux ${list && list.title ? list.title : 'list'} — help`;
+          lines = [
+            '  j / k, arrows    move the cursor',
+            '  Enter / Space    select the highlighted item',
+            '  /                search/filter the list (Enter keeps, ESC clears)',
+            '  h                toggle this help',
+            '  ESC / q / Backspace   return to the previous menu',
+            '  Ctrl+C           quit ocmux',
+          ];
         } else {
-          out += 'ocmux session picker — help\n\n';
-          for (const l of helpLines) out += '  ' + l + '\n';
+          title = 'ocmux session picker — help';
+          lines = helpLines.map((l) => '  ' + l);
         }
-        out += '\nPress any key to return.\n';
+        const rows = process.stdout.rows || 24;
+        const visibleCount = Math.max(1, rows - 4);
+        const maxOffset = Math.max(0, lines.length - visibleCount);
+        helpOffset = Math.min(helpOffset, maxOffset);
+        const visible = lines.slice(helpOffset, helpOffset + visibleCount);
+        let out = `\x1b[2J\x1b[H${title}\n\n${visible.join('\n')}\n\n`;
+        out += maxOffset > 0
+          ? `↑/k up · ↓/j down · any other key returns (${helpOffset + 1}-${Math.min(helpOffset + visibleCount, lines.length)}/${lines.length})\n`
+          : 'Press any key to return.\n';
         process.stderr.write(out);
         return;
       }
@@ -1526,6 +1540,18 @@ const toggleBroadcast = (idx) => {
         return finish(null);
       }
       if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help' || mode === 'answer-help' || mode === 'perm-help') {
+        if (mode === 'help' || mode === 'broadcast-help' || mode === 'list-help') {
+          const helpRows = process.stdout.rows || 24;
+          const helpVisible = Math.max(1, helpRows - 4);
+          const helpLineCount = mode === 'help' ? helpLines.length
+            : (mode === 'broadcast-help' ? 9 : 6);
+          if (helpLineCount > helpVisible && (key.name === 'up' || key.name === 'k' || key.name === 'down' || key.name === 'j')) {
+            const maxOffset = helpLineCount - helpVisible;
+            helpOffset = Math.max(0, Math.min(maxOffset, helpOffset + (key.name === 'up' || key.name === 'k' ? -1 : 1)));
+            draw();
+            return;
+          }
+        }
         mode = mode === 'broadcast-help' ? 'broadcast'
           : (mode === 'list-help' ? 'list'
             : (mode === 'answer-help' ? 'answer'
@@ -1605,6 +1631,7 @@ const toggleBroadcast = (idx) => {
           mode = returnMode;
           draw();
         } else if (key.name === 'h') {
+          helpOffset = 0;
           mode = 'list-help';
           draw();
         } else if (key.name === 'up' || str === 'k') {
@@ -1684,6 +1711,7 @@ const toggleBroadcast = (idx) => {
           restoreCurrent();
           draw();
         } else if (key.name === 'h') {
+          helpOffset = 0;
           mode = 'broadcast-help';
           draw();
         } else if (key.name === 'space') {
@@ -1734,6 +1762,7 @@ const toggleBroadcast = (idx) => {
       }
       if (key.name === 'p') return finish('switch-project');
       if (key.name === 'h') {
+        helpOffset = 0;
         mode = 'help';
         draw();
         return;
